@@ -25,6 +25,7 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../../../index';
 import { pushdownFailureError } from '../../../lib/connector-pushdown';
+import { SourceAdmissionRefusedError } from '../../../lib/source-admission';
 import {
   buildPublicPageModel,
   buildSitemapEntries,
@@ -35,6 +36,7 @@ import { querySqlImpl } from '../../../tools/admin/query_sql';
 import * as resolvePathModule from '../../../tools/resolve_path';
 import { ToolUserError } from '../../../utils/errors';
 import { getEnvFromProcess } from '../../../utils/env';
+import logger from '../../../utils/logger';
 import {
   getRateLimiter,
   RateLimitPresets,
@@ -281,6 +283,38 @@ describe('public pages > crawler-facing responses', () => {
       it('a database failure keeps its own code', async () => {
         const attributes = await serverSpanOf(() => withEntitiesUnavailable(requestPage));
         expect(attributes).toMatchObject({ 'exception.type': 'PostgresError', 'error.code': '42P01' });
+      });
+    });
+
+    describe('the error log of a refused render', () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('is the route\'s one dependency failure, not a second generic 5xx per page', async () => {
+        // The production shape: the source's admission queue was full.
+        vi.spyOn(resolvePathModule, 'resolvePath').mockRejectedValue(
+          pushdownFailureError(
+            new SourceAdmissionRefusedError('the source is busy', 4, 'refused_queue_full'),
+            'synthetic-source',
+            'query'
+          )
+        );
+        const errorLog = vi.spyOn(logger, 'error');
+        const wrapper = buildWrapperApp(env, null, app);
+        // Two distinct record pages: a crawler walks many of them at once.
+        for (const path of [liveEntitySlug, `/${org.slug}/city/porto`]) {
+          const response = await wrapper.request(path, { headers: { accept: 'text/html' } });
+          expect([response.status, response.headers.get('retry-after')]).toEqual([503, '4']);
+        }
+        const logged = errorLog.mock.calls.map(([fields, msg]) => ({
+          msg,
+          code: ((fields as { error?: ToolUserError }).error)?.code,
+        }));
+        expect(logged).toEqual([
+          { msg: '[public-pages] render failed', code: 'UPSTREAM_UNAVAILABLE' },
+          { msg: '[public-pages] render failed', code: 'UPSTREAM_UNAVAILABLE' },
+        ]);
       });
     });
   });

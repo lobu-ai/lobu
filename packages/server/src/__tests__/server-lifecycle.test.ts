@@ -580,6 +580,30 @@ describe("buildWrapperApp", () => {
 		}
 	});
 
+	it("names a bare 5xx by its route, not the requested path, and keeps the path as a field", async () => {
+		const { buildWrapperApp } = await import("../server-lifecycle");
+		const { default: logger } = await import("../utils/logger");
+		const { Hono } = await import("hono");
+		const captureMessage = logger.error as ReturnType<typeof vi.fn>;
+		const app = new Hono();
+		app.get("/records/:id", (c) => c.text("Temporarily unavailable", 503));
+		app.get("*", (c) => c.text("Temporarily unavailable", 503));
+		const wrapper = buildWrapperApp({} as never, app);
+		captureMessage.mockClear();
+		for (const path of ["/records/a%3A1", "/records/b%3A2", "/brand/q1", "/person/q2"]) {
+			expect((await wrapper.request(`/lobu${path}`)).status).toBe(503);
+		}
+		const logged = captureMessage.mock.calls
+			.filter(([record]) => record?.source === "http_response")
+			.map(([record, message]) => [message, record.path]);
+		expect(logged).toEqual([
+			["HTTP 503 from GET /lobu/records/:id", "/lobu/records/a%3A1"],
+			["HTTP 503 from GET /lobu/records/:id", "/lobu/records/b%3A2"],
+			["HTTP 503 from GET /lobu/*", "/lobu/brand/q1"],
+			["HTTP 503 from GET /lobu/*", "/lobu/person/q2"],
+		]);
+	});
+
 	it("answers a route that reached the closed database with the shutdown 503 and no error log", async () => {
 		const { buildWrapperApp } = await import("../server-lifecycle");
 		const { DbClosedError } = await import("../db/client");
