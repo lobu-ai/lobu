@@ -2,7 +2,9 @@
  * Shopify Connector (V1 runtime)
  *
  * Orders, products and inventory from a Shopify store via the GraphQL Admin
- * API. A workspace connects a store through the hosted Lobu Shopify app: the
+ * API. Orders, which carry buyer names and emails, are read live from Shopify
+ * and never stored, so a shop's redaction requests have nothing to erase here;
+ * products and inventory sync into memory. A workspace connects a store through the hosted Lobu Shopify app: the
  * gateway's generic install engine mounts `/shopify/install?shop=` +
  * `/shopify/oauth_callback` from the `app_installation` method below, exchanges
  * the code for an expiring offline token, and renews it gateway-side. Connector
@@ -15,6 +17,8 @@ import {
   ConnectorRuntime,
   type EventAttributionRule,
   type EventEnvelope,
+  type FeedReadContext,
+  type FeedReadResult,
   type RuntimeConnectorDefinition,
   type SyncContext,
   type SyncResult,
@@ -22,6 +26,8 @@ import {
 
 const API_VERSION = '2026-07';
 const PAGE_SIZE = 50;
+/** Shopify's connection page-size ceiling. */
+const MAX_READ_PAGE = 250;
 const MAX_PAGES_PER_RUN = 10;
 const SHOP_SUFFIX = '.myshopify.com';
 
@@ -60,12 +66,6 @@ interface ShopifyVariant {
   product: { id: string; legacyResourceId: string; title: string; vendor: string; status: string; handle: string };
 }
 
-interface OrdersCheckpoint {
-  updated_at_min?: string;
-  after?: string | null;
-  high_water?: string;
-}
-
 /**
  * `seen` maps each variant's legacy id to a short hash of its fingerprint as of
  * the last COMPLETE catalog walk; `walk` collects the same for the walk in
@@ -84,7 +84,7 @@ interface PageInfo {
 }
 
 const ORDERS_QUERY = `query Orders($first: Int!, $after: String, $query: String) {
-  orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
+  orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id legacyResourceId name createdAt processedAt updatedAt cancelledAt
@@ -108,34 +108,22 @@ const VARIANTS_QUERY = `query Variants($first: Int!, $after: String) {
   }
 }`;
 
-const ORDER_ATTRIBUTIONS: EventAttributionRule[] = [
-  {
-    role: 'about',
-    autoCreate: true,
-    target: {
-      entityType: 'order',
-      identities: [{ namespace: 'shopify_order', eventPath: 'metadata.order_key' }],
-      titlePath: 'metadata.entity_name',
-      createWhen: { path: 'metadata.order_key', exists: true },
-    },
-    // Traits use Shopify's own field names; a workspace maps them onto its own
-    // schema in its config, never here.
-    traits: {
-      name: { eventPath: 'metadata.name', mergeStrategy: 'init_only' },
-      processed_at: { eventPath: 'metadata.processed_at', mergeStrategy: 'init_only' },
-      currency: { eventPath: 'metadata.currency', mergeStrategy: 'overwrite' },
-      financial_status: { eventPath: 'metadata.financial_status', mergeStrategy: 'overwrite' },
-      fulfillment_status: { eventPath: 'metadata.fulfillment_status', mergeStrategy: 'overwrite' },
-      cancelled_at: { eventPath: 'metadata.cancelled_at', mergeStrategy: 'overwrite' },
-      subtotal: { eventPath: 'metadata.subtotal', mergeStrategy: 'overwrite' },
-      total_tax: { eventPath: 'metadata.total_tax', mergeStrategy: 'overwrite' },
-      total: { eventPath: 'metadata.total', mergeStrategy: 'overwrite' },
-      customer_name: { eventPath: 'metadata.customer_name', mergeStrategy: 'prefer_non_empty' },
-      customer_email: { eventPath: 'metadata.customer_email', mergeStrategy: 'prefer_non_empty' },
-      line_items: { eventPath: 'metadata.line_items', mergeStrategy: 'overwrite' },
-      admin_url: { eventPath: 'metadata.admin_url', mergeStrategy: 'init_only' },
-    },
-  },
+const ORDER_COLUMNS = [
+  { name: 'id', type: 'string' },
+  { name: 'name', type: 'string' },
+  { name: 'updated_at', type: 'timestamp' },
+  { name: 'processed_at', type: 'timestamp' },
+  { name: 'cancelled_at', type: 'timestamp' },
+  { name: 'financial_status', type: 'string' },
+  { name: 'fulfillment_status', type: 'string' },
+  { name: 'customer_name', type: 'string' },
+  { name: 'customer_email', type: 'string' },
+  { name: 'currency', type: 'string' },
+  { name: 'subtotal', type: 'number' },
+  { name: 'total_tax', type: 'number' },
+  { name: 'total', type: 'number' },
+  { name: 'line_items', type: 'json' },
+  { name: 'url', type: 'string' },
 ];
 
 const VARIANT_ATTRIBUTIONS: EventAttributionRule[] = [
@@ -164,8 +152,8 @@ export default class ShopifyConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'shopify',
     name: 'Shopify',
-    version: '1.0.0',
-    description: 'Orders, products and inventory from a Shopify store (GraphQL Admin API).',
+    version: '2.0.0',
+    description: 'Reads orders live and syncs products and inventory from a Shopify store (GraphQL Admin API).',
     faviconDomain: 'shopify.com',
     authSchema: {
       methods: [
@@ -196,7 +184,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
           webhookSecretKey: 'SHOPIFY_CLIENT_SECRET',
           permissions: ['read_orders', 'read_products', 'read_inventory', 'read_customers'],
           required: true,
-          description: 'Install the Lobu app on your Shopify store to sync orders, products and inventory.',
+          description: 'Install the Lobu app on your Shopify store to read orders and sync products and inventory.',
         },
       ],
     },
@@ -218,12 +206,10 @@ export default class ShopifyConnector extends ConnectorRuntime {
       orders: {
         key: 'orders',
         name: 'Orders',
-        description: 'Orders by last update; each order upserts an order record.',
+        description: 'Orders read live from Shopify, newest update first. Orders are never stored in memory.',
         configSchema: { type: 'object', properties: {} },
-        eventKinds: {
-          order: { description: 'A Shopify order, emitted on create and every update.', attributions: ORDER_ATTRIBUTIONS },
-        },
-        sync: (ctx) => this.syncOrders(ctx),
+        read: (ctx) => this.readOrders(ctx),
+        readWindowAxis: 'updated_at',
       },
       products: {
         key: 'products',
@@ -242,7 +228,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
   };
 
   /** The store host the install bound to this connection (`config.shop`). */
-  private shop(ctx: SyncContext): string {
+  private shop(ctx: Pick<SyncContext, 'config'>): string {
     const shop = String(ctx.config.shop ?? '')
       .trim()
       .toLowerCase();
@@ -258,7 +244,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
     return shop;
   }
 
-  private token(ctx: SyncContext): string {
+  private token(ctx: Pick<SyncContext, 'credentials'>): string {
     const token = ctx.credentials?.accessToken;
     if (!token) throw new Error('Shopify requires an installed Lobu Shopify app on this connection.');
     return token;
@@ -284,78 +270,79 @@ export default class ShopifyConnector extends ConnectorRuntime {
     return json.data;
   }
 
-  private async syncOrders(ctx: SyncContext): Promise<SyncResult> {
+  /**
+   * One page of orders straight from Shopify. Nothing is persisted: buyer data
+   * leaves Shopify only for the caller that asked.
+   */
+  private async readOrders(ctx: FeedReadContext): Promise<FeedReadResult> {
+    if (ctx.sort) throw new Error('Shopify orders are read newest update first; caller-defined sort is not supported.');
+    if ((ctx.offset ?? 0) > 0) throw new Error('Shopify orders paginate with the returned cursor, not an offset.');
     const shop = this.shop(ctx);
     const token = this.token(ctx);
-    const checkpoint = ctx.checkpoint as OrdersCheckpoint | null;
-    // One walk pages a fixed `updated_at >= since` query by cursor, so orders
-    // sharing an updatedAt second never stall it. The cursor is only valid for
-    // that query, so it is persisted together with `since`; the watermark moves
-    // to the highest updatedAt seen once the walk reaches its last page.
-    const since = checkpoint?.updated_at_min ?? '1970-01-01T00:00:00Z';
-    let after = checkpoint?.after ?? null;
-    let highWater = checkpoint?.high_water ?? since;
+    const first = Math.min(Math.max(Math.trunc(ctx.limit ?? PAGE_SIZE), 1), MAX_READ_PAGE);
 
-    for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
-      const data = await this.gql<{ orders: { pageInfo: PageInfo; nodes: ShopifyOrder[] } }>(
-        shop,
-        token,
-        ORDERS_QUERY,
-        { first: PAGE_SIZE, after, query: `updated_at:>='${since}'` }
-      );
-      const orders = data.orders.nodes;
-      const events: EventEnvelope[] = orders.map((o) => this.orderEvent(shop, o));
-      for (const o of orders) if (o.updatedAt > highWater) highWater = o.updatedAt;
-      const { hasNextPage, endCursor } = data.orders.pageInfo;
-      if (!hasNextPage || !endCursor) {
-        await ctx.commit(events, { updated_at_min: highWater });
-        return { status: 'complete' };
-      }
-      after = endCursor;
-      await ctx.commit(events, { updated_at_min: since, after, high_water: highWater });
+    // Shopify's search compares whole seconds, so the query widens the window
+    // to whole seconds and the rows are cut back to the exact [start, end).
+    const terms: string[] = [];
+    const window = ctx.window ? { start: Date.parse(ctx.window.start), end: Date.parse(ctx.window.end) } : null;
+    if (window) {
+      const second = (ms: number) => `${new Date(ms).toISOString().slice(0, 19)}Z`;
+      terms.push(`updated_at:>='${second(Math.floor(window.start / 1000) * 1000)}'`);
+      terms.push(`updated_at:<'${second(Math.ceil(window.end / 1000) * 1000)}'`);
     }
-    return { status: 'more' };
+    if (ctx.query?.trim()) terms.push(`(${ctx.query.trim()})`);
+
+    const data = await this.gql<{ orders: { pageInfo: PageInfo; nodes: ShopifyOrder[] } }>(shop, token, ORDERS_QUERY, {
+      first,
+      after: ctx.cursor ?? null,
+      query: terms.length ? terms.join(' AND ') : null,
+    });
+    const { pageInfo, nodes } = data.orders ?? {};
+    if (!Array.isArray(nodes) || typeof pageInfo?.hasNextPage !== 'boolean' || (pageInfo.hasNextPage && !pageInfo.endCursor)) {
+      throw new Error('Shopify did not return a valid page cursor/exhaustion state.');
+    }
+    let orders = nodes;
+    if (window) {
+      if (orders.some((o) => !Number.isFinite(Date.parse(o.updatedAt)))) {
+        throw new Error('Shopify returned an order without a valid updated timestamp.');
+      }
+      orders = orders.filter((o) => {
+        const at = Date.parse(o.updatedAt);
+        return at >= window.start && at < window.end;
+      });
+    }
+    const nextCursor = pageInfo.hasNextPage ? (pageInfo.endCursor ?? undefined) : undefined;
+    return {
+      rows: orders.map((o) => this.orderRow(shop, o)),
+      columns: ORDER_COLUMNS,
+      ...(ctx.window ? { window: { ...ctx.window, axis: 'updated_at' } } : {}),
+      nextCursor,
+      hasMore: Boolean(nextCursor),
+    };
   }
 
-  private orderEvent(shop: string, o: ShopifyOrder): EventEnvelope {
-    const buyer = o.customer?.displayName || '';
-    const total = Number(o.totalPriceSet.shopMoney.amount);
-    const currency = o.totalPriceSet.shopMoney.currencyCode;
-    const status = o.cancelledAt ? 'cancelled' : (o.displayFulfillmentStatus ?? 'unknown').toLowerCase();
-    const lines = o.lineItems.nodes.map((l) => ({
-      sku: l.sku,
-      name: l.name,
-      quantity: l.quantity,
-      unit_price: Number(l.originalUnitPriceSet.shopMoney.amount),
-    }));
-    const adminUrl = `https://${shop}/admin/orders/${o.legacyResourceId}`;
+  private orderRow(shop: string, o: ShopifyOrder): Record<string, unknown> {
     return {
-      origin_id: o.id,
-      origin_type: 'order',
-      title: `Shopify ${o.name} · ${total.toFixed(2)} ${currency}${buyer ? ` · ${buyer}` : ''}`,
-      payload_text: [
-        `Shopify order ${o.name} (${status}, payment ${o.displayFinancialStatus ?? 'unknown'}) — ${total.toFixed(2)} ${currency}${buyer ? ` from ${buyer}` : ''}.`,
-        ...lines.map((l) => `${l.quantity} × ${l.name}${l.sku ? ` [${l.sku}]` : ''} @ ${l.unit_price.toFixed(2)}`),
-      ].join('\n'),
-      source_url: adminUrl,
-      occurred_at: new Date(o.updatedAt),
-      metadata: {
-        order_key: `${shop}/${o.legacyResourceId}`,
-        entity_name: `${o.name} - ${buyer || 'Shopify customer'}`,
-        name: o.name,
-        processed_at: o.processedAt ?? o.createdAt,
-        currency,
-        financial_status: o.displayFinancialStatus,
-        fulfillment_status: o.displayFulfillmentStatus,
-        cancelled_at: o.cancelledAt,
-        subtotal: Number(o.subtotalPriceSet.shopMoney.amount),
-        total_tax: Number(o.totalTaxSet.shopMoney.amount),
-        total,
-        customer_name: buyer,
-        customer_email: o.customer?.email ?? o.email ?? '',
-        line_items: lines,
-        admin_url: adminUrl,
-      },
+      id: o.id,
+      name: o.name,
+      updated_at: o.updatedAt,
+      processed_at: o.processedAt ?? o.createdAt,
+      cancelled_at: o.cancelledAt,
+      financial_status: o.displayFinancialStatus,
+      fulfillment_status: o.displayFulfillmentStatus,
+      customer_name: o.customer?.displayName ?? '',
+      customer_email: o.customer?.email ?? o.email ?? '',
+      currency: o.totalPriceSet.shopMoney.currencyCode,
+      subtotal: Number(o.subtotalPriceSet.shopMoney.amount),
+      total_tax: Number(o.totalTaxSet.shopMoney.amount),
+      total: Number(o.totalPriceSet.shopMoney.amount),
+      line_items: o.lineItems.nodes.map((l) => ({
+        sku: l.sku,
+        name: l.name,
+        quantity: l.quantity,
+        unit_price: Number(l.originalUnitPriceSet.shopMoney.amount),
+      })),
+      url: `https://${shop}/admin/orders/${o.legacyResourceId}`,
     };
   }
 
