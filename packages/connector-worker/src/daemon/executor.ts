@@ -655,6 +655,18 @@ async function executeActionRun(
 
     if (monitor.revoked()) return { itemsCollected: 0 };
     terminalPayloadStarted = true;
+    if (result.error !== undefined) {
+      // The action refused: keep what it reported (a refusal code) with the failure.
+      await completeActionOnce(client, {
+        run_id,
+        worker_id: client.id,
+        status: 'failed',
+        error_message: result.error,
+        ...(Object.keys(actionOutput).length > 0 ? { action_output: actionOutput } : {}),
+      });
+      log.info(`[executor] Action run ${run_id} failed: ${result.error}`);
+      return { itemsCollected: 0, error: result.error };
+    }
     await completeActionOnce(client, {
       run_id,
       worker_id: client.id,

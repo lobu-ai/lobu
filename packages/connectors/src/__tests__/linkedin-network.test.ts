@@ -38,7 +38,7 @@ function linkedIn(
     company?: { following: boolean };
     sentTotal?: number;
     /** Accounts without an overflow menu see the relationship control in the header itself. */
-    header?: "menu" | "buttons" | "unrecognized";
+    header?: "menu" | "buttons" | "unrecognized" | "popup";
   } = {}
 ) {
   const world = {
@@ -144,6 +144,26 @@ function linkedIn(
 <a href="#" aria-label="Share Ada Example's profile"></a>`;
       return;
     }
+    if (options.header === "popup") {
+      // A recognizable header whose Connect option sits behind a menu button
+      // the connector does not know.
+      top.innerHTML = `
+<h2>Ada Example</h2>
+<span>· 2nd</span>
+<button aria-label="Follow Ada Example">Follow</button>
+<button aria-expanded="false" aria-haspopup="menu">Get in touch</button>`;
+      const opener = top.querySelector<HTMLElement>("[aria-haspopup]")!;
+      opener.onclick = () => {
+        world.foreignClicks.push("Get in touch");
+        doc.body.append(
+          html(
+            `<div role="menu"><a role="menuitem" href="${INVITE}"><div aria-label="Invite Ada Example to connect">Connect</div></a></div>`
+          )
+        );
+        opener.setAttribute("aria-expanded", "true");
+      };
+      return;
+    }
     if (options.header === "buttons") {
       const action =
         page.relation === "none"
@@ -155,7 +175,8 @@ function linkedIn(
 <h2>Ada Example</h2>
 <span>· ${page.relation === "connected" ? "1st" : "2nd"}</span>
 ${action}
-<button>Message</button>`;
+<button>Message</button>
+<button aria-expanded="false">…see more</button>`;
       on(top, "a", () => world.foreignClicks.push("Connect header link"));
       on(top, '[aria-label^="Pending"]', () =>
         confirmDialog("Withdraw", () => {
@@ -465,6 +486,14 @@ test(
     const refused = await closed.run("send_connection_request", { profile_url: PROFILE });
     expect(refused).toMatchObject({ success: false, output: { code: "not_connectable" } });
     expect(closed.tabsClosed()).toBe(true);
+
+    // A disclosure toggle in the header is not a menu that could hide Connect.
+    const toggled = linkedIn({ relation: "unavailable" }, { header: "buttons" });
+    expect(await toggled.run("send_connection_request", { profile_url: PROFILE })).toMatchObject({
+      success: false,
+      output: { code: "not_connectable" },
+    });
+    expect(toggled.world.foreignClicks).toEqual([]);
   },
   SLOW
 );
@@ -558,9 +587,9 @@ test(
   async () => {
     const li = linkedIn({}, { header: "unrecognized" });
     const result = await li.run("send_connection_request", { profile_url: PROFILE });
-    expect(result.success).toBe(false);
+    expect(result).toMatchObject({ success: false, output: { code: "page_unrecognized" } });
     expect(result.error).toContain(
-      'LinkedIn connect failed: LinkedIn profile header was not found; the page shows "Get in touch'
+      'LinkedIn profile header was not found; the page shows "Get in touch'
     );
     // One quoted value: error grouping replaces it, so every page layout
     // groups under one message.
@@ -570,6 +599,22 @@ test(
     expect(result.error).not.toContain("Acme");
     expect(result.error).not.toContain("Grace");
     expect(li.world.invitationsSent).toBe(0);
+    expect(li.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "says the page is unrecognized instead of not connectable when Connect may sit behind an unknown menu",
+  async () => {
+    const li = linkedIn({}, { header: "popup" });
+    const result = await li.run("send_connection_request", { profile_url: PROFILE });
+    expect(result).toMatchObject({ success: false, output: { code: "page_unrecognized" } });
+    expect(result.error).toContain('menu the connector does not know: "Get in touch"');
+    expect(result.error).not.toContain("only accept followers");
+    expect(result.error).not.toContain("Ada");
+    expect(li.world.invitationsSent).toBe(0);
+    expect(li.world.foreignClicks).toEqual([]);
     expect(li.tabsClosed()).toBe(true);
   },
   SLOW

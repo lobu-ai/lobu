@@ -253,6 +253,34 @@ as the `run_sdk` result's `error.details`, and a background run's
 `operations.getRun` returns the same `output`), then answer with the
 connection's `handle_dialog` operation. An unanswered dialog is handed to the user after two minutes.
 
+### Recovering a broken browser connector
+
+A browser connector that finds a page laid out differently from what it knows,
+before it has clicked anything, fails with `output.code: "page_unrecognized"`.
+Nothing changed on the site, so do not retry it. When that run is recorded,
+the failed result's `next_action` says you may finish the same action once
+yourself through the workspace's `chrome` connection, if you can use it: open
+the same target, check the signed-in account and that it is the right person or
+item, act, then reload and confirm the result. Chrome operations keep their own
+approval policy. Any other failure keeps you off raw browser steps unless the
+user agrees: a business refusal (`not_connectable`, a limit), a login or
+challenge page, an offline browser, and a cancelled, rejected or pending run are
+not layout problems.
+
+Then report it so the connector gets fixed, with the run ID, the
+`failure_fingerprint`, and the controls you used by their visible labels in
+`data.diagnosis.checked` (never the names of the people involved).
+
+If the connector is one your workspace installed from its own source and you
+are a workspace owner or admin, you may also fix it: read it with
+`client.connections.getConnectorSource`, patch the page logic and bump the
+version, check it with `validateConnectorSource`, install it with
+`updateConnectorSource` (pass `expected_version`), test it once on the same
+target, and `rollbackConnectorVersion` if it got worse. Ask the user before
+changing a connector others depend on. A Lobu-bundled connector cannot be
+patched this way: on Lobu Cloud it always runs the shipped code, so report it
+instead.
+
 To test a configured feed without writing ingested data, discover the current
 feed methods with `search_sdk`, then use `client.feeds.trigger({ feed_id, dry_run: true })`
 through `run_sdk` or `lobu call run_sdk` (with a `title` arg). Inspect `client.feeds.get({ feed_id })`

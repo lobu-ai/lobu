@@ -161,6 +161,25 @@ describe('executor heartbeats (lobu#860)', () => {
     expect(intervalsEverScheduledMs).toContain(30_000);
   });
 
+  test('a connector refusal completes the run as failed and keeps what it reported', async () => {
+    const client = makeStubClient();
+    const complete = spyOn(client, 'completeAction');
+    executeCompiledConnectorMock.mockImplementationOnce(async () => ({
+      mode: 'action',
+      output: { code: 'page_unrecognized' },
+      error: 'LinkedIn profile header was not found',
+    }));
+    const result = await executeRun(client as any, { run_id: 105, run_type: 'action', connector_key: 'fake', action_key: 'run', compiled_code: 'compiled-code' } as any, {} as any, { executor: { execute: executeCompiledConnectorMock } });
+    expect(result.error).toBe('LinkedIn profile header was not found');
+    expect(complete.mock.calls).toEqual([[{
+      run_id: 105,
+      worker_id: client.id,
+      status: 'failed',
+      error_message: 'LinkedIn profile header was not found',
+      action_output: { code: 'page_unrecognized' },
+    }]]);
+  });
+
   // The daemon routes from its own registry, so a connector it implements never
   // reaches the compiled path — including when a payload contradicts itself by
   // carrying code for one.

@@ -34,6 +34,8 @@ interface LocalActionBackendConfig {
   actionKey: string;
   /** The action's `outputFiles` declaration (see the connector SDK's ActionDefinition). */
   outputFiles?: 'source-copy';
+  /** The connector declares a browser: its actions drive a paired Chrome. */
+  browser?: true;
 }
 
 /**

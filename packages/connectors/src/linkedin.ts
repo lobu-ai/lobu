@@ -3191,7 +3191,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, manage your network (connection requests, follows), and prepare message, post, or comment drafts for human submission.",
-    version: "3.25.1",
+    version: "3.26.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -3507,7 +3507,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "Send connection request",
         kind: "write",
         description:
-          `Send a LinkedIn connection request to one member, with an optional note, and verify it is pending after reload. A member already connected or with a pending request is unchanged. Refuses when LinkedIn offers no Connect option (code not_connectable), asks for the member's email and none was given (email_required), or reports its own invitation limit (invitation_limit_reached), and stops at ${DAILY_CONNECTION_REQUEST_LIMIT} requests per account per UTC day from one browser (daily_limit_reached). Choosing whom to invite belongs to the calling Automation or agent.`,
+          `Send a LinkedIn connection request to one member, with an optional note, and verify it is pending after reload. A member already connected or with a pending request is unchanged. Refuses when LinkedIn offers no Connect option (code not_connectable), asks for the member's email and none was given (email_required), reports its own invitation limit (invitation_limit_reached), or shows a page this connector does not recognize (page_unrecognized, found before anything was clicked), and stops at ${DAILY_CONNECTION_REQUEST_LIMIT} requests per account per UTC day from one browser (daily_limit_reached). Choosing whom to invite belongs to the calling Automation or agent.`,
         annotations: {
           openWorldHint: true,
           destructiveHint: false,

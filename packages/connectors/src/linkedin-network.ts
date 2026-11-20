@@ -102,6 +102,10 @@ export function buildLinkedInNetworkExpression(
     const shown = el => !!el && el.getClientRects().length > 0;
     const text = el => (el && (el.innerText || el.textContent) || '').trim();
     const refuse = (refused, message) => ({ refused, message });
+    // The page is not laid out the way this connector knows, found before it
+    // acted. Reported as page_unrecognized, the one failure an agent may finish
+    // by hand in the browser.
+    const unrecognized = message => Object.assign(new Error(message), { unrecognized: true });
     const wait = async (read, message, tries = 40) => {
       for (let i = 0; i < tries; i++) {
         const value = read();
@@ -110,6 +114,11 @@ export function buildLinkedInNetworkExpression(
       }
       if (message) throw new Error(message);
       return null;
+    };
+    const waitFor = async (read, message, tries) => {
+      const value = await wait(read, null, tries);
+      if (!value) throw unrecognized(message);
+      return value;
     };
     const decoded = value => { try { return decodeURIComponent(value); } catch { return value; } };
     const pathOf = value => {
@@ -208,7 +217,7 @@ export function buildLinkedInNetworkExpression(
       while (card && !isProfileCard(card, name)) card = card.parentElement;
       if (!card) return null;
       const more = moreButtons(card);
-      if (more.length > 1) throw new Error('LinkedIn profile menu is ambiguous');
+      if (more.length > 1) throw unrecognized('LinkedIn profile menu is ambiguous');
       const lines = text(card).split('\n').map(line => line.trim());
       const badge = lines.find(line => line === '· 1st' || line === '· 2nd' || line.startsWith('· 3rd'));
       return { card, name, more: more[0] || null, degree: badge ? badge.slice(2) : null };
@@ -227,7 +236,7 @@ export function buildLinkedInNetworkExpression(
     const openMenu = async more => {
       if (!more) return null;
       if (more.getAttribute('aria-expanded') !== 'true') more.click();
-      return wait(() => document.querySelectorAll('[role="menu"]').length
+      return waitFor(() => document.querySelectorAll('[role="menu"]').length
         ? [...document.querySelectorAll('[role="menu"]')].filter(shown)[0] : null,
         'LinkedIn profile menu did not open');
     };
@@ -241,7 +250,7 @@ export function buildLinkedInNetworkExpression(
       assertPage();
       const top = await wait(profileCard, null);
       if (!top)
-        throw new Error('LinkedIn profile header was not found; the page shows ' + quoted(controlsSeen()));
+        throw unrecognized('LinkedIn profile header was not found; the page shows ' + quoted(controlsSeen()));
       const menu = await openMenu(top.more);
       const menuItems = menu ? labelled(menu) : [];
       const els = [...labelled(top.card), ...menuItems];
@@ -256,14 +265,21 @@ export function buildLinkedInNetworkExpression(
         pending: one('Pending, click to withdraw invitation sent to ' + top.name),
         remove: menuItems.filter(el => el.getAttribute('aria-label') === 'Remove connection')[0] || null,
       };
-      if (controls.follow && controls.unfollow) throw new Error('LinkedIn follow state is ambiguous');
+      if (controls.follow && controls.unfollow) throw unrecognized('LinkedIn follow state is ambiguous');
       if ([controls.invite, controls.pending, controls.remove].filter(Boolean).length > 1)
-        throw new Error('LinkedIn connection state is ambiguous');
+        throw unrecognized('LinkedIn connection state is ambiguous');
       const relation = controls.pending ? 'pending'
         : controls.remove || top.degree === '1st' ? 'connected'
         : controls.invite ? 'none' : 'unavailable';
       const following = controls.follow ? false : controls.unfollow ? true : null;
-      return { top, controls, state: { name: top.name, relation, degree: top.degree, following } };
+      // Menus in the header other than the More menu were never opened, so a
+      // Connect option behind one would go unseen. Only popup openers count: a
+      // disclosure toggle (aria-expanded alone, such as "see more") hides no
+      // actions.
+      const unknownMenus = [...top.card.querySelectorAll('[aria-haspopup]:not([aria-haspopup="false"])')]
+        .filter(el => shown(el) && !(top.more && (el === top.more || el.contains(top.more) || top.more.contains(el))))
+        .map(text).filter(Boolean);
+      return { top, controls, unknownMenus, state: { name: top.name, relation, degree: top.degree, following } };
     };
 
     // ── Company page ────────────────────────────────────────────
@@ -278,11 +294,11 @@ export function buildLinkedInNetworkExpression(
           return { name, follow, unfollow };
         }).filter(match => match.name && (match.follow || match.unfollow));
         // Suggested pages carry their own names, so only the page's heading matches.
-        if (found.length > 1) throw new Error('LinkedIn company header is ambiguous');
+        if (found.length > 1) throw unrecognized('LinkedIn company header is ambiguous');
         return found[0] || null;
       };
-      const found = await wait(read, 'LinkedIn company follow control was not found');
-      if (found.follow && found.unfollow) throw new Error('LinkedIn follow state is ambiguous');
+      const found = await waitFor(read, 'LinkedIn company follow control was not found');
+      if (found.follow && found.unfollow) throw unrecognized('LinkedIn follow state is ambiguous');
       return { controls: found, state: { name: found.name, following: !found.follow } };
     };
 
@@ -307,13 +323,14 @@ export function buildLinkedInNetworkExpression(
       ? refuse('daily_limit_reached', 'Already sent ' + sentToday() + ' connection requests today from this browser (limit ' + req.daily_limit + '); try again tomorrow')
       : null;
 
+    try {
     if (req.op === 'invite') {
       assertPage();
       await assertAccount();
       const limited = dailyLimit();
       if (limited) return limited;
       if (!navigator.locks) throw new Error('This browser cannot count connection requests safely');
-      const dialog = await wait(() => dialogs()[0] || null, 'LinkedIn invitation dialog did not open', 50);
+      const dialog = await waitFor(() => dialogs()[0] || null, 'LinkedIn invitation dialog did not open', 50);
       const sendBare = buttonNamed(dialog, ['Send without a note'])[0];
       const addNote = buttonNamed(dialog, ['Add a note'])[0];
       if (!sendBare && !addNote && !buttonNamed(dialog, ['Send invitation'])[0]) {
@@ -340,11 +357,11 @@ export function buildLinkedInNetworkExpression(
       let send = sendBare;
       if (req.note) {
         if (addNote) addNote.click();
-        const note = await wait(() => [...document.querySelectorAll('textarea[name="message"]')].filter(shown)[0] || null, 'LinkedIn note field did not open');
+        const note = await waitFor(() => [...document.querySelectorAll('textarea[name="message"]')].filter(shown)[0] || null, 'LinkedIn note field did not open');
         setValue(note, req.note);
-        send = await wait(() => buttonNamed(document, ['Send invitation'])[0] || null, 'LinkedIn send button was not found');
+        send = await waitFor(() => buttonNamed(document, ['Send invitation'])[0] || null, 'LinkedIn send button was not found');
       }
-      if (!send) throw new Error('LinkedIn send button was not found');
+      if (!send) throw unrecognized('LinkedIn send button was not found');
       await wait(() => enabled(send), 'LinkedIn kept the send button disabled');
       // Reserve the request under a lock shared by every tab of this browser, so
       // concurrent sends cannot pass the cap together. The reservation is made
@@ -432,7 +449,7 @@ export function buildLinkedInNetworkExpression(
       return shows(async () => (await companyState()).state, now => now.following === req.following);
     }
 
-    const { top, controls, state } = await profileState();
+    const { top, controls, unknownMenus, state } = await profileState();
     const done = changed => closeMenu(top.more).then(() => ({ ...state, changed }));
     const profileNow = async () => {
       const now = await profileState();
@@ -443,7 +460,7 @@ export function buildLinkedInNetworkExpression(
     await assertAccount();
 
     if (req.op === 'follow') {
-      if (state.following === null) throw new Error('LinkedIn shows no follow control for this member');
+      if (state.following === null) throw unrecognized('LinkedIn shows no follow control for this member');
       if (state.following === req.following) return done(false);
       click(req.following ? controls.follow : controls.unfollow);
       if (!req.following) await confirm(['Unfollow']);
@@ -459,7 +476,7 @@ export function buildLinkedInNetworkExpression(
 
     if (req.op === 'remove') {
       if (state.relation !== 'connected') return done(false);
-      if (!controls.remove) throw new Error('LinkedIn shows no Remove connection option for this member');
+      if (!controls.remove) throw unrecognized('LinkedIn shows no Remove connection option for this member');
       click(controls.remove);
       await confirm(['Remove', 'Remove connection']);
       return shows(profileNow, now => now.relation !== 'connected');
@@ -468,6 +485,8 @@ export function buildLinkedInNetworkExpression(
     // connect
     if (state.relation !== 'none') {
       await closeMenu(top.more);
+      if (state.relation === 'unavailable' && unknownMenus.length)
+        return refuse('page_unrecognized', 'LinkedIn shows no Connect option where the connector looks, but the profile header has a menu the connector does not know: ' + quoted(unknownMenus.join(' · ')));
       if (state.relation === 'unavailable')
         return refuse('not_connectable', 'LinkedIn offers no Connect option for ' + state.name + '; they may only accept followers or invitations from people who know their email');
       return { ...state, changed: false };
@@ -481,9 +500,15 @@ export function buildLinkedInNetworkExpression(
     // so the connector opens the route itself and sends from there.
     const link = controls.invite.closest('a[href]');
     if (!link || !link.href.startsWith('https://www.linkedin.com/preload/custom-invite/'))
-      throw new Error('LinkedIn Connect option has no invitation link');
+      throw unrecognized('LinkedIn Connect option has no invitation link');
     await closeMenu(top.more);
     return { ...state, changed: false, invite_url: link.href };
+    } catch (error) {
+      // The read after a write and the invitation list report the error as is.
+      if (error && error.unrecognized && req.op !== 'read' && req.op !== 'list')
+        return refuse('page_unrecognized', error.message);
+      throw error;
+    }
   })()`;
 }
 

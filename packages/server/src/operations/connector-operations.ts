@@ -539,6 +539,7 @@ function getLocalActionOperations(
 				backend: "local_action",
 				actionKey: key,
 				...(outputFiles ? { outputFiles } : {}),
+				...(hasBrowser ? { browser: true as const } : {}),
 			},
 		};
 	});

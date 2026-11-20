@@ -296,8 +296,9 @@ const GUEST_RUNNER = String.raw`
         credentials: job.credentials,
         config: mergedConfig
       });
-      if (!actionResult || !actionResult.success) {
-        throw new Error((actionResult && actionResult.error) || ("Action '" + job.actionKey + "' failed"));
+      if (!actionResult) throw new Error("Action '" + job.actionKey + "' failed");
+      if (!actionResult.success) {
+        return { mode: 'action', output: actionResult.output || {}, error: actionResult.error || ("Action '" + job.actionKey + "' failed") };
       }
       return { mode: 'action', output: actionResult.output || {} };
     }
@@ -1330,6 +1331,11 @@ export class IsolateExecutor implements SyncExecutor {
       if (!outcome.ok) throw this.guestError(outcome.error ?? {}, redactedTail());
       if (!outcome.result || outcome.result.mode !== job.mode) {
         throw new Error(`result: expected mode '${job.mode}', got '${String(outcome.result?.mode)}'`);
+      }
+      // A refusal's message is connector text, often an upstream body: redact it
+      // the way guestError redacts a thrown one.
+      if (outcome.result.mode === 'action' && typeof outcome.result.error === 'string') {
+        return { ...outcome.result, error: redactOutput(outcome.result.error) };
       }
       return outcome.result;
     } finally {
