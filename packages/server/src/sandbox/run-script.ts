@@ -285,6 +285,32 @@ function traceArgs(args: unknown[]): unknown[] {
 	return JSON.parse(json) as unknown[];
 }
 
+const ISSUE_FINGERPRINT = /^[0-9a-f]{32}$/;
+
+/**
+ * The host-generated keys of a failed run, kept when its details are too large
+ * to send: the caller still gets the run to inspect, and telemetry still knows
+ * the failure was already recorded.
+ */
+function failedRunIdentity(value: unknown): {
+	run_id?: number;
+	failure_fingerprint?: string;
+} {
+	if (value === null || typeof value !== "object") return {};
+	const { run_id: runId, failure_fingerprint: fingerprint } = value as Record<
+		string,
+		unknown
+	>;
+	return {
+		...(typeof runId === "number" && Number.isSafeInteger(runId)
+			? { run_id: runId }
+			: {}),
+		...(typeof fingerprint === "string" && ISSUE_FINGERPRINT.test(fingerprint)
+			? { failure_fingerprint: fingerprint }
+			: {}),
+	};
+}
+
 export function safeErrorDetails(value: unknown): unknown {
 	try {
 		const redacted = redactTraceValue(value);
@@ -302,6 +328,7 @@ export function safeErrorDetails(value: unknown): unknown {
 			truncated: true,
 			bytes: Buffer.byteLength(json, "utf8"),
 			message: "Structured SDK error details exceeded the transport limit.",
+			...failedRunIdentity(redacted),
 		};
 	} catch {
 		return {
@@ -596,8 +623,6 @@ export function scriptFailureTelemetry(error: object): {
 	};
 }
 
-const ISSUE_FINGERPRINT = /^[0-9a-f]{32}$/;
-
 /**
  * The issue a failed script's operation already opened, if any. A failed
  * operations.execute reports `failure_fingerprint` only when its terminal
@@ -607,19 +632,16 @@ const ISSUE_FINGERPRINT = /^[0-9a-f]{32}$/;
 export function recordedOperationFailure(
 	error: object,
 ): { fingerprint: string; runId?: number } | null {
-	if (!("name" in error) || error.name !== "ClientSdkActionError") return null;
-	const details = "details" in error ? error.details : undefined;
-	if (details === null || typeof details !== "object") return null;
-	const { failure_fingerprint: fingerprint, run_id: runId } = details as Record<
-		string,
-		unknown
-	>;
-	if (typeof fingerprint !== "string" || !ISSUE_FINGERPRINT.test(fingerprint))
+	const record = error as Record<string, unknown>;
+	// Only a host-raised error carries a trusted code; a script that throws its
+	// own ClientSdkActionError has none and is recorded as its own failure.
+	if (record.name !== "ClientSdkActionError" || typeof record.code !== "string")
 		return null;
-	return {
-		fingerprint,
-		...(typeof runId === "number" && Number.isSafeInteger(runId) ? { runId } : {}),
-	};
+	const { run_id: runId, failure_fingerprint: fingerprint } = failedRunIdentity(
+		record.details,
+	);
+	if (!fingerprint) return null;
+	return { fingerprint, ...(runId !== undefined ? { runId } : {}) };
 }
 
 /** The public error for a runtime failure the host itself determined. */
