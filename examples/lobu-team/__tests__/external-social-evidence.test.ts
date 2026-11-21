@@ -780,7 +780,80 @@ test("browser snapshot accepts label whitespace, returns full text and rejects h
         account_path: "/synthetic",
         page_path: "/home",
       })
-    ).toThrow("visible");
+    ).toThrow(
+      "Timeline page could not be verified: tab_not_visible; call focus_tab"
+    );
+  } finally {
+    root.document = originalDocument;
+    root.location = originalLocation;
+  }
+});
+
+test("timeline refusal names the first failed check without quoting the account", () => {
+  const root = globalThis as any;
+  const originalDocument = root.document;
+  const originalLocation = root.location;
+  const refusal = (options: Parameters<typeof readSocialTimelinePage>[0]) => {
+    try {
+      readSocialTimelinePage(options);
+    } catch (error) {
+      return (error as Error).message;
+    }
+    return "no refusal";
+  };
+  const x = {
+    platform: "x" as const,
+    account_path: "/secret-handle",
+    page_path: "/home",
+  };
+  const company = {
+    platform: "linkedin" as const,
+    account_path: "",
+    page_path: "/company/secret-co/admin/feed/",
+    company_name: "SecretCo",
+  };
+  try {
+    root.document = {
+      visibilityState: "visible",
+      title: "",
+      body: { innerText: "" },
+      querySelector: () => ({ getAttribute: () => "/secret-handle" }),
+      querySelectorAll: () => [
+        { innerText: "Following", getAttribute: () => "true" },
+      ],
+    };
+    root.location = { origin: "https://x.com", pathname: "/home" };
+    root.document.querySelector = () => ({
+      getAttribute: () => "/someone-else",
+    });
+    expect(refusal(x)).toContain(": wrong_account;");
+    root.document.querySelector = () => ({
+      getAttribute: () => "/secret-handle",
+    });
+    root.document.querySelectorAll = () => [
+      { innerText: "For you", getAttribute: () => "true" },
+    ];
+    expect(refusal(x)).toContain(": following_tab_not_selected;");
+    root.location = { origin: "https://x.com", pathname: "/explore" };
+    expect(refusal(x)).toContain(": wrong_page;");
+
+    root.location = {
+      origin: "https://www.linkedin.com",
+      pathname: company.page_path,
+    };
+    root.document.title = "Feed | LinkedIn";
+    expect(refusal(company)).toContain(": not_company_admin_view;");
+    root.document.title = "SecretCo: Company Page Admin | LinkedIn";
+    expect(refusal(company)).toContain(": not_acting_as_company;");
+    expect(refusal({ ...company, company_name: undefined })).toContain(
+      ": company_name_missing;"
+    );
+    root.location = { origin: "https://x.com", pathname: company.page_path };
+    const wrongSite = refusal(company);
+    expect(wrongSite).toContain(": wrong_site;");
+    for (const message of [wrongSite, refusal(x)]) {
+      expect(message).not.toMatch(/secret/i);
+    }
   } finally {
     root.document = originalDocument;
     root.location = originalLocation;

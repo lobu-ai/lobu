@@ -237,4 +237,35 @@ describe("SDK script failure telemetry", () => {
       await shutdownTracing();
     }
   });
+
+  it.each([
+    [{ run_id: 42, error_message: "Timeline page could not be verified", failure_fingerprint: "f508cc529c8dbb2ee6684a2fd44b7182" }, true],
+    [{ run_id: 42, error_message: "Timeline page could not be verified" }, false],
+    [{ run_id: 42, failure_fingerprint: "not-a-fingerprint" }, false],
+  ])("links an operation failure its run already recorded instead of recording it again (%j)", async (details, recorded) => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: "sdk-script-span-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const tool = getTool("run_sdk");
+    if (!tool) throw new Error("run_sdk is not registered");
+    const report = { success: false, error: { name: "ClientSdkActionError", message: "Timeline page could not be verified", code: "INTERNAL", details } };
+    const handler = spyOn(tool, "handler").mockResolvedValue(report);
+    try {
+      expect(await executeTool("run_sdk", { script: "export default async () => 1" }, {} as never, baseAuth)).toEqual(report);
+      const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === "tool run_sdk");
+      if (recorded) {
+        expect(span?.status.code).toBe(SpanStatusCode.UNSET);
+        expect(span?.attributes["error.fingerprint"]).toBeUndefined();
+        expect(span?.events.some((event) => event.name === "exception")).toBe(false);
+        expect(span?.attributes).toMatchObject({ "lobu.failure_recorded_as": details.failure_fingerprint, "lobu.run_id": 42 });
+      } else {
+        expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span?.attributes["error.fingerprint"]).toEqual(expect.any(String));
+        expect(span?.attributes["lobu.failure_recorded_as"]).toBeUndefined();
+      }
+    } finally {
+      handler.mockRestore();
+      await shutdownTracing();
+    }
+  });
 });

@@ -596,6 +596,32 @@ export function scriptFailureTelemetry(error: object): {
 	};
 }
 
+const ISSUE_FINGERPRINT = /^[0-9a-f]{32}$/;
+
+/**
+ * The issue a failed script's operation already opened, if any. A failed
+ * operations.execute reports `failure_fingerprint` only when its terminal
+ * write recorded the failure, so the script's tool span links to that issue
+ * instead of recording the same failure a second time under its own scope.
+ */
+export function recordedOperationFailure(
+	error: object,
+): { fingerprint: string; runId?: number } | null {
+	if (!("name" in error) || error.name !== "ClientSdkActionError") return null;
+	const details = "details" in error ? error.details : undefined;
+	if (details === null || typeof details !== "object") return null;
+	const { failure_fingerprint: fingerprint, run_id: runId } = details as Record<
+		string,
+		unknown
+	>;
+	if (typeof fingerprint !== "string" || !ISSUE_FINGERPRINT.test(fingerprint))
+		return null;
+	return {
+		fingerprint,
+		...(typeof runId === "number" && Number.isSafeInteger(runId) ? { runId } : {}),
+	};
+}
+
 /** The public error for a runtime failure the host itself determined. */
 function runtimeFailureError(
 	failure: Pick<SandboxRuntimeFailure, "reason" | "message">,
