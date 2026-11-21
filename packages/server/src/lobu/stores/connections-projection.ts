@@ -16,6 +16,7 @@ import type { StoredConnection } from "@lobu/core";
 import { createLogger } from "@lobu/core";
 import { type DbClient, type DbQuery, tsTime } from "../../db/client";
 import { deleteConnectionAclRow } from "../../authz/acl-observability";
+import { settleConnectionHolds } from "../../operations/settle-connection-holds";
 import {
   lockOrganizationForRelationshipClaims,
   retractConnectionRelationshipClaims,
@@ -354,6 +355,7 @@ export async function upsertChatConnectionProjection(
         for (const retired of supersededEnterprise as Array<{
           id: string;
         }>) {
+          await settleConnectionHolds(sql, orgId, retired.id);
           await retractConnectionRelationshipClaims(sql, {
             organizationId: orgId,
             connectionId: retired.id,
@@ -515,6 +517,7 @@ export async function softDeleteChatConnectionProjection(
       RETURNING id::text AS id
     `) as Array<{ id: string }>;
     for (const row of tombstoned) {
+      await settleConnectionHolds(sql, orgId, row.id);
       await retractConnectionRelationshipClaims(sql, {
         organizationId: orgId,
         connectionId: row.id,
@@ -541,6 +544,7 @@ export async function softDeleteChatConnectionProjection(
       RETURNING id::text AS id, organization_id
     `) as Array<{ id: string; organization_id: string }>;
     for (const row of tombstoned) {
+      await settleConnectionHolds(sql, row.organization_id, row.id);
       await retractConnectionRelationshipClaims(sql, {
         organizationId: row.organization_id,
         connectionId: row.id,

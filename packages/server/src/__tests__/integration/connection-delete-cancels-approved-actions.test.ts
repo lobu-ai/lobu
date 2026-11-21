@@ -11,7 +11,9 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
+import { getDb } from "../../db/client";
 import type { Env } from "../../index";
+import { runtimeConnectionIdToSlug, softDeleteChatConnectionProjection } from "../../lobu/stores/connections-projection";
 import { manageConnections } from "../../tools/admin/manage_connections";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
@@ -20,6 +22,7 @@ import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	createTestConnection,
 	createTestConnectorDefinition,
+	createTestAgent,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
@@ -73,6 +76,44 @@ describe("connection delete cancels approved-but-unclaimed action runs", () => {
 			connectorKey: CONNECTOR,
 			effects: { execute: "approval" },
 		});
+	});
+
+	it.each([true, false])("settles held operations when removing a chat projection (org scoped: %s)", async (scoped) => {
+		const runtimeId = "held-actions-projection";
+		const slug = runtimeConnectionIdToSlug(runtimeId);
+		const connection = await createTestConnection({ organization_id: orgId, connector_key: CONNECTOR, slug });
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: ctx.userId! });
+		const call = (caller: ToolContext) => manageOperations({
+			action: "execute", connection_id: connection.id, operation_key: "needs_approval", input: {},
+		}, {} as Env, caller);
+		const ask = await call(ctx) as { status: string; run_id: number };
+		expect(ask.status).toBe("pending_approval");
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectorKey: CONNECTOR, effects: { execute: "auto" },
+		});
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectorKey: CONNECTOR, kind: "guardrail", effects: { execute: "check" },
+		});
+		const check = await call({ ...ctx, agentId: agent.agentId }) as { status: string; run_id: number };
+		expect(check.status).toBe("pending_check");
+
+		await getDb().begin(tx => softDeleteChatConnectionProjection(tx, scoped ? orgId : null, runtimeId));
+		const sql = getTestDb();
+		const [deleted] = await sql`SELECT deleted_at FROM connections WHERE id = ${connection.id}`;
+		expect(deleted?.deleted_at).not.toBeNull();
+		const runs = await sql`
+			SELECT approval_status, status FROM runs
+			WHERE organization_id = ${orgId} AND id IN (${ask.run_id}, ${check.run_id}) ORDER BY id
+		`;
+		expect(runs).toEqual([
+			{ approval_status: "expired", status: "cancelled" },
+			{ approval_status: "withdrawn", status: "cancelled" },
+		]);
+		const [card] = await sql`
+			SELECT metadata FROM events WHERE organization_id = ${orgId}
+			AND run_id = ${ask.run_id} AND semantic_type = 'operation' AND superseded_by IS NULL
+		`;
+		expect(card?.metadata).toMatchObject({ approval_status: "expired" });
 	});
 
 	async function queueAndApprove(connectionId: number): Promise<number> {

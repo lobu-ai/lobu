@@ -22,6 +22,8 @@ import {
 } from "../../connect/webhook-registration.js";
 import { getDb } from "../../db/client.js";
 import { unreadNotificationFilter } from "../../notifications/service.js";
+import { settleConnectionHolds } from "../../operations/settle-connection-holds.js";
+import { lockOrganizationForRelationshipClaims } from "../../utils/relationship-claims.js";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { slugToRuntimeConnectionId } from "../../lobu/stores/connections-projection.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
@@ -704,10 +706,16 @@ export class ChatInstanceManager {
     // tombstone must commit atomically with the pending run/card expiry in
     // `handleDelete`, never in a separate earlier commit.
     if (!opts?.skipTombstone) {
-      await sql`
-        UPDATE connections SET deleted_at = now(), updated_at = now()
-        WHERE id = ${connectionId} AND organization_id = ${row.organization_id}
-      `;
+      await sql.begin(async (tx) => {
+        await lockOrganizationForRelationshipClaims(tx, row.organization_id);
+        const tombstoned = await tx`
+          UPDATE connections SET deleted_at = now(), updated_at = now()
+          WHERE id = ${connectionId} AND organization_id = ${row.organization_id}
+            AND deleted_at IS NULL
+          RETURNING id
+        `;
+        if (tombstoned.length) await settleConnectionHolds(tx, row.organization_id, connectionId);
+      });
     }
     logger.info(
       { connectionId, connectorKey: row.connector_key },
