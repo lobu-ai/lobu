@@ -174,10 +174,26 @@ RUN if [ "$SKIP_WEB_BUILD" = "false" ] && [ -f packages/owletto/package.json ]; 
       mkdir -p /app/packages/owletto/dist; \
     fi
 
+# Source maps are private: Vite emits them hidden (no sourceMappingURL), and
+# they leave the served dist here. build-images.yml exports the `sourcemaps`
+# stage below and uploads it to the private bucket Alloy reads, keyed by
+# APP_GIT_SHA. The runtime stage never copies /sourcemaps.
+RUN mkdir -p /sourcemaps/assets \
+    && if [ -d packages/owletto/dist/assets ]; then \
+      find packages/owletto/dist/assets -maxdepth 1 -type f -name '*.map' -exec mv {} /sourcemaps/assets/ \; ; \
+    fi \
+    && leftover=$(find packages/owletto/dist -name '*.map') \
+    && if [ -n "$leftover" ]; then echo "source maps left in the served dist: $leftover" >&2; exit 1; fi
+
 # Keep browser automation available while building/testing, then remove its
 # installed packages by manifest identity before copying the production graph.
 COPY scripts/image-browser-tooling.mjs scripts/image-browser-tooling.mjs
 RUN node scripts/image-browser-tooling.mjs --prune /app
+
+# Web source maps only, exported by build-images.yml with
+# `outputs: type=local`. Runtime stays the last (default) stage.
+FROM scratch AS sourcemaps
+COPY --from=builder /sourcemaps/ /
 
 # ===========================================
 # Runtime
