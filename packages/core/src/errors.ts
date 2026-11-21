@@ -185,26 +185,13 @@ export type AgentErrorCtaKind =
   | "none";
 
 /**
- * The spec is deliberately thin. Two families of failure:
- *
- *  - PROVIDER errors (quota/auth/unknown-model/routing) carry NO `message`: the
- *    provider's own error string rides in `payload.error`. When provider context
- *    is available, the gateway labels it and unwraps the common JSON message
- *    envelope without rewording the provider's sentence (including reset times).
- *    The spec only decides the CTA link to append.
- *
- *  - WORKER / config errors DO carry a `message`: they're synthesized by us (the
- *    sweep, the deployment manager, the model resolver) so there is no upstream
- *    provider string to fall back to.
- *
  * The renderer prefers `spec.message`, otherwise formats `payload.error`, and
  * appends the CTA.
  */
 export interface AgentErrorSpec {
   /**
-   * Fixed user-facing text, ONLY for errors we synthesize (no provider string
-   * exists). Omit for provider errors — the renderer uses the relayed provider
-   * message instead.
+   * Fixed user-facing text for synthesized errors and provider errors with
+   * consistent recovery guidance. Omit to relay details such as reset times.
    */
   message?: string;
   cta: AgentErrorCtaKind;

@@ -94,7 +94,7 @@ export async function resolveSystemKeyProvidersAndModel(): Promise<ResolvedSyste
 	let liveOptions: Record<string, Array<{ value: string }>> = {};
 	if (installed.size > 0) {
 		try {
-			liveOptions = await collectProviderModelOptions("", "");
+			liveOptions = await collectProviderModelOptions("", "", { automaticDefaultOnly: true });
 		} catch {
 			// Registry/model fetch unavailable — fall back to providers.json only.
 		}

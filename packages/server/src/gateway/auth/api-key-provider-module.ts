@@ -150,6 +150,11 @@ export class ApiKeyProviderModule extends BaseProviderModule {
     return this.providerId === "gemini" || Boolean(this.apiKeyConfig.modelsEndpoint);
   }
 
+  get supportsAutomaticDiscoveryDefault(): boolean {
+    // Gemini's listing mixes chat, preview and specialist models without a default.
+    return this.providerId !== "gemini";
+  }
+
   getSystemDiscoveryKey(): string | undefined {
     return resolveEnv(this.apiKeyConfig.systemEnvVarName ?? this.apiKeyConfig.envVarName);
   }

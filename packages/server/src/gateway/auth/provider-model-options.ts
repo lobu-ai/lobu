@@ -11,7 +11,8 @@ const logger = createLogger("provider-model-options");
 
 export async function collectProviderModelOptions(
   agentId: string,
-  userId: string
+  userId: string,
+  selection: { automaticDefaultOnly?: boolean } = {}
 ): Promise<Record<string, ModelOption[]>> {
   const modules = getModelProviderModules();
 
@@ -20,7 +21,9 @@ export async function collectProviderModelOptions(
   await Promise.all(
     modules.map(async (mod) => {
       try {
-        if (typeof mod.getModelOptions !== "function") {
+        if (typeof mod.getModelOptions !== "function" ||
+            (selection.automaticDefaultOnly && mod instanceof ApiKeyProviderModule &&
+              !mod.supportsAutomaticDiscoveryDefault)) {
           results[mod.providerId] = [];
           return;
         }

@@ -529,11 +529,13 @@ export async function initCommand(
   const providerId = providerIdRaw ? resolveProviderAlias(providerIdRaw) : "";
 
   let providerApiKey = "";
+  let providerModel: string | undefined;
   let selectedProvider: RegistryProvider | undefined;
   if (providerId) {
     selectedProvider = getProviderByIdWithSynth(providerId);
     const p = selectedProvider?.providers?.[0];
     if (p) {
+      providerModel = p.defaultModel;
       if (options.providerKey) {
         providerApiKey = options.providerKey;
       } else if (process.env[p.envVarName]) {
@@ -544,6 +546,17 @@ export async function initCommand(
           message: `${p.displayName} API key:`,
           mask: true,
         });
+      }
+      if (p.modelsEndpoint && !providerModel && !useDefaults) {
+        providerModel = (
+          await input({
+            message: `${p.displayName} model ID:`,
+            validate: (value) =>
+              value.trim() && !value.trim().startsWith("models/")
+                ? true
+                : "Enter the provider's model ID without a models/ prefix",
+          })
+        ).trim();
       }
     }
   }
@@ -653,7 +666,7 @@ export async function initCommand(
       allowedDomains: answers.allowedDomains,
       providerId: providerId || undefined,
       providerEnvVar: selectedProvider?.providers?.[0]?.envVarName,
-      providerModel: selectedProvider?.providers?.[0]?.defaultModel,
+      providerModel,
       enableHostedSlack,
       includeLobuMemory,
       lobuOrg: includeLobuMemory ? projectName : undefined,
@@ -766,6 +779,13 @@ export async function initCommand(
     // Keep the potentially long install visible. Hiding installer output behind
     // the scaffold spinner makes a healthy first run look wedged on small hosts.
     spinner.succeed("Project files created");
+    if (selectedProvider?.providers?.[0]?.modelsEndpoint && !providerModel) {
+      console.log(
+        chalk.yellow(
+          `Set the ${providerId} model ID in lobu.config.ts before running this agent.`
+        )
+      );
+    }
     let depsWarning: string | null = null;
     if (options.skipInstall) {
       console.log(
