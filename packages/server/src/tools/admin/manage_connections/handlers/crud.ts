@@ -98,7 +98,6 @@ import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { resolveUsernames } from "../../../../utils/resolve-usernames";
 import {
 	ACTIVE_RUN_STATUSES,
-	APPROVAL_RUN_TYPES,
 	runStatusLiteral,
 } from "../../../../utils/run-statuses";
 import type { ToolContext } from "../../../registry";
@@ -148,6 +147,7 @@ import {
 	oauthAppSetupContinuation,
 } from "../../helpers/connect-setup-continuation";
 import { createConnectionSetupBundle } from "../../helpers/interactive-connection-setup";
+import { settleConnectionHolds } from "../../../../operations/settle-connection-holds";
 import { supersedeActionEvent } from "../../approval-events";
 import {
 	pauseFeedsForInactiveConnections,
@@ -2406,73 +2406,6 @@ export async function handleDelete(
 	};
 	const isAutoWiredDeviceConnection = isDeviceAutowireIdentity(target);
 
-  // Expire any undecided approval runs for this connection. Deleting a
-  // connection makes its pending approvals unreviewable — the card disappears
-  // from every content read (connection-visibility predicate), so approve/reject
-  // would be blind. Same terminal state as the pending-approval TTL sweep
-  // (scheduled/expire-pending-approvals): approval_status='expired',
-  // status='cancelled'.
-  const approvalExpiryReason =
-    'Connection deleted before approval; approval expired.';
-  const expirePendingApprovalsBeforeDelete = async (
-    db: DbClient
-	): Promise<number[]> => {
-    // The whole batch shares one transaction. If any append-only card cannot
-    // advance, every run stays pending and the caller must leave the connection
-    // visible so a reviewer can still act on those cards.
-    const pendingApprovals = await db<{
-      id: number;
-      action_key: string | null;
-    }>`
-      SELECT id, action_key
-      FROM runs
-      WHERE organization_id = ${organizationId}
-        AND connection_id = ${args.connection_id}
-        AND approval_status = 'pending'
-        AND run_type = ANY(${pgTextArray([...APPROVAL_RUN_TYPES])}::text[])
-      ORDER BY id
-      FOR UPDATE
-    `;
-		const expiredRunIds: number[] = [];
-    for (const pendingApproval of pendingApprovals) {
-      const expired = await db<{ action_key: string | null }>`
-          UPDATE runs
-          SET approval_status = 'expired',
-              status = 'cancelled',
-              error_message = ${approvalExpiryReason},
-              completed_at = NOW()
-          WHERE id = ${pendingApproval.id}
-            AND organization_id = ${organizationId}
-            AND connection_id = ${args.connection_id}
-            AND approval_status = 'pending'
-            AND run_type = ANY(${pgTextArray([...APPROVAL_RUN_TYPES])}::text[])
-          RETURNING action_key
-        `;
-      if (expired.length === 0) continue;
-
-      const eventId = await supersedeActionEvent(
-        pendingApproval.id,
-        organizationId,
-        'rejected',
-        (operation) => `${operation} — expired`,
-        approvalExpiryReason,
-        {
-          expiry_reason: approvalExpiryReason,
-          approval_status: 'expired',
-        },
-        null,
-        db
-      );
-      if (eventId === undefined) {
-        throw new Error(
-          `Cannot expire approval run ${pendingApproval.id}: its approval card is missing`
-        );
-      }
-			expiredRunIds.push(pendingApproval.id);
-    }
-		return expiredRunIds;
-  };
-
   // Cancel action runs that are decided (approved or auto) but not yet claimed
   // by a worker. A `local_action` run keeps status='pending' after approval so
   // the worker poll can claim it; without this, a worker would still execute
@@ -2603,21 +2536,7 @@ export async function handleDelete(
 			connectionId: args.connection_id,
 		});
 
-		const expiredApprovalRunIds = await expirePendingApprovalsBeforeDelete(tx);
-
-    // Check has no approval card. Withdraw it while the connection row is
-    // locked, alongside its tombstone, so it cannot wait on a dead connection.
-    await tx`
-      UPDATE runs
-      SET approval_status = 'withdrawn', status = 'cancelled',
-          error_message = 'Connection deleted before the requester confirmed the check.',
-          completed_at = NOW()
-      WHERE organization_id = ${organizationId}
-        AND connection_id = ${args.connection_id}
-        AND approval_status = 'check'
-        AND status = 'pending'
-        AND run_type = 'action'
-    `;
+		const expiredApprovalRunIds = await settleConnectionHolds(tx, organizationId, args.connection_id);
 
 		await cancelUnclaimedActionRunsBeforeDelete(tx);
 
