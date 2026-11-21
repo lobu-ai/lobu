@@ -16,26 +16,76 @@ export function readSocialTimelinePage(options: {
           .querySelector('[data-testid="AppTabBar_Profile_Link"]')
           ?.getAttribute("href")
       : doc.title;
-  const identityVerified =
+  // Each check names itself, so a refusal says which one failed and what to
+  // do. The reasons are fixed words: the message is grouped into issues and
+  // read by agents, so it never quotes the account, company or URL.
+  const checks: Array<[boolean, string, string]> =
     options.platform === "x"
-      ? loc.origin === "https://x.com" &&
-        loc.pathname === options.page_path &&
-        String(identity).toLowerCase() === options.account_path.toLowerCase() &&
-        [...doc.querySelectorAll('[role="tab"]')].some(
-          (t: any) =>
-            t.innerText.trim() === "Following" &&
-            t.getAttribute("aria-selected") === "true"
-        )
-      : loc.origin === "https://www.linkedin.com" &&
-        loc.pathname === options.page_path &&
-        Boolean(options.company_name) &&
-        String(identity).includes(
-          `${options.company_name}: Company Page Admin`
-        ) &&
-        doc.body.innerText.includes(`Comment as ${options.company_name}`);
-  if (!identityVerified || doc.visibilityState !== "visible")
+      ? [
+          [
+            loc.origin === "https://x.com",
+            "wrong_site",
+            "open x.com in the scratch tab",
+          ],
+          [
+            loc.pathname === options.page_path,
+            "wrong_page",
+            "navigate the scratch tab to the bound page",
+          ],
+          [
+            String(identity).toLowerCase() ===
+              options.account_path.toLowerCase(),
+            "wrong_account",
+            "sign in to the bound X account in this browser",
+          ],
+          [
+            [...doc.querySelectorAll('[role="tab"]')].some(
+              (t: any) =>
+                t.innerText.trim() === "Following" &&
+                t.getAttribute("aria-selected") === "true"
+            ),
+            "following_tab_not_selected",
+            "select the Following tab",
+          ],
+        ]
+      : [
+          [
+            loc.origin === "https://www.linkedin.com",
+            "wrong_site",
+            "open www.linkedin.com in the scratch tab",
+          ],
+          [
+            loc.pathname === options.page_path,
+            "wrong_page",
+            "navigate the scratch tab to the bound company admin feed",
+          ],
+          [
+            Boolean(options.company_name),
+            "company_name_missing",
+            "pass company_name from the binding",
+          ],
+          [
+            String(identity).includes(
+              `${options.company_name}: Company Page Admin`
+            ),
+            "not_company_admin_view",
+            "open the company page admin view with an admin account",
+          ],
+          [
+            doc.body.innerText.includes(`Comment as ${options.company_name}`),
+            "not_acting_as_company",
+            "switch the comment identity to the company page",
+          ],
+        ];
+  checks.push([
+    doc.visibilityState === "visible",
+    "tab_not_visible",
+    "call focus_tab on the scratch tab, then read again",
+  ]);
+  const failed = checks.find(([ok]) => !ok);
+  if (failed)
     throw new Error(
-      "Timeline identity or visible scratch tab could not be verified"
+      `Timeline page could not be verified: ${failed[1]}; ${failed[2]}`
     );
   const cards = [
     ...doc.querySelectorAll(

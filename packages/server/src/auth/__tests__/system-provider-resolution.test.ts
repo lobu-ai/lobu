@@ -3,6 +3,8 @@ import { access } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ModuleInterface, moduleRegistry } from "@lobu/core";
+import { ApiKeyProviderModule } from "../../gateway/auth/api-key-provider-module";
+import { collectProviderModelOptions } from "../../gateway/auth/provider-model-options";
 import { resolveSystemKeyProvidersAndModel } from "../system-provider-resolution";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -112,6 +114,37 @@ describe("resolveSystemKeyProvidersAndModel (#9 — every system-key provider re
     // Its concrete ref came from live options, never `<slug>/auto`.
     expect(models).toContain("amazon-bedrock/amazon.nova-lite-v1:0");
     expect(models.every((ref) => !ref.endsWith("/auto"))).toBe(true);
+  });
+
+  test("Gemini discovery options never become implicit system defaults", async () => {
+    class GeminiWithModels extends ApiKeyProviderModule {
+      override hasSystemKey() {
+        return true;
+      }
+
+      override async getModelOptions() {
+        return [{
+          value: "gemini/preview-fixture",
+          label: "Specialist model fixture",
+        }];
+      }
+    }
+    moduleRegistry.register(new GeminiWithModels({
+      providerId: "gemini",
+      providerDisplayName: "Gemini",
+      providerIconUrl: "",
+      envVarName: "GEMINI_API_KEY",
+      apiKeyInstructions: "",
+      apiKeyPlaceholder: "",
+      modelsEndpoint: "/models",
+      authProfilesManager: {} as never,
+    }));
+    const { models } = await resolveSystemKeyProvidersAndModel();
+    expect(models.filter((ref) => ref.startsWith("gemini/"))).toEqual([
+      "gemini/__unresolved__",
+    ]);
+    const discovery = await collectProviderModelOptions("fixture-agent", "fixture-user");
+    expect(discovery.gemini?.map(({ value }) => value)).toEqual(["gemini/preview-fixture"]);
   });
 
   test("#3(c): a system-key provider with NO resolvable model becomes a sentinel (not dropped)", () => {

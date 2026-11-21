@@ -35,7 +35,10 @@ import {
 } from "../orchestration/turn-liveness.js";
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIP } from "../../utils/rate-limiter.js";
-import { classifyProviderHealthStatus } from "./provider-health-status.js";
+import {
+  classifyProviderAvailabilityStatus,
+  classifyProviderHealthStatus,
+} from "./provider-health-status.js";
 import { redactedFailure, routeFailure } from "../../diagnostics.js";
 
 /**
@@ -1210,10 +1213,11 @@ export class SecretProxy {
         "Custom provider request failed", { method, provider: resolvedSlug });
     }
 
-    if (!response.ok) {
+    if (!response.ok && response.status < 500) {
       // Log upstream failure without echoing the body — error responses from
       // some providers include the (rejected) credential or other sensitive
-      // values that we don't want in our logs.
+      // values that we don't want in our logs. A 5xx is reported once, with
+      // its relayed response, by `relayProviderResponse`.
       logger.warn(
         { status: response.status, method, provider: resolvedSlug },
         "Provider returned an error"
@@ -1231,7 +1235,8 @@ export class SecretProxy {
       expectedOrganizationId,
       resolvedSlug,
       response,
-      this.extractWorkerTokenDeployment(c)
+      this.extractWorkerTokenDeployment(c),
+      method === "POST"
     );
 
     // Build response headers (skip hop-by-hop)
@@ -1257,20 +1262,41 @@ export class SecretProxy {
       responseHeaders.set("Cache-Control", "no-cache");
       responseHeaders.set("Connection", "keep-alive");
       if (response.body) {
-        return new Response(response.body as ReadableStream, {
+        return this.relayProviderResponse(c, new Response(response.body as ReadableStream, {
           status: response.status,
           headers: responseHeaders,
-        });
+        }), method, resolvedSlug);
       }
       return c.json({ error: "No response body from upstream" }, 502);
     }
 
     // Regular response pass-through
     const text = await response.text();
-    return new Response(text, {
+    return this.relayProviderResponse(c, new Response(text, {
       status: response.status,
       headers: responseHeaders,
-    });
+    }), method, resolvedSlug);
+  }
+
+  /**
+   * Answer with the provider's own response. A provider 5xx is relayed
+   * unchanged (the caller's SDK retries on its status, headers and body) but
+   * is thrown with the failure behind it, so the request is reported as the
+   * dependency failure it is: the same `UpstreamHttpError` / `UPSTREAM_5XX`
+   * the outbound call's own span records (`@lobu/core` otel-fetch). Returned
+   * bare, the boundary could only see a status and filed every provider
+   * outage as this server's own `HttpServerError`.
+   */
+  private relayProviderResponse(
+    c: Context,
+    relayed: Response,
+    method: string,
+    provider: string | undefined
+  ): Response {
+    if (relayed.status < 500) return relayed;
+    throw routeFailure(c, relayed,
+      { name: "UpstreamHttpError", message: `HTTP ${relayed.status}`, code: "UPSTREAM_5XX", httpStatus: relayed.status },
+      "Provider returned a server error", { method, provider });
   }
 
   /**
@@ -1297,7 +1323,8 @@ export class SecretProxy {
     organizationId: string | undefined,
     slug: string | undefined,
     response: Response,
-    deploymentName?: string
+    deploymentName: string | undefined,
+    isPost: boolean
   ): Promise<void> {
     if (!organizationId || !slug) return;
     try {
@@ -1311,7 +1338,20 @@ export class SecretProxy {
         return;
       }
       const code = classifyProviderHealthStatus(response.status);
-      if (!code) return;
+      if (!code) {
+        const availabilityCode = isPost
+          ? classifyProviderAvailabilityStatus(response.status)
+          : undefined;
+        if (deploymentName && availabilityCode) {
+          await markTurnProviderFailed(
+            deploymentName,
+            availabilityCode,
+            `${slug}: HTTP ${response.status} — ${availabilityCode}`,
+            response.status
+          );
+        }
+        return;
+      }
       // `Retry-After` is the provider's own answer to "when does this clear",
       // in seconds or as an HTTP date — a structured horizon that needs no
       // date parsing out of a sentence. Absent on a balance wall, which is

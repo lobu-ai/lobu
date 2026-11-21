@@ -230,6 +230,22 @@ describe("agent PATCH/GET /config — models surface", () => {
     expect(body).not.toHaveProperty("installedProviders");
   });
 
+  test("a provider-native model ID cannot be saved as an agent model ref", async () => {
+    const app = await importAgentRoutes();
+    for (const [model, error] of [
+      ["text-model", "invalid_model_ref"],
+      ["models/text-model", "model_provider_not_connected"],
+    ]) {
+      const response = await app.request(`/${AGENT}/config`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ models: [model] }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error });
+    }
+  });
+
   test("#7: a PATCH with an invalid models list rejects BEFORE persisting auth profiles (atomic)", async () => {
     // Spy manager: record any upsertProfile call. The handler must NOT reach it
     // when models validation fails first.

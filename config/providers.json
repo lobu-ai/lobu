@@ -115,12 +115,11 @@
           "iconUrl": "https://www.google.com/s2/favicons?domain=gemini.google.com&sz=128",
           "envVarName": "GEMINI_API_KEY",
           "upstreamBaseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "modelsEndpoint": "/models",
           "apiKeyInstructions": "Get your API key from <a href=\"https://aistudio.google.com/apikey\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Google AI Studio</a>",
           "apiKeyPlaceholder": "AIza...",
           "sdkCompat": "openai",
-          "modalities": ["text", "image"],
-          "defaultModel": "gemini-2.5-pro",
-          "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+          "modalities": ["text", "image"]
         }
       ]
     },

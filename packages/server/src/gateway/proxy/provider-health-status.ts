@@ -30,3 +30,13 @@ export function classifyProviderHealthStatus(
   if (status === 401 || status === 403) return AgentErrorCode.PROVIDER_AUTH;
   return undefined;
 }
+
+/** Temporary upstream failures explain a failed turn without blaming its credentials. */
+export function classifyProviderAvailabilityStatus(
+  status: number
+): AgentErrorCode | undefined {
+  if (status === 502 || status === 503 || status === 504) {
+    return AgentErrorCode.PROVIDER_UNAVAILABLE;
+  }
+  return undefined;
+}

@@ -259,6 +259,8 @@ describe("isolate host wall-clock timeout", () => {
     for (const message of [
       "400 gpt-foo is not a valid model ID",
       "unknown model: claude-x",
+      '404 [{"error":{"code":404,"message":"This model models/example-text is no longer available to new users.","status":"NOT_FOUND"}}]',
+      "This model models/example-text is no longer available.",
       'Model "claude-opus-4-8" not found for provider claude',
       // A quoted id containing a space must survive the bounded run.
       'Model "some model name" not found for provider claude',
