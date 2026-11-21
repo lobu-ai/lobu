@@ -171,14 +171,13 @@ export function evaluateConnectorPolicy(args: {
 	operation: PolicyOperation;
 	actor: ActingPrincipal;
 	policies: readonly EntityApprovalPolicy[];
-	allowlist?: readonly AllowedAction[] | null;
+	/** Every allowlist bound to the caller; each one must name the operation. */
+	allowlists?: readonly (readonly AllowedAction[])[];
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
 	}
-	const allowedEffect = args.allowlist
-		? allowedConnectorEffect(args.allowlist, args.connectionId, args.operation.operation_key)
-		: "auto";
+	const allowedEffect = allowedConnectorEffect(args.allowlists ?? [], args.connectionId, args.operation.operation_key);
 	if (allowedEffect === "deny") {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "guardrail" };
 	}

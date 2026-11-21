@@ -11,7 +11,7 @@ import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/a
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { type ConnectorPolicyExplanation, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
-import { applyRunConnectorPolicyAtClaim, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { applyRunConnectorPolicyAtClaim, POLICY_PAT_PRINCIPAL_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
@@ -974,6 +974,7 @@ export async function handleExecute(
 		connectionId: connection.id,
 		operation,
 		actor,
+		appPrincipalId: ctx.appPrincipalId ?? null,
 		sql,
 	});
 	if (policy.effect === "deny") {
@@ -1011,8 +1012,10 @@ export async function handleExecute(
 	// that arrives after an approval wait can continue it
 	// (operations/operation-outcome-followup.ts).
 	const turnOrigin = await operationTurnOrigin(ctx);
+	const patPrincipalId = ctx.appPrincipalId?.startsWith("pat:") ? ctx.appPrincipalId : null;
 	runMetadata = {
 		...runMetadata,
+		...(patPrincipalId ? { [POLICY_PAT_PRINCIPAL_METADATA_KEY]: patPrincipalId } : {}),
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 		...(turnOrigin ? { turn_origin: turnOrigin } : {}),

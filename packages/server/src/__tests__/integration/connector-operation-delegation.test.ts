@@ -4,12 +4,14 @@ import { app } from '../../index';
 import { DEVICE_MANIFESTS_BY_PLATFORM } from "@lobu/connector-worker/daemon/device-manifests";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
+import { POLICY_PAT_PRINCIPAL_METADATA_KEY } from "../../authz/operation-run-policy";
 import { executeConnectorOperation } from "../../worker-api/execute-operation";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
   createTestAgent,
   createTestConnection,
   createTestConnectorDefinition,
+  createTestPAT,
   createTestUser,
   seedOwnerContext,
 } from "../setup/test-fixtures";
@@ -158,6 +160,30 @@ describe("connector delegation through the public operation lifecycle", () => {
     expect(
       await sql`SELECT id FROM runs WHERE parent_run_id=${params.parentRunId}`
     ).toHaveLength(0);
+  });
+  it("applies the admitting PAT's list to a delegated operation from its bound agent", async () => {
+    const { params, org, user, connection } = await fixture();
+    const pat = await createTestPAT(user.id, org.id, { scope: "mcp:read mcp:write" });
+    const metadata = { [POLICY_PAT_PRINCIPAL_METADATA_KEY]: `pat:${pat.id}` };
+    const parent = { action: "connector.execute", connection_id: connection.id, operation_key: "run", effect: "auto" };
+    await sql`UPDATE runs SET run_metadata=${sql.json(metadata)} WHERE id=${params.parentRunId}`;
+    await sql`INSERT INTO caller_action_allowlists (organization_id, subject_kind, subject_id, entries)
+      VALUES (${org.id}, 'pat', ${String(pat.id)}, ${sql.json([parent])})`;
+    await upsertEntityApprovalPolicy(org.id, {
+      resourceClass: "connector_action", connectorKey: "os.shell", effects: { execute: "auto" },
+    });
+    expect(await executeConnectorOperation(params)).toMatchObject({ error: expect.stringContaining("Policy blocks") });
+    expect(await sql`SELECT id FROM runs WHERE parent_run_id=${params.parentRunId}`).toHaveLength(0);
+
+    const child = {
+      action: "connector.execute",
+      connection_id: params.request.connection_id,
+      operation_key: params.request.operation_key,
+      effect: "approval",
+    };
+    await sql`UPDATE caller_action_allowlists SET entries=${sql.json([parent, child])}
+      WHERE organization_id=${org.id} AND subject_kind='pat' AND subject_id=${String(pat.id)}`;
+    expect(await executeConnectorOperation(params)).toMatchObject({ status: "pending_approval" });
   });
   it("denies foreign/private targets and cannot recurse into compiled connectors", async () => {
     const { params, org, connection } = await fixture();

@@ -580,7 +580,7 @@ async function readSourceFeedWithinDeadline(
   const feed = feedRows[0];
   if (p.automationId != null) {
     const actor = await resolveActingPrincipal(sql, { organizationId: p.scope.organizationId, sessionAutomationId: p.automationId });
-    const policy = await resolveConnectorPolicy({ sourceRead: true, organizationId: p.scope.organizationId, connectionId: Number(feed.connection_id), actor,
+    const policy = await resolveConnectorPolicy({ skipCallerAllowlists: true, organizationId: p.scope.organizationId, connectionId: Number(feed.connection_id), actor,
       operation: { connector_key: feed.connector_key, operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
     if (!runsWithoutHold(policy.effect)) throw new ToolError('PERMISSION', 'Automation source read requires an Auto connector policy.');
   }
