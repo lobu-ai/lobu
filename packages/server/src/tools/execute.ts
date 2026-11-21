@@ -10,7 +10,7 @@ import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
 import { isTokenDerivedSession } from '../auth/oauth/scopes';
 import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
-import { scriptFailureTelemetry } from '../sandbox/run-script';
+import { recordedOperationFailure, scriptFailureTelemetry } from '../sandbox/run-script';
 import { verifiedAutomationSource } from '../automations/automation-source';
 import { runWithActingAutomation } from '../utils/acting-automation-context';
 import type { Context } from 'hono';
@@ -380,8 +380,19 @@ export async function executeTool(
       ) {
         // SDK tools report script failures as data. Record the trusted sandbox
         // classification without changing MCP isError or retrying side effects.
-        const telemetry = scriptFailureTelemetry(result.error);
-        recordError(span, telemetry.error, { scope, ...(telemetry.kind ? { kind: telemetry.kind } : {}) });
+        // A failed operation its run already recorded is linked, not recorded
+        // again: every error span becomes an issue occurrence, so a second
+        // record would open a second issue for the same failure.
+        const recorded = recordedOperationFailure(result.error);
+        if (recorded) {
+          span?.setAttributes({
+            'lobu.failure_recorded_as': recorded.fingerprint,
+            ...(recorded.runId !== undefined ? { 'lobu.run_id': recorded.runId } : {}),
+          });
+        } else {
+          const telemetry = scriptFailureTelemetry(result.error);
+          recordError(span, telemetry.error, { scope, ...(telemetry.kind ? { kind: telemetry.kind } : {}) });
+        }
       } else {
         span?.setStatus({ code: SpanStatusCode.OK });
       }

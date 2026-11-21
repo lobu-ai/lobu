@@ -4,6 +4,7 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-node";
+import { safeErrorDetails } from "../../sandbox/run-script";
 import { executeTool, isSoftErrorResult, type AuthContext } from "../../tools/execute";
 import { getTool } from "../../tools/registry";
 import { ToolUserError } from "../../utils/errors";
@@ -231,6 +232,40 @@ describe("SDK script failure telemetry", () => {
       expect(span?.attributes).toMatchObject({ "exception.type": name, "error.code": code, "error.kind": kind });
       if (name === "ScriptError" || name === "ValidationError") {
         expect(JSON.stringify({ attributes: span?.attributes, events: span?.events, status: span?.status })).not.toContain("private");
+      }
+    } finally {
+      handler.mockRestore();
+      await shutdownTracing();
+    }
+  });
+
+  const recordedRun = { run_id: 42, error_message: "Timeline page could not be verified", failure_fingerprint: "f508cc529c8dbb2ee6684a2fd44b7182" };
+  it.each([
+    ["a recorded run", recordedRun, "INTERNAL", true],
+    ["a recorded run whose details were truncated", safeErrorDetails({ ...recordedRun, output: "x".repeat(200_000) }), "INTERNAL", true],
+    ["a script's own throw without a host code", recordedRun, undefined, false],
+    ["a run with no fingerprint", { run_id: 42, error_message: "Timeline page could not be verified" }, "INTERNAL", false],
+    ["a malformed fingerprint", { run_id: 42, failure_fingerprint: "not-a-fingerprint" }, "INTERNAL", false],
+  ] as const)("links an operation failure its run already recorded instead of recording it again: %s", async (_case, details, code, recorded) => {
+    const exporter = new InMemorySpanExporter();
+    await shutdownTracing();
+    initTracing({ serviceName: "sdk-script-span-test", spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const tool = getTool("run_sdk");
+    if (!tool) throw new Error("run_sdk is not registered");
+    const report = { success: false, error: { name: "ClientSdkActionError", message: "Timeline page could not be verified", ...(code ? { code } : {}), details } };
+    const handler = spyOn(tool, "handler").mockResolvedValue(report);
+    try {
+      expect(await executeTool("run_sdk", { script: "export default async () => 1" }, {} as never, baseAuth)).toEqual(report);
+      const [span] = exporter.getFinishedSpans().filter((entry) => entry.name === "tool run_sdk");
+      if (recorded) {
+        expect(span?.status.code).toBe(SpanStatusCode.UNSET);
+        expect(span?.attributes["error.fingerprint"]).toBeUndefined();
+        expect(span?.events.some((event) => event.name === "exception")).toBe(false);
+        expect(span?.attributes).toMatchObject({ "lobu.failure_recorded_as": recordedRun.failure_fingerprint, "lobu.run_id": 42 });
+      } else {
+        expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+        expect(span?.attributes["error.fingerprint"]).toEqual(expect.any(String));
+        expect(span?.attributes["lobu.failure_recorded_as"]).toBeUndefined();
       }
     } finally {
       handler.mockRestore();
