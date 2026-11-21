@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { type DbClient, getDb } from "../db/client";
 import type { ActingPrincipal } from "./entity-policy";
+import { writeEffectRank } from "./write-action-manifest";
 
 export type AllowlistSubject = { kind: "agent" | "pat"; id: string };
 
@@ -39,32 +40,46 @@ export function callerActionAllowlistSnapshot(organizationId: string, subject: A
 	};
 }
 
-export function loadCallerActionAllowlist(
+/**
+ * Every allowlist bound to this call: the acting (or owning) agent's and the
+ * PAT's. A PAT may bind its MCP session to an agent, so the agent's list never
+ * replaces the token's; callers apply each list and keep the strictest result.
+ */
+export async function loadCallerActionAllowlists(
 	organizationId: string,
 	actor: Pick<ActingPrincipal, "kind" | "id" | "ownerAgentId">,
+	appPrincipalId?: string | null,
 	sql?: DbClient,
-): Promise<AllowedAction[] | null> {
+): Promise<AllowedAction[][]> {
+	const subjects = new Map<string, AllowlistSubject>();
 	const agentId = actor.kind === "agent" ? actor.id : actor.ownerAgentId;
-	if (agentId) {
-		return readCallerActionAllowlist(organizationId, { kind: "agent", id: agentId }, sql);
+	if (agentId) subjects.set(`agent:${agentId}`, { kind: "agent", id: agentId });
+	for (const principal of [actor.kind === "app" ? actor.id : null, appPrincipalId]) {
+		if (principal?.startsWith("pat:")) subjects.set(principal, { kind: "pat", id: principal.slice(4) });
 	}
-	if (actor.kind === "app" && actor.id?.startsWith("pat:")) {
-		return readCallerActionAllowlist(organizationId, { kind: "pat", id: actor.id.slice(4) }, sql);
-	}
-	return Promise.resolve(null);
+	const lists = await Promise.all(
+		[...subjects.values()].map((subject) => readCallerActionAllowlist(organizationId, subject, sql)),
+	);
+	return lists.filter((entries): entries is AllowedAction[] => entries !== null);
 }
 
+/** The strictest allowance across every bound list; a miss in any list denies. */
 export function allowedConnectorEffect(
-	entries: readonly AllowedAction[],
+	allowlists: readonly (readonly AllowedAction[])[],
 	connectionId: number | null,
 	operationKey: string,
 ): ConnectorAllowance["effect"] | "deny" {
-	const entry = entries.find((item): item is ConnectorAllowance =>
-		item.action === "connector.execute" &&
-		item.connection_id === connectionId &&
-		item.operation_key === operationKey
-	);
-	return entry?.effect ?? "deny";
+	let effect: ConnectorAllowance["effect"] = "auto";
+	for (const entries of allowlists) {
+		const entry = entries.find((item): item is ConnectorAllowance =>
+			item.action === "connector.execute" &&
+			item.connection_id === connectionId &&
+			item.operation_key === operationKey
+		);
+		if (!entry) return "deny";
+		if (writeEffectRank(entry.effect) > writeEffectRank(effect)) effect = entry.effect;
+	}
+	return effect;
 }
 
 export async function permitsEntityUpdate(args: {
@@ -74,13 +89,8 @@ export async function permitsEntityUpdate(args: {
 	entityId: number;
 	sql?: DbClient;
 }): Promise<boolean> {
-	const [agentEntries, patEntries] = await Promise.all([
-		loadCallerActionAllowlist(args.organizationId, args.actor, args.sql),
-		args.appPrincipalId?.startsWith("pat:")
-			? readCallerActionAllowlist(args.organizationId, { kind: "pat", id: args.appPrincipalId.slice(4) }, args.sql)
-			: null,
-	]);
-	return [agentEntries, patEntries].every((entries) =>
-		entries === null || entries.some((entry) => entry.action === "entity.update" && entry.entity_id === args.entityId)
+	const allowlists = await loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql);
+	return allowlists.every((entries) =>
+		entries.some((entry) => entry.action === "entity.update" && entry.entity_id === args.entityId)
 	);
 }

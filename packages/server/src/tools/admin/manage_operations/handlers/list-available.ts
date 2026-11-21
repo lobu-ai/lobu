@@ -1,4 +1,4 @@
-import { loadCallerActionAllowlist } from "../../../../authz/caller-action-allowlist";
+import { loadCallerActionAllowlists } from "../../../../authz/caller-action-allowlist";
 import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { BROWSER_EXTENSION_UPDATE_REQUIRED, browserExtensionSupportsOrigins, selectedBrowserRequirement } from '../../../../connectors/browser-resource';
 import {
@@ -753,12 +753,12 @@ export async function handleListAvailable(
     limit: Number.MAX_SAFE_INTEGER,
     offset: 0,
   });
-	const [policies, allowlist] = await Promise.all([
+	const [policies, allowlists] = await Promise.all([
 		listEntityApprovalPolicies(ctx.organizationId, "connector_action"),
-		loadCallerActionAllowlist(ctx.organizationId, actor),
+		loadCallerActionAllowlists(ctx.organizationId, actor, ctx.appPrincipalId),
 	]);
 	const policyFor = (operation: OperationDescriptor, connectionId: number | null) =>
-		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlist });
+		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlists });
 	const operationTargets = (operation: OperationDescriptor) =>
 		(targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
 			operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),

@@ -27,7 +27,7 @@
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
 import { type DbClient, getDb, pgBigintArray } from "../db/client";
-import { loadCallerActionAllowlist } from "./caller-action-allowlist";
+import { loadCallerActionAllowlists } from "./caller-action-allowlist";
 import {
 	type ConnectorPolicyCategory,
 	type ConnectorPolicyKind,
@@ -510,7 +510,7 @@ export async function resolveActingPrincipal(
 			args.explicitAutomationId,
 			args.organizationId,
 		);
-		if ((!args.agentId && !args.appId?.startsWith("pat:")) || (args.agentId && owner.ownerAgentId === args.agentId)) {
+		if (!args.agentId || owner.ownerAgentId === args.agentId) {
 			return automationPrincipal(args.explicitAutomationId, owner);
 		}
 		// Caller-controlled tag that isn't this agent's own automation — ignore it.
@@ -1420,13 +1420,22 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 
 /** Connector decisions share one evaluator across admission, discovery and inspection. */
 export async function resolveConnectorPolicy(
-	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlist"> & { sql?: DbClient; sourceRead?: boolean },
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlists"> & {
+		sql?: DbClient;
+		/** The verified token's app principal; a PAT's allowlist applies even when an agent is bound. */
+		appPrincipalId?: string | null;
+		/**
+		 * Source reads and internal browser steps of an admitted parent are not
+		 * caller-named actions, so caller allowlists do not apply to them.
+		 */
+		skipCallerAllowlists?: boolean;
+	},
 ) {
-	const [policies, allowlist] = await Promise.all([
+	const [policies, allowlists] = await Promise.all([
 		listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
-		args.sourceRead ? null : loadCallerActionAllowlist(args.organizationId, args.actor, args.sql),
+		args.skipCallerAllowlists ? [] : loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql),
 	]);
-	return evaluateConnectorPolicy({ ...args, policies, allowlist });
+	return evaluateConnectorPolicy({ ...args, policies, allowlists });
 }
 
 /** Reconstruct the original requester from a durable operation, never its reviewer. */

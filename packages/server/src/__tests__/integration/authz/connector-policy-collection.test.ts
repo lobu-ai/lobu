@@ -366,9 +366,10 @@ describe("caller action allowlists", () => {
       script: `export default async (_ctx, client) => client.entities.update(${JSON.stringify({ entity_id, name })});`,
     }, mcp);
     for (const [kind, id] of [["agent", agent.agentId], ["pat", pat.id]] as const) {
-      const [first, second, outside] = await Promise.all(["First", "Second", "Outside"].map(name =>
-        createTestEntity({ name: `${kind} ${name}`, organization_id: org.id }),
-      ));
+      // Sequential: concurrent fixtures race to seed the org's entity type.
+      const first = await createTestEntity({ name: `${kind} First`, organization_id: org.id });
+      const second = await createTestEntity({ name: `${kind} Second`, organization_id: org.id });
+      const outside = await createTestEntity({ name: `${kind} Outside`, organization_id: org.id });
       await replaceAllowlist(allowlistPath(kind, id), [first, second].map(record => ({
         action: "entity.update", entity_id: record.id,
       })));
@@ -455,6 +456,32 @@ describe("caller action allowlists", () => {
         error: expect.stringContaining(`Policy blocks '${name}'`),
       });
     }
+    // Binding the PAT's MCP session to an unrestricted agent keeps the PAT's allowlist.
+    const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+    const bound = { token: pat.token, orgSlug: org.slug, agentId: agent.agentId };
+    const boundSdk = (body: string) => mcpToolsCall("run_sdk", { script: `export default async (_ctx, client) => ${body};` }, bound);
+    const listed = await boundSdk(`client.operations.listAvailable({ connection_id: ${connection_id} })`);
+    expect(listed.success, JSON.stringify(listed.error)).toBe(true);
+    const listedKeys = listed.return_value.operations.map((operation: { operation_key: string }) => operation.operation_key);
+    expect(listedKeys).toContain("log");
+    expect(listedKeys).not.toContain("outside");
+    const boundExecute = (operation_key: string) => boundSdk(`client.operations.execute(${JSON.stringify({
+      connection_id, operation_key, input: {},
+    })})`);
+    expect(await boundExecute("log")).toMatchObject({ success: true });
+    expect(await boundExecute("outside")).toMatchObject({ success: false, error: { code: "PERMISSION" } });
+    // A Check the bound session was admitted for is refused once the PAT list drops it.
+    const boundCheck = await boundExecute("check");
+    expect(boundCheck.return_value, JSON.stringify(boundCheck)).toMatchObject({ status: "pending_check", run_id: expect.any(Number) });
+    await replaceAllowlist(route, [entry("ask", "approval"), entry("log", "log"), entry("restricted", "auto")]);
+    const boundConfirm = await boundSdk(`client.operations.confirm(${JSON.stringify({
+      run_id: boundCheck.return_value.run_id, statement: "Inspected the inputs",
+    })})`);
+    expect(boundConfirm, JSON.stringify(boundConfirm)).toMatchObject({ success: false, error: { code: "PERMISSION" } });
+    expect(JSON.stringify(boundConfirm.error)).toContain("Policy now blocks");
+    const [boundRun] = await sql`SELECT approval_status, status FROM runs WHERE id = ${boundCheck.return_value.run_id}`;
+    expect(boundRun).toMatchObject({ approval_status: "rejected", status: "cancelled" });
+    expect(await boundExecute("log")).toMatchObject({ success: true });
     await replaceAllowlist(route, []);
     const confirmation = await request("POST", operationPath, {
       action: "confirm", run_id: check.run_id, statement: "Inspected the inputs",

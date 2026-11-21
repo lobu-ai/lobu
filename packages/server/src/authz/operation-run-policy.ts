@@ -16,6 +16,18 @@ import { feedDefinitionSelection } from '../connectors/feed-definition-selection
 
 /** Only the server's connector-to-browser bridge writes this marker. */
 export const CONNECTOR_PARENT_RUN_METADATA_KEY = 'connector_parent_run_id';
+/**
+ * Only operation admission writes this: the verified PAT principal behind the
+ * request, kept even when the run's policy principal is a bound agent or an
+ * Automation, so every recheck still applies the token's own allowlist.
+ */
+export const POLICY_PAT_PRINCIPAL_METADATA_KEY = 'policy_pat_principal_id';
+
+/** The admitting PAT principal recorded on a run; legacy rows have none. */
+export function storedPolicyPatPrincipal(metadata: Record<string, unknown> | null | undefined): string | null {
+  const value = metadata?.[POLICY_PAT_PRINCIPAL_METADATA_KEY];
+  return typeof value === 'string' && value.startsWith('pat:') ? value : null;
+}
 
 type PolicyRun = {
   id: number;
@@ -52,7 +64,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   return run ?? null;
 }
 
-async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun): Promise<ConnectorPolicyResult> {
+async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun, implementationStep = false): Promise<ConnectorPolicyResult> {
   if (run.run_type !== 'action' || run.connection_id == null || !run.action_key) return unavailable();
   const resolved = await getOperationForConnection(organizationId, Number(run.connection_id), run.action_key, sql);
   const mayVerify = resolved?.connection.status === 'pending_auth' && run.action_key === BROWSER_VERIFY_OPERATION
@@ -61,7 +73,8 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
     return unavailable();
   }
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
-  return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql });
+  return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql,
+    appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep });
 }
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
@@ -89,7 +102,7 @@ async function resolveSourceReadAccess(sql: DbClient, organizationId: string, ru
   if (actor.kind === 'automation') {
     const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
     if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
-    const policy = await resolveConnectorPolicy({ sourceRead: true, organizationId, connectionId: Number(run.connection_id), actor,
+    const policy = await resolveConnectorPolicy({ skipCallerAllowlists: true, organizationId, connectionId: Number(run.connection_id), actor,
       operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
     // Source reads require current Auto authority and have no approval flow.
     // Return a veto so browser implementation steps cannot inherit an Ask.
@@ -149,7 +162,9 @@ export async function resolveRunConnectorPolicy(params: {
     if (!parentPolicy || parentPolicy.effect === 'deny') return parentPolicy ?? unavailable();
   } else if (parent.run_type !== 'sync') return unavailable();
 
-  const childPolicy = await resolvePublicRunPolicy(sql, params.organizationId, run);
+  // The parent's own admission already applied the caller allowlist; its
+  // implementation steps (e.g. Chrome navigate) are not caller-named actions.
+  const childPolicy = await resolvePublicRunPolicy(sql, params.organizationId, run, true);
   if (childPolicy.effect === 'deny') return childPolicy;
   // The running parent already received authority for its implementation steps.
   // A new Ask does not interrupt each scroll; an explicit child Block still vetoes.
