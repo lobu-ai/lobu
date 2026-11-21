@@ -314,12 +314,15 @@ export async function markTurnProviderFailed(
 ): Promise<void> {
   try {
     const sql = getDb();
+    // A temporary upstream failure informs terminal delivery. The worker can
+    // still spend its normal execution budget on its own retries.
+    const stopExtending = code !== AgentErrorCode.PROVIDER_UNAVAILABLE;
     const deadlineSec = Math.ceil(intervals.turnDefaultDeadlineMs / 1000);
     await sql`
       UPDATE public.runs
       SET action_input = action_input
         || jsonb_build_object(
-             'providerFailed', true,
+             'providerFailed', ${stopExtending}::boolean,
              'providerFailedCode', ${code}::text,
              'providerFailedReason', ${reason}::text,
              'providerFailedStatus', ${status}::int
@@ -327,7 +330,10 @@ export async function markTurnProviderFailed(
         -- At most one execution window from now. An isolate turn's heartbeat
         -- holds its marker on the longer reaper-backstop deadline, and a
         -- wedged provider-failed turn must still be told within this window.
-        run_at = LEAST(run_at, now() + (${deadlineSec}::int * interval '1 second'))
+        run_at = CASE WHEN ${stopExtending}::boolean
+          THEN LEAST(run_at, now() + (${deadlineSec}::int * interval '1 second'))
+          ELSE run_at
+        END
       WHERE status = 'pending'
         AND run_type = 'internal'
         AND queue_name = ${TURN_TIMEOUT_QUEUE}
@@ -367,7 +373,7 @@ export async function clearTurnProviderFailed(
         AND run_type = 'internal'
         AND queue_name = ${TURN_TIMEOUT_QUEUE}
         AND action_input->>'deploymentName' = ${deploymentName}
-        AND COALESCE((action_input->>'providerFailed')::boolean, false)
+        AND action_input ? 'providerFailedCode'
     `;
   } catch (err) {
     logger.error(

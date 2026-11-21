@@ -272,6 +272,29 @@ describe("secret proxy — inference-provider health writeback", () => {
     );
   });
 
+  test.each([502, 503, 504])("records HTTP %i for the turn while allowing provider retries", async (status) => {
+    await seedProvider("org-1", "zai");
+    await armMarker();
+    const proxy = makeProxy("org-1");
+    let restore = mockUpstream(status);
+    try {
+      expect((await driveSignedTurn(proxy)).status).toBe(status);
+    } finally {
+      restore();
+    }
+    expect(await markerField(markerDeployment(), "providerFailed")).toBe("false");
+    expect(await markerField(markerDeployment(), "providerFailedCode")).toBe("PROVIDER_UNAVAILABLE");
+    expect(await markerField(markerDeployment(), "providerFailedStatus")).toBe(String(status));
+
+    restore = mockUpstream(200);
+    try {
+      expect((await driveSignedTurn(proxy)).status).toBe(200);
+    } finally {
+      restore();
+    }
+    expect(await markerField(markerDeployment(), "providerFailedCode")).toBeNull();
+  });
+
   test("TL2: a subsequent 2xx clears the flag so an SDK retry that recovers is not swept", async () => {
     await seedProvider("org-1", "zai");
     await armMarker();

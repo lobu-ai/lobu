@@ -89,7 +89,7 @@ async function seedOrg(): Promise<void> {
  * answers "nothing routes" and every alias assertion below would pass for the
  * wrong reason.
  *
- * `gemini` registers as a real ApiKeyProviderModule (an API key reaches it);
+ * `groq` registers as a real ApiKeyProviderModule (an API key reaches it);
  * `claude` as a plain OAuth-shaped module, which is what it actually is — it
  * has an upstream in providers.json that only a signed-in session can use.
  */
@@ -103,17 +103,30 @@ function registerCatalogModules(): void {
 	);
 	moduleRegistry.register(
 		new ApiKeyProviderModule({
-			providerId: "gemini",
-			slug: "gemini",
+			providerId: "groq",
+			slug: "groq",
 			sdkCompat: "openai",
 			upstreamBaseUrl:
-				"https://generativelanguage.googleapis.com/v1beta/openai",
-			envVarName: "GEMINI_API_KEY",
-			providerDisplayName: "Gemini",
+				"https://api.groq.com/openai/v1",
+			envVarName: "GROQ_API_KEY",
+			providerDisplayName: "Groq",
 			providerIconUrl: "",
 			apiKeyInstructions: "",
 			apiKeyPlaceholder: "",
 			authProfilesManager: { getBestProfile: async () => null } as never,
+		}) as unknown as ModuleInterface,
+	);
+	moduleRegistry.register(
+		new ApiKeyProviderModule({
+			providerId: "gemini",
+			sdkCompat: "openai",
+			upstreamBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+			envVarName: "SYNTHETIC_GEMINI_API_KEY",
+			providerDisplayName: "Gemini",
+			providerIconUrl: "",
+			apiKeyInstructions: "",
+			apiKeyPlaceholder: "",
+			authProfilesManager: {} as never,
 		}) as unknown as ModuleInterface,
 	);
 	moduleRegistry.register(new ChatGPTOAuthModule({} as never) as unknown as ModuleInterface);
@@ -181,7 +194,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
     app.route("/api/:orgSlug/agents", agentRoutes);
     const url = `/api/${ORG}/agents/inference-providers`;
     const created = await app.request(url, { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slug: "parity", kind: "gemini", apiKey: "synthetic-parity-key" }) });
+      body: JSON.stringify({ slug: "parity", kind: "groq", apiKey: "synthetic-parity-key" }) });
     expect(created.status).toBe(201);
     expect(auth).toBeDefined();
     const sdk = buildClientSDK(toToolContext(auth!), {});
@@ -224,7 +237,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 	});
 
 	test("duplicate create remains a conflict without replacing state or audit", async () => {
-		const body = { slug: "duplicate", kind: "gemini", apiKey: "synthetic-original" };
+		const body = { slug: "duplicate", kind: "groq", apiKey: "synthetic-original" };
 		expect((await createProvider(body)).status).toBe(201);
 		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
@@ -236,7 +249,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 	});
 
 	test("audit failure rolls back provider creation, edits, defaults, keys and deletion", async () => {
-		for (const slug of ["original", "alternate"]) expect((await createProvider({ slug, kind: "gemini", apiKey: `synthetic-${slug}` })).status).toBe(201);
+		for (const slug of ["original", "alternate"]) expect((await createProvider({ slug, kind: "groq", apiKey: `synthetic-${slug}` })).status).toBe(201);
 		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
 		const snapshot = async () => ({
@@ -248,7 +261,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		await sql.unsafe("CREATE FUNCTION reject_provider_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.metadata->>'category' = 'config' THEN RAISE EXCEPTION 'synthetic provider audit failure'; END IF; RETURN NEW; END $$");
 		await sql.unsafe("CREATE TRIGGER reject_provider_audit BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION reject_provider_audit()");
 		try {
-			expect((await createProvider({ slug: "rejected", kind: "gemini", apiKey: "synthetic-rejected" })).status).toBe(500);
+			expect((await createProvider({ slug: "rejected", kind: "groq", apiKey: "synthetic-rejected" })).status).toBe(500);
 			const { agentRoutes } = await import("../agent-routes.js");
 			for (const [path, method, body] of [
 				["original", "PUT", { displayName: "Changed" }],
@@ -280,7 +293,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 			await held;
 		});
 		await ready;
-		const requests = ["parallel-first", "parallel-second"].map(slug => createProvider({ slug, kind: "gemini", apiKey: "synthetic-key" }));
+		const requests = ["parallel-first", "parallel-second"].map(slug => createProvider({ slug, kind: "groq", apiKey: "synthetic-key" }));
 		try {
 			const deadline = Date.now() + 5000;
 			while (true) {
@@ -298,32 +311,81 @@ describe("POST /inference-providers seeds a routable text model", () => {
 
 	test("a catalog provider created with NO capabilities gets the catalog default model", async () => {
 		const res = await createProvider({
-			slug: "gemini",
-			kind: "gemini",
-			apiKey: "AIza-test",
+			slug: "groq",
+			kind: "groq",
+			apiKey: "synthetic-key",
 		});
 		expect(res.status).toBe(201);
 
 		// Without the seed this remains `{}` and cannot become the org default.
-		const capabilities = (await readCapabilities("gemini")) as {
+		const capabilities = (await readCapabilities("groq")) as {
 			text?: { model?: string };
 		};
-		expect(capabilities?.text?.model).toBe("gemini-2.5-pro");
+		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
+	});
+
+	test("discovers Gemini text models under the org's provider slug after connecting", async () => {
+		const { agentRoutes } = await import("../agent-routes.js");
+		const path = "/inference-providers/team-google/models";
+		expect((await agentRoutes.request(path)).status).toBe(404);
+		expect((await createProvider({
+			slug: "team-google",
+			kind: "gemini",
+			apiKey: "synthetic-google-credential",
+		})).status).toBe(201);
+		expect(await readCapabilities("team-google")).toEqual({});
+		const originalFetch = globalThis.fetch;
+		const requests: Array<{ page: string | null; key: string | null }> = [];
+		let upstreamStatus = 200;
+		globalThis.fetch = (async (input, init) => {
+			const url = new URL(String(input));
+			const page = url.searchParams.get("pageToken");
+			requests.push({ page, key: new Headers(init?.headers).get("x-goog-api-key") });
+			if (upstreamStatus !== 200) return new Response("upstream error", { status: upstreamStatus });
+			return Response.json(page ? {
+				models: [{ name: "models/text-2", supportedGenerationMethods: ["generateContent"] }],
+			} : {
+				nextPageToken: "second",
+				models: [
+					{ name: "models/text-1", displayName: "Text One", supportedGenerationMethods: ["generateContent"] },
+					{ name: "models/embed-1", supportedGenerationMethods: ["embedContent"] },
+				],
+			});
+		}) as typeof fetch;
+		try {
+			const discovered = await agentRoutes.request(path);
+			expect(discovered.status).toBe(200);
+			expect(discovered.headers.get("cache-control")).toBe("private, no-store");
+			expect(await discovered.json()).toEqual({ models: [
+				{ id: "text-1", label: "Text One" },
+				{ id: "text-2", label: "text-2" },
+			] });
+			expect(requests).toEqual([
+				{ page: null, key: "synthetic-google-credential" },
+				{ page: "second", key: "synthetic-google-credential" },
+			]);
+			upstreamStatus = 503;
+			expect((await agentRoutes.request(path)).status).toBe(503);
+			authStash.memberRole = "member";
+			expect((await agentRoutes.request(path)).status).toBe(403);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	test("an explicitly requested model is NOT overwritten by the catalog default", async () => {
 		const res = await createProvider({
-			slug: "gemini",
-			kind: "gemini",
-			apiKey: "AIza-test",
-			capabilities: { text: { model: "gemini-2.5-flash" } },
+			slug: "groq",
+			kind: "groq",
+			apiKey: "synthetic-key",
+			capabilities: { text: { model: "explicit-text-model" } },
 		});
 		expect(res.status).toBe(201);
 
-		const capabilities = (await readCapabilities("gemini")) as {
+		const capabilities = (await readCapabilities("groq")) as {
 			text?: { model?: string };
 		};
-		expect(capabilities?.text?.model).toBe("gemini-2.5-flash");
+		expect(capabilities?.text?.model).toBe("explicit-text-model");
 	});
 
 	test("a caller-supplied base_url survives seeding", async () => {
@@ -332,8 +394,8 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		// catalog URL.
 		const res = await createProvider({
 			slug: "my-upstream",
-			kind: "gemini",
-			apiKey: "AIza-test",
+			kind: "groq",
+			apiKey: "synthetic-key",
 			capabilities: { text: { base_url: "https://tenant.example.com/v1" } },
 		});
 		expect(res.status).toBe(201);
@@ -342,27 +404,27 @@ describe("POST /inference-providers seeds a routable text model", () => {
 			text?: { model?: string; base_url?: string };
 		};
 		expect(capabilities?.text?.base_url).toBe("https://tenant.example.com/v1");
-		expect(capabilities?.text?.model).toBe("gemini-2.5-pro");
+		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
 	});
 
 	test("an ALIAS slug with no base_url IS seeded — its kind's catalog upstream routes it", async () => {
-		// `getModelPolicy` keys its module map by SLUG, so "my-gemini" matches no
+		// `getModelPolicy` keys its module map by SLUG, so "my-groq" matches no
 		// static module and synthesis is the row's only route. Synthesis falls
 		// back to the upstream the row's KIND resolves to, so the row does route
 		// and must be seeded like any other: a text model is the predicate the
 		// org-default promotion uses, and an unseeded row would be passed over
 		// even though it works.
 		const res = await createProvider({
-			slug: "my-gemini",
-			kind: "gemini",
-			apiKey: "AIza-test",
+			slug: "my-groq",
+			kind: "groq",
+			apiKey: "synthetic-key",
 		});
 		expect(res.status).toBe(201);
 
-		const capabilities = (await readCapabilities("my-gemini")) as {
+		const capabilities = (await readCapabilities("my-groq")) as {
 			text?: { model?: string; base_url?: string };
 		};
-		expect(capabilities?.text?.model).toBe("gemini-2.5-pro");
+		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
 		// Seeding must NOT write the catalog URL onto the row — the row stays
 		// "no custom upstream" so resolveUrlInvariant keeps answering
 		// `org-credential` rather than the tenant-URL `org-only` path.
@@ -428,17 +490,17 @@ describe("POST /inference-providers seeds a routable text model", () => {
 
 	test("an alias slug WITH a base_url is seeded — synthesis can route it", async () => {
 		const res = await createProvider({
-			slug: "my-gemini-2",
-			kind: "gemini",
-			apiKey: "AIza-test",
+			slug: "my-groq-2",
+			kind: "groq",
+			apiKey: "synthetic-key",
 			capabilities: { text: { base_url: "https://tenant.example.com/v1" } },
 		});
 		expect(res.status).toBe(201);
 
-		const capabilities = (await readCapabilities("my-gemini-2")) as {
+		const capabilities = (await readCapabilities("my-groq-2")) as {
 			text?: { model?: string };
 		};
-		expect(capabilities?.text?.model).toBe("gemini-2.5-pro");
+		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
 	});
 
 	test("an unknown kind with no model is still created (no catalog default to seed)", async () => {

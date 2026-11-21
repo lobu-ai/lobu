@@ -35,7 +35,10 @@ import {
 } from "../orchestration/turn-liveness.js";
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIP } from "../../utils/rate-limiter.js";
-import { classifyProviderHealthStatus } from "./provider-health-status.js";
+import {
+  classifyProviderAvailabilityStatus,
+  classifyProviderHealthStatus,
+} from "./provider-health-status.js";
 import { redactedFailure, routeFailure } from "../../diagnostics.js";
 
 /**
@@ -1232,7 +1235,8 @@ export class SecretProxy {
       expectedOrganizationId,
       resolvedSlug,
       response,
-      this.extractWorkerTokenDeployment(c)
+      this.extractWorkerTokenDeployment(c),
+      method === "POST"
     );
 
     // Build response headers (skip hop-by-hop)
@@ -1319,7 +1323,8 @@ export class SecretProxy {
     organizationId: string | undefined,
     slug: string | undefined,
     response: Response,
-    deploymentName?: string
+    deploymentName: string | undefined,
+    isPost: boolean
   ): Promise<void> {
     if (!organizationId || !slug) return;
     try {
@@ -1333,7 +1338,20 @@ export class SecretProxy {
         return;
       }
       const code = classifyProviderHealthStatus(response.status);
-      if (!code) return;
+      if (!code) {
+        const availabilityCode = isPost
+          ? classifyProviderAvailabilityStatus(response.status)
+          : undefined;
+        if (deploymentName && availabilityCode) {
+          await markTurnProviderFailed(
+            deploymentName,
+            availabilityCode,
+            `${slug}: HTTP ${response.status} — ${availabilityCode}`,
+            response.status
+          );
+        }
+        return;
+      }
       // `Retry-After` is the provider's own answer to "when does this clear",
       // in seconds or as an HTTP date — a structured horizon that needs no
       // date parsing out of a sentence. Absent on a balance wall, which is

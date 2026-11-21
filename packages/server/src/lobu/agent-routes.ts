@@ -39,6 +39,7 @@ import {
 	getOAuthProviderConfig,
 	type OAuthProviderConfig,
 } from "../gateway/auth/oauth/providers";
+import { discoverInferenceProviderModels } from "../gateway/auth/provider-model-options";
 import { buildProviderCatalog } from "../gateway/auth/provider-catalog";
 import { createAuthProfileLabel } from "../gateway/auth/settings/auth-profiles-manager";
 import { orgBucketAgentId } from "../gateway/auth/settings/user-auth-profile-store";
@@ -722,6 +723,22 @@ routes.get("/inference-providers/catalog", async (c) => {
 			"[inference-providers/catalog] failed to load bundled provider catalog"
 		);
 		return c.json({ catalog: [] });
+	}
+});
+
+routes.get("/inference-providers/:slug/models", async (c) => {
+	const denied = requireManageAgentAccess(c);
+	if (denied) return denied;
+	c.header("Cache-Control", "private, no-store");
+	try {
+		const result = await discoverInferenceProviderModels(
+			c.get("organizationId") as string,
+			c.req.param("slug"),
+		);
+		if ("error" in result) return c.json({ error: result.error }, result.status);
+		return c.json(result);
+	} catch {
+		return c.json({ error: "Model discovery is temporarily unavailable" }, 503);
 	}
 });
 
@@ -1433,6 +1450,7 @@ routes.patch("/:agentId/config", async (c) => {
 			agentId
 		);
 		if (validationError) {
+			logger.warn({ validationError: validationError.error }, "Agent settings update rejected");
 			if ("modelError" in validationError) {
 				return c.json(
 					modelValidationResponse(validationError.modelError, {
@@ -1462,6 +1480,7 @@ routes.patch("/:agentId/config", async (c) => {
 		// access widening. Reject loudly so the operator upgrades instead.
 		for (const legacyField of LEGACY_MODEL_FIELDS) {
 			if (legacyField in settingsUpdates) {
+				logger.warn({ validationError: "legacy_model_field" }, "Agent settings update rejected");
 				return c.json(
 					{
 						error: "legacy_model_field",

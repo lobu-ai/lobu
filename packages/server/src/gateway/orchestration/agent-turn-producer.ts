@@ -971,10 +971,7 @@ export async function enqueueAgentTurn(
         { agentId: data.agentId, messageId: data.messageId, model: modelRef },
         "Agent turn cannot run: no installed provider owns this model"
       );
-      // `PROVIDER_UNKNOWN_MODEL` looks apt but renders empty: it carries no
-      // `message`, expecting the provider's own error text to fill it, and no
-      // provider answered here. The agent's configured model is unusable, so
-      // report the code that says exactly that and links to agent settings.
+      // The model has no installed route. Direct the user to agent settings.
       return AgentErrorCode.NO_MODEL_CONFIGURED;
     }
 
