@@ -51,7 +51,21 @@ export async function handleConfirm(
 	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(ctx, sql);
 
 	const decided = await sql.begin(async (tx) => {
-		const run = await loadHeldOperationRun(tx, ctx.organizationId, args.run_id, "check", true);
+		// Take the connection lock first, as delete does. Otherwise delete
+		// could hold the connection while confirm holds the run and waits to
+		// insert a dispatch event that references the connection.
+		const [connection] = await tx`
+			SELECT c.id
+			FROM connections c
+			JOIN runs r ON r.connection_id = c.id AND r.organization_id = c.organization_id
+			WHERE r.id = ${args.run_id} AND r.organization_id = ${ctx.organizationId}
+				AND r.run_type = 'action' AND r.approval_status = 'check' AND r.status = 'pending'
+				AND c.deleted_at IS NULL
+			FOR SHARE OF c
+		`;
+		const run = connection
+			? await loadHeldOperationRun(tx, ctx.organizationId, args.run_id, "check", true)
+			: null;
 		if (!run) {
 			const [exists] = await tx`
 				SELECT 1 FROM runs
