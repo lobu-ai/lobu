@@ -137,6 +137,9 @@ export interface ContentSearchOptions {
   // use a bounded hybrid candidate set instead of the exact full match set. Do
   // not use for user-visible get_content pagination/totals.
   approximate_candidate_search?: boolean;
+  /** Internal search_memory projection, computed only for the final result rows.
+   *  Does not change matching, ranking, or the bounded payload_text field. */
+  include_recall_snippet?: boolean;
 
   /**
    * Recall-only: keep the best-ranked row per identical (title, payload_text)
@@ -164,6 +167,8 @@ export interface ContentSearchResult {
   automation_id?: number | null;
   automation_name?: string | null;
   payload_text: string;
+  /** Internal query-focused passage; absent/null keeps the normal text head. */
+  recall_snippet?: string | null;
   payload_truncated?: boolean | null;
   content_length?: number | string | null;
   title: string | null;

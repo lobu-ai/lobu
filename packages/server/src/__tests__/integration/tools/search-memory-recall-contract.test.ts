@@ -266,6 +266,92 @@ describe('search_memory > recall contract', () => {
     expect(ids.sort()).toEqual([...strongIds].sort());
   });
 
+  describe('query-focused content previews', () => {
+    let previewOrg: Awaited<ReturnType<typeof createTestOrganization>>;
+    let previewContext: ToolContext;
+    const answer = 'Embedding and reranking providers receive plaintext outside local trust boundaries.';
+
+    beforeAll(async () => {
+      previewOrg = await createTestOrganization({ name: 'Synthetic Passage Preview Org' });
+      await addUserToOrganization(user.id, previewOrg.id, 'owner');
+      previewContext = { ...ctx, organizationId: previewOrg.id };
+    });
+
+    it.each([
+      { name: 'late paragraph', prefix: 'GBrain overview.\n' + 'Neutral background. '.repeat(60) + '\n', query: 'GBrain embedding reranking providers receive plaintext trust boundaries' },
+      { name: 'beyond the read head', prefix: 'GBrain overview.\n' + 'Neutral background. '.repeat(450) + '\n', query: 'GBrain embedding reranking providers receive plaintext trust boundaries' },
+      { name: 'absent query term', prefix: 'GBrain overview.\n' + 'Neutral background. '.repeat(450) + '\n', query: 'GBrain embedding reranking providers receive plaintext trust boundaries absentneedle' },
+      { name: 'long token before match', prefix: 'Neutral background. '.repeat(35) + 'z'.repeat(2000) + '\n', query: 'embedding reranking providers receive plaintext trust boundaries' },
+      { name: 'stemmed query', prefix: 'Neutral background. '.repeat(60) + '\n', query: 'embedded reranked provider receiving plaintext trusted boundary' },
+      { name: 'query punctuation', prefix: 'Neutral background. '.repeat(60) + '\n', query: '"Embedding" provider\'s / reranking \\ plaintext boundaries' },
+      { name: 'markup source', prefix: 'Neutral background. '.repeat(450) + '\n', query: 'embedding reranking providers receive plaintext trust boundaries', markup: true },
+      { name: 'Unicode output budget', prefix: 'Neutral background. '.repeat(60) + '\n', query: 'embedding reranking providers receive plaintext trust boundaries', suffix: ' 🧠'.repeat(250) },
+    ])('returns a bounded matching passage for $name, preserving exact reads', async ({ name, prefix, query, markup, suffix }) => {
+      const content = prefix + (markup ? answer.replace('providers', '<b>providers</b>') : answer) + (suffix ?? '');
+      const agentId = `synthetic-preview-${name}`;
+      const event = await createTestEvent({
+        organization_id: previewOrg.id, content,
+        embedding: queryEmbedding, metadata: { agent_id: agentId },
+      });
+      const result = await search({
+        query, query_embedding: queryEmbedding, agent_id: agentId,
+        content_limit: 1, include_connections: false, include_public_catalogs: false,
+      }, env, previewContext);
+      expect(result.content?.map((item) => item.id)).toEqual([event.id]);
+      const preview = result.content![0].text_content;
+      // Same response budget as the former 500-character head plus "...".
+      expect(preview.length).toBeLessThanOrEqual(503);
+      // Headlines can replace markup with whitespace; exact reads below
+      // retain the original source bytes, including its markup.
+      const normalizedPreview = preview.replace(/\s+/g, ' ');
+      expect(normalizedPreview).toContain('providers receive plaintext');
+      expect(normalizedPreview).toContain('trust boundaries');
+      expect(content.slice(0, 500)).not.toContain('providers receive plaintext');
+
+      const exact = await search({
+        query: `memory ${event.id}`, include_connections: false, include_public_catalogs: false,
+      }, env, previewContext);
+      expect(exact.content?.find((item) => item.id === event.id)?.text_content).toBe(content);
+    });
+
+    it.each([
+      { name: 'short body', content: 'Embedding providers receive plaintext.', query: 'embedding providers', title: undefined },
+      { name: 'title-only match', content: 'Neutral background. '.repeat(80), query: 'syntheticheadline', title: 'syntheticheadline' },
+      { name: 'semantic-only match', content: 'Neutral background. '.repeat(80), query: 'unmatchedsemanticneedle', title: undefined },
+      { name: 'vector-only query', content: 'Neutral background. '.repeat(80), query: undefined, title: undefined },
+      { name: 'stopword-only query', content: 'Neutral background. '.repeat(80), query: 'the and of', title: undefined },
+    ])('preserves the existing fallback for $name', async ({ name, content, query, title }) => {
+      const agentId = `synthetic-preview-${name}`;
+      const event = await createTestEvent({
+        organization_id: previewOrg.id, content, title,
+        embedding: queryEmbedding, metadata: { agent_id: agentId },
+      });
+      const result = await search({
+        query, query_embedding: queryEmbedding, agent_id: agentId,
+        content_limit: 1, include_connections: false, include_public_catalogs: false,
+      }, env, previewContext);
+      expect(result.content?.map((item) => item.id)).toEqual([event.id]);
+      expect(result.content![0].text_content).toBe(
+        content.length > 500 ? `${content.slice(0, 500)}...` : content
+      );
+    });
+
+    it('keeps a null body readable without inventing preview text', async () => {
+      const sql = getTestDb();
+      const [event] = await sql`
+        INSERT INTO events (organization_id, origin_id, payload_type, payload_text, title, metadata)
+        VALUES (${previewOrg.id}, 'synthetic-null-preview', 'empty', NULL, 'nullpreviewneedle',
+          ${sql.json({ agent_id: 'synthetic-null-preview' })})
+        RETURNING id
+      `;
+      const result = await search({
+        query: 'nullpreviewneedle', agent_id: 'synthetic-null-preview',
+        include_connections: false, include_public_catalogs: false,
+      }, env, previewContext);
+      expect(result.content?.find((item) => item.id === Number(event.id))?.text_content).toBe('');
+    });
+  });
+
   // ── DEFECT A ────────────────────────────────────────────────────────────
   it('always emits the content facet when include_content is true, even with zero hits', async () => {
     // A query that matches NOTHING — neither lexically nor by vector. This is

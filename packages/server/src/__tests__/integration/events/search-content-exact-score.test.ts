@@ -60,7 +60,7 @@ describe('searchContentByText > exact org-wide score semantics', () => {
         entity_id: entity.id,
         connection_id: connection.id,
         organization_id: org.id,
-        content: `synthetic vector record ${i}`,
+        content: `synthetic vector record ${i}. ${'Neutral background. '.repeat(350)} semanticneedle is in the tail.`,
         embedding: axisVec(0),
       });
     }
@@ -85,22 +85,38 @@ describe('searchContentByText > exact org-wide score semantics', () => {
           return Reflect.get(target, key);
         },
       });
-    const result = await searchContentBySingleQuery(wrap(sql), 'unmatchedsyntheticneedle', {
+    const options = {
       organization_id: org.id,
       query_embedding: axisVec(0),
       min_similarity: 0.9,
       limit: 5,
-      sort_by: 'score',
+      sort_by: 'score' as const,
+    };
+    const withoutPreviews = await searchContentBySingleQuery(sql, 'semanticneedle', options);
+    const result = await searchContentBySingleQuery(wrap(sql), 'semanticneedle', {
+      ...options, include_recall_snippet: true,
     });
+    const ranks = (rows: typeof result.content) =>
+      rows.map(({ id, similarity, combined_score }) => ({ id, similarity, combined_score }));
+    expect(ranks(result.content)).toEqual(ranks(withoutPreviews.content));
+    expect(result.content.every((row) => row.recall_snippet?.includes('semanticneedle'))).toBe(true);
+    // The shared list/search text-head contract stays independent of previews.
+    expect(result.content.map((row) => row.payload_text)).toEqual(
+      withoutPreviews.content.map((row) => row.payload_text)
+    );
     expect(result.total).toBe(24);
     expect(result.content).toHaveLength(5);
     if (!captured) throw new Error('search statement was not captured');
 
-    type PlanNode = { 'Relation Name'?: string; 'Actual Loops': number; Plans?: PlanNode[] };
-    const plan = await sql.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${captured.query}`, captured.params);
+    type PlanNode = { 'Relation Name'?: string; 'Actual Loops': number; 'Actual Rows': number; Output?: string[]; Plans?: PlanNode[] };
+    const plan = await sql.unsafe(`EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) ${captured.query}`, captured.params);
     let embeddingLookups = 0;
+    let headlineEvaluations = 0;
     const visit = (node: PlanNode) => {
       if (node['Relation Name'] === 'event_embeddings') embeddingLookups += node['Actual Loops'];
+      if (node.Output?.some((column) => column.includes('ts_headline('))) {
+        headlineEvaluations += node['Actual Loops'] * node['Actual Rows'];
+      }
       for (const child of node.Plans ?? []) visit(child);
     };
     visit(plan[0]['QUERY PLAN'][0].Plan);
@@ -109,6 +125,10 @@ describe('searchContentByText > exact org-wide score semantics', () => {
     // subquery pair scored every event twice (2N lookups).
     expect(embeddingLookups).toBeGreaterThan(0);
     expect(embeddingLookups).toBeLessThanOrEqual(Number(count.n));
+    // Passage parsing must happen only after the result limit, not on the
+    // 24 eligible documents scanned while selecting the five best hits.
+    expect(headlineEvaluations).toBeGreaterThan(0);
+    expect(headlineEvaluations).toBeLessThanOrEqual(result.content.length);
   });
 
   it('keeps exact title-only matches on the default path', async () => {
