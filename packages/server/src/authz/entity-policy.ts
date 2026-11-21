@@ -27,6 +27,7 @@
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
 import { type DbClient, getDb, pgBigintArray } from "../db/client";
+import { loadCallerActionAllowlists } from "./caller-action-allowlist";
 import {
 	type ConnectorPolicyCategory,
 	type ConnectorPolicyKind,
@@ -1419,12 +1420,22 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 
 /** Connector decisions share one evaluator across admission, discovery and inspection. */
 export async function resolveConnectorPolicy(
-	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies"> & { sql?: DbClient },
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlists"> & {
+		sql?: DbClient;
+		/** The verified token's app principal; a PAT's allowlist applies even when an agent is bound. */
+		appPrincipalId?: string | null;
+		/**
+		 * Source reads and internal browser steps of an admitted parent are not
+		 * caller-named actions, so caller allowlists do not apply to them.
+		 */
+		skipCallerAllowlists?: boolean;
+	},
 ) {
-	return evaluateConnectorPolicy({
-		...args,
-		policies: await listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
-	});
+	const [policies, allowlists] = await Promise.all([
+		listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
+		args.skipCallerAllowlists ? [] : loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql),
+	]);
+	return evaluateConnectorPolicy({ ...args, policies, allowlists });
 }
 
 /** Reconstruct the original requester from a durable operation, never its reviewer. */

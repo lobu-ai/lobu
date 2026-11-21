@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { captureEffect, type CaptureIdentity } from '../gateway/routes/internal/capture-mode';
 import type { AgentTurnIdentity } from './turn-write-idempotency';
 import type { ChatSenderReach } from '../auth/oauth/types';
-import { isTokenDerivedSession } from '../auth/oauth/scopes';
+import { isTokenDerivedSession, patPrincipalFromSession } from '../auth/oauth/scopes';
 import { resolveToolWorkspaceTarget } from '../sandbox/client-sdk';
 import { recordedOperationFailure, scriptFailureTelemetry } from '../sandbox/run-script';
 import { verifiedAutomationSource } from '../automations/automation-source';
@@ -195,7 +195,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     tokenDerivedSession: isTokenDerivedSession(c.var.session),
     tokenName: mcpAuthInfo?.tokenName ?? null,
     authorizationGrantType: mcpAuthInfo?.authorizationGrantType ?? null,
-    appPrincipalId: mcpAuthInfo?.appPrincipalId ?? null,
+    appPrincipalId: mcpAuthInfo?.appPrincipalId ?? patPrincipalFromSession(c.var.session),
     clientIP: getClientIP(c.req.raw, c.var.peerRemoteAddress),
     // Token callers (oauth/pat) carry real MCP scopes — pass them straight
     // through so `hasRequiredMcpScope` gates on the actual grant. Session and

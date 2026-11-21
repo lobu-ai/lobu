@@ -396,6 +396,20 @@ describe('operation policy at durable dispatch', () => {
     expect(await decision(parent)).toMatchObject({ effect: 'approval' });
     expect(await decision(child)).toMatchObject({ effect: 'auto', reason: 'parent_approval' });
     expect(await admit(child)).toBe(true);
+
+    // A caller allowlist names the admitted operation, not its implementation steps.
+    const agentId = 'allowlisted-dispatch-agent';
+    await createTestAgent({ organizationId, agentId });
+    await sql`INSERT INTO caller_action_allowlists (organization_id, subject_kind, subject_id, entries)
+      VALUES (${organizationId}, 'agent', ${agentId}, ${sql.json([
+        { action: 'connector.execute', connection_id: connectionId, operation_key: 'perform', effect: 'auto' },
+      ])})`;
+    const agentRun = (options: Parameters<typeof run>[0]) => run({ principalKind: 'agent', principalId: agentId, ...options });
+    const agentParent = await agentRun({ status: 'running' });
+    const agentChild = await agentRun({ operation: 'scroll', parent: agentParent,
+      metadata: { [CONNECTOR_PARENT_RUN_METADATA_KEY]: agentParent } });
+    expect(await decision(agentChild)).toMatchObject({ effect: 'auto', reason: 'parent_approval' });
+    expect((await decision(await agentRun({ operation: 'scroll' })))?.effect).toBe('deny');
   });
 
   it('lets an explicit child Block veto inherited parent approval', async () => {
