@@ -1,4 +1,5 @@
 import type { GuardrailStage } from "@lobu/core";
+import { assertAgentConfigReadAllowed } from "../authz/agent-config-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
 import { getDb } from "../db/client";
 import { resolveAutomationEventCatalog } from "../automations/connector-derived";
@@ -6,6 +7,7 @@ import { withPlatformAutomationEvents } from "../automations/platform-event-cata
 import { getModelProviderModules } from "../gateway/modules/module-system";
 import type { Env } from "../index";
 import { getLobuCoreServices } from "../lobu/gateway";
+import { orgContext } from "../lobu/stores/org-context";
 import { createPostgresAgentConfigStore } from "../lobu/stores/postgres-stores";
 import {
 	EMPTY_SUMMARY,
@@ -208,12 +210,17 @@ export async function listOrgInstalled(
 export async function listAgentInstalled(
 	agentId: string,
 	kinds: AgentInstalledKind[],
+	ctx: ToolContext,
 	options: ListInstalledOptions = {}
 ): Promise<InstalledListResponse["installed"]> {
 	const result: InstalledListResponse["installed"] = {};
 	const wanted = new Set(kinds);
 
-	const settings = await configStore.getSettings(agentId);
+	await assertAgentConfigReadAllowed(ctx, agentId);
+	const settings = await orgContext.run(
+		{ organizationId: ctx.organizationId },
+		() => configStore.getSettings(agentId),
+	);
 	if (!settings) return result;
 
 	if (wanted.has("skills")) {

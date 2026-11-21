@@ -1253,7 +1253,20 @@ describe('agent turn producer', () => {
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
   });
 
-  it('REGRESSION: an Automation run seeds its VERSION-PINNED skills, not the live library', async () => {
+  it.each([
+    { label: 'normal', skills: [{ name: 'frozen', content: 'Frozen instructions.' }], readable: true },
+    { label: 'empty', skills: [], readable: true },
+    { label: 'maximum name', skills: [{ name: 'x'.repeat(128), content: 'Frozen instructions.' }], readable: true },
+    { label: 'dot', skills: [{ name: '.', content: 'Frozen instructions.' }], readable: false },
+    { label: 'parent', skills: [{ name: '..', content: 'Frozen instructions.' }], readable: false },
+    { label: 'long name', skills: [{ name: 'x'.repeat(129), content: 'Frozen instructions.' }], readable: false },
+    { label: 'maximum UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_384) }], readable: true },
+    { label: 'maximum count and bytes', skills: Array.from({ length: 5 }, (_, i) => ({ name: `pin-${i}`, content: i === 0 ? 'é'.repeat(16_382) : 'x' })), readable: true },
+    { label: 'excess UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_385) }], readable: false },
+    { label: 'legacy oversized body', skills: [{ name: 'oversized', content: 'x'.repeat(64_001) }], readable: false },
+    { label: 'legacy excess count', skills: Array.from({ length: 65 }, (_, i) => ({ name: `pin-${i}`, content: 'Frozen instructions.' })), readable: false },
+    { label: 'duplicate names', skills: [{ name: 'same', content: 'First.' }, { name: 'same', content: 'Second.' }], readable: false },
+  ])('an Automation run seeds its pinned skills or rejects an unreadable snapshot: $label', async ({ skills, readable }) => {
     // The live library must not re-enter a frozen Automation: editing or
     // disabling a skill after approval would change the instructions an
     // already-approved Automation runs, and unrelated live skills would join
@@ -1272,7 +1285,7 @@ describe('agent turn producer', () => {
     const [version] = await sql<{ id: number }>`
       INSERT INTO automation_versions (automation_id, version, name, created_by, prompt, skills)
       VALUES (${automationId}, 1, 'Pinned skills', ${author.id}, 'prompt',
-        ${sql.json([{ name: 'frozen', content: 'Frozen instructions.' }])})
+        ${sql.json(skills)})
       RETURNING id
     `;
     const [runRow] = await sql<{ id: number }>`
@@ -1299,14 +1312,20 @@ describe('agent turn producer', () => {
     const inputId = await sql.begin((tx) => insertQueueJob(tx as never, 'messages', message, {
       initiator: resolveRunInitiator({ userId: author.id }),
     }));
-    await enqueueAgentTurn(
+    const enqueue = () => enqueueAgentTurn(
       { ...message, runId: Number(inputId) },
       { agentSettings: liveSettings, catalog: catalogFor(claudeModule()), mcp: mcpFixture().mcp, gatewayUrl: GATEWAY_URL },
     );
+    if (!readable) {
+      await expect(enqueue()).rejects.toThrow(/malformed pinned skills/);
+      expect(await agentTurnRuns()).toHaveLength(0);
+      return;
+    }
+    await enqueue();
 
     const runs = await agentTurnRuns();
     const turn = runs[runs.length - 1]!.action_input.turn as { skills?: Array<{ name: string; content: string }> };
-    expect(turn.skills).toEqual([{ name: 'frozen', content: 'Frozen instructions.' }]);
+    expect(turn.skills ?? []).toEqual(skills);
     expect(runs.at(-1)).toMatchObject({
       initiator_kind: 'automation',
       initiator_ref: { automation_id: automationId, run_id: Number(runRow!.id) },

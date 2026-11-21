@@ -44,6 +44,10 @@ import {
   type ActingPrincipal,
 } from '../../authz/entity-policy';
 
+import {
+  agentConfigReadAllowed,
+  assertAgentConfigReadAllowed,
+} from '../../authz/agent-config-access';
 import { createDbClientFromEnv, getDb, type DbClient } from '../../db/client';
 import type { Env } from '../../index';
 import {
@@ -235,55 +239,6 @@ async function validateField(
   }
 }
 
-/**
- * agent_config read gate for list/get. Humans skip (admin tier is separate).
- * Default is auto; deny by target via target_agent_id (or blanket deny + whitelist).
- */
-async function assertAgentConfigReadAllowed(
-  ctx: ToolContext,
-  targetAgentId: string | null,
-): Promise<void> {
-  const actor = await actingPrincipalFor(ctx);
-  if (actor.kind === "user") return;
-  const decision = await resolveWritePolicyDecision({
-    organizationId: ctx.organizationId,
-    resourceClass: "agent_config",
-    principalKind: actor.kind,
-    principalId: actor.id,
-    ownerAgentId: actor.ownerAgentId,
-    ownerResolved: actor.ownerResolved,
-    action: "read",
-    targetAgentId,
-  });
-  // require_approval collapses to deny for read (see resolveWritePolicyDecision).
-  if (decision !== "allow") {
-    const label = targetAgentId?.trim() || "agents";
-    throw new ToolUserError(
-      `Policy denies reading agent '${label}' for this principal.`,
-      403,
-    );
-  }
-}
-
-async function agentConfigReadAllowed(
-  ctx: ToolContext,
-  actor: ActingPrincipal,
-  targetAgentId: string,
-): Promise<boolean> {
-  if (actor.kind === "user") return true;
-  const decision = await resolveWritePolicyDecision({
-    organizationId: ctx.organizationId,
-    resourceClass: "agent_config",
-    principalKind: actor.kind,
-    principalId: actor.id,
-    ownerAgentId: actor.ownerAgentId,
-    ownerResolved: actor.ownerResolved,
-    action: "read",
-    targetAgentId,
-  });
-  return decision === "allow";
-}
-
 async function handleList(
   _args: ListArgs,
   ctx: ToolContext,
@@ -315,7 +270,7 @@ async function handleList(
   for (const agent of agents) {
     let ok = cache.get(agent.id);
     if (ok === undefined) {
-      ok = await agentConfigReadAllowed(ctx, actor, agent.id);
+      ok = await agentConfigReadAllowed(ctx, agent.id, actor);
       cache.set(agent.id, ok);
     }
     if (ok) allowed.push(agent);

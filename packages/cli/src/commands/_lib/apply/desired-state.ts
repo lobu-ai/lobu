@@ -10,6 +10,7 @@ import type {
   FeedDefinition,
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
+import { skillDirectoryName } from "@lobu/core/agent-tooling";
 import { createAjv } from "@lobu/core/ajv";
 import { hasWorkspaceAttachment } from "@lobu/core/contracts/tools/view-attach";
 import {
@@ -521,9 +522,9 @@ function resolveAutomationSkills(
   if (names.length === 0) return [];
   const byName = new Map(agentSkills.map((skill) => [skill.name, skill]));
   const resolved = names.map((name) => {
-    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+    if (skillDirectoryName(name) !== name) {
       throw new ValidationError(
-        `Automation "${automation.slug}" cannot pin skill "${name}" — names may contain only letters, numbers, ".", "_", and "-"`
+        `Automation "${automation.slug}" cannot pin skill "${name}" — names may contain only 1–128 letters, numbers, ".", "_", and "-", excluding "." and ".."`
       );
     }
     const skill = byName.get(name);
@@ -1358,6 +1359,7 @@ export async function loadDesiredStateFromConfig(
   // The bodies are no longer folded into `prompt`: the prompt is the author's
   // task statement (or empty), and skills ride alongside as pinned files.
   for (const automation of state.automations) {
+    if (automation.skills === undefined) continue;
     automation.skillSnapshots = resolveAutomationSkills(
       automation,
       automation.agent ? (skillsByAgentId.get(automation.agent) ?? []) : []
