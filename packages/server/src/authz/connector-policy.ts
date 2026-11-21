@@ -1,5 +1,6 @@
 import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
+import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
 import type { ActingPrincipal, EntityApprovalPolicy } from "./entity-policy";
 import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
@@ -170,9 +171,16 @@ export function evaluateConnectorPolicy(args: {
 	operation: PolicyOperation;
 	actor: ActingPrincipal;
 	policies: readonly EntityApprovalPolicy[];
+	allowlist?: readonly AllowedAction[] | null;
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
+	}
+	const allowedEffect = args.allowlist
+		? allowedConnectorEffect(args.allowlist, args.connectionId, args.operation.operation_key)
+		: "auto";
+	if (allowedEffect === "deny") {
+		return { effect: "deny", ruleIds: [], rules: [], reason: "guardrail" };
 	}
 	const key = qualifiedOperationKey(
 		args.operation.connector_key,
@@ -235,6 +243,12 @@ export function evaluateConnectorPolicy(args: {
 		// A guardrail only raises the result; an equally strict guardrail still
 		// explains it.
 		if (writeEffectRank(candidate) >= writeEffectRank(effect)) fold(rule, candidate);
+	}
+	const allowlistEffect = allowedEffect === "check" && !canConfirmCheck(args.actor)
+		? "approval"
+		: allowedEffect;
+	if (writeEffectRank(allowlistEffect) > writeEffectRank(effect)) {
+		return { effect: allowlistEffect, ruleIds: [], rules: [], reason: "guardrail" };
 	}
 	const ordered = [...contributors].sort(
 		(a, b) => Number(a.kind === "grant") - Number(b.kind === "grant") || a.id - b.id,

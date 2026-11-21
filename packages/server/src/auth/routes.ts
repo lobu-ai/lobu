@@ -31,7 +31,8 @@ import {
   DEFAULT_SCOPES,
   DEFAULT_SCOPES_STRING,
   isTokenDerivedSession,
-  TOKEN_DERIVED_SESSION_USER_AGENT,
+  patPrincipalFromSession,
+  tokenDerivedSessionUserAgent,
 } from './oauth/scopes';
 import { PersonalAccessTokenService, recordAccessTokenEvent } from './tokens';
 import { hasRequiredMcpScope } from './tool-access';
@@ -425,20 +426,20 @@ function assertLoopbackClient(
 async function createSessionToken(
   c: Context<{ Bindings: Env }>,
   userId: string,
-  options: { activeOrganizationId: string | null; tokenDerived: boolean }
+  options: { activeOrganizationId: string | null; tokenDerived: boolean; patPrincipalId?: string | null }
 ): Promise<string | null> {
   const auth = await createAuth(c.env, c.req.raw);
   const ctx = await auth.$context;
   const session = await ctx.internalAdapter.createSession(userId, undefined, {
     ...(options.activeOrganizationId ? { activeOrganizationId: options.activeOrganizationId } : {}),
-    ...sessionOriginFields(options.tokenDerived),
+    ...sessionOriginFields(options),
   });
   return session?.token ?? null;
 }
 
 /** See `isTokenDerivedSession`; every session this file mints states its origin. */
-function sessionOriginFields(tokenDerived: boolean): { userAgent?: string } {
-  return tokenDerived ? { userAgent: TOKEN_DERIVED_SESSION_USER_AGENT } : {};
+function sessionOriginFields(options: { tokenDerived: boolean; patPrincipalId?: string | null }): { userAgent?: string } {
+  return options.tokenDerived ? { userAgent: tokenDerivedSessionUserAgent(options.patPrincipalId) } : {};
 }
 
 /**
@@ -451,7 +452,7 @@ function sessionOriginFields(tokenDerived: boolean): { userAgent?: string } {
 async function mintSessionCookieValue(
   c: Context<{ Bindings: Env }>,
   userId: string,
-  options: { tokenDerived: boolean }
+  options: { tokenDerived: boolean; patPrincipalId?: string | null }
 ): Promise<
   | {
       cookieName: string;
@@ -467,7 +468,7 @@ async function mintSessionCookieValue(
   const session = await authContext.internalAdapter.createSession(
     userId,
     undefined,
-    sessionOriginFields(options.tokenDerived)
+    sessionOriginFields(options)
   );
   const sessionToken = session?.token;
   if (!sessionToken) return { error: 'failed to mint session' };
@@ -552,7 +553,7 @@ async function resolveDeepLinkToken(
   token: string,
   options: { acceptPre094ChromePanel?: boolean } = {}
 ): Promise<
-  { userId: string; organizationId: string | null; tokenDerived: boolean } | 'insufficient_scope' | null
+  { userId: string; organizationId: string | null; tokenDerived: boolean; patPrincipalId: string | null } | 'insufficient_scope' | null
 > {
   const sql = createDbClientFromEnv(c.env);
   const baseUrl = resolveBaseUrl({ request: c.req.raw });
@@ -567,6 +568,7 @@ async function resolveDeepLinkToken(
       userId: authInfo.userId,
       organizationId: authInfo.organizationId,
       tokenDerived: true,
+      patPrincipalId: authInfo.tokenType === 'pat' ? authInfo.appPrincipalId ?? null : null,
     };
   }
   // Otherwise treat it as a Better Auth session token. Better Auth's adapter
@@ -580,6 +582,7 @@ async function resolveDeepLinkToken(
     organizationId: session.session.activeOrganizationId ?? null,
     // A session hop keeps the origin of the session it came from.
     tokenDerived: isTokenDerivedSession(session.session),
+    patPrincipalId: patPrincipalFromSession(session.session),
   };
 }
 
@@ -630,6 +633,7 @@ async function handleExchangeToken(
 
   const minted = await mintSessionCookieValue(c, identity.userId, {
     tokenDerived: identity.tokenDerived,
+    patPrincipalId: identity.patPrincipalId,
   });
   if ('error' in minted) {
     return c.json(
@@ -694,6 +698,7 @@ credentialRoutes.post('/extension-session', async (c) => {
   const sessionToken = await createSessionToken(c, identity.userId, {
     activeOrganizationId: identity.organizationId,
     tokenDerived: identity.tokenDerived,
+    patPrincipalId: identity.patPrincipalId,
   });
   if (!sessionToken) {
     return c.json(

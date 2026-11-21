@@ -6,9 +6,10 @@ import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
 import { listEntityApprovalPolicies, resolveActingPrincipal, resolveConnectorPolicy, upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
-import { postForm } from "../../setup/test-helpers";
+import { mcpRequest, mcpToolsCall, postForm } from "../../setup/test-helpers";
+import { TestApiClient } from "../../setup/test-mcp-client";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { addUserToOrganization, createTestAccessToken, createTestAgent, createTestConnection, createTestConnectorDefinition, createTestOAuthClient, createTestOrganization, createTestPAT, createTestSession, createTestUser } from "../../setup/test-fixtures";
+import { addUserToOrganization, createTestAccessToken, createTestAgent, createTestConnection, createTestConnectorDefinition, createTestEntity, createTestOAuthClient, createTestOrganization, createTestPAT, createTestSession, createTestUser } from "../../setup/test-fixtures";
 
 const env = { ENVIRONMENT: "test", DATABASE_URL: process.env.DATABASE_URL, BETTER_AUTH_SECRET: "test-auth-secret-for-testing-only", RATE_LIMIT_ENABLED: "false" } as Env;
 let org: Awaited<ReturnType<typeof createTestOrganization>>;
@@ -306,6 +307,159 @@ describe("connector policy collection", () => {
     await getTestDb()`UPDATE "member" SET role = 'owner' WHERE "userId" = ${owner.id} AND "organizationId" = ${org.id}`;
     await getTestDb()`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = ${token.id}`;
     expect((await request("GET", path(), undefined, token.token)).status).toBe(401);
+  });
+});
+
+describe("caller action allowlists", () => {
+  const allowlistPath = (kind: "agent" | "pat", id: string | number) =>
+    `/api/${org.slug}/write-permissions/allowlists/${kind}/${id}`;
+  async function readAllowlist(route: string) {
+    const response = await request("GET", route);
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+  async function replaceAllowlist(route: string, entries: unknown[]) {
+    const { revision } = await readAllowlist(route);
+    const response = await request("PUT", route, { revision, entries });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return response.json();
+  }
+
+  it("distinguishes inherited and empty allowlists, validates targets, and serializes edits", async () => {
+    const pat = await createTestPAT(owner.id, org.id, { scope: "mcp:read mcp:write mcp:admin" });
+    const route = allowlistPath("pat", pat.id);
+    const before = await readAllowlist(route);
+    expect(before.entries).toBeNull();
+    const foreignOrg = await createTestOrganization();
+    const foreign = await createTestEntity({ name: "Foreign record", organization_id: foreignOrg.id });
+    const own = await createTestEntity({ name: "Local record", organization_id: org.id });
+    const entry = { action: "entity.update", entity_id: own.id };
+    for (const entries of [[entry, entry], [{ ...entry, entity_id: foreign.id }], Array(101).fill(entry)]) {
+      expect((await request("PUT", route, { revision: before.revision, entries })).status).toBe(400);
+    }
+    expect((await request("GET", route, undefined, pat.token)).status).toBe(403);
+    expect((await request("PUT", route, { revision: before.revision, entries: [] }, pat.token)).status).toBe(403);
+    expect((await request("DELETE", route, { revision: before.revision }, pat.token)).status).toBe(403);
+    expect((await request("GET", allowlistPath("agent", "missing-agent"))).status).toBe(404);
+    const results = await Promise.all([[], [entry]].map(entries =>
+      request("PUT", route, { revision: before.revision, entries }),
+    ));
+    expect(results.map(response => response.status).sort()).toEqual([200, 409]);
+    const empty = await replaceAllowlist(route, []);
+    expect(empty.entries).toEqual([]);
+    expect(empty.revision).not.toBe(before.revision);
+    expect((await request("DELETE", route, { revision: before.revision })).status).toBe(409);
+    const reset = await request("DELETE", route, { revision: empty.revision });
+    expect(reset.status).toBe(200);
+    expect(await reset.json()).toEqual(before);
+  });
+
+  it("limits agent SDK and PAT SDK/MCP updates to the two named records", async () => {
+    await upsertEntityApprovalPolicy(org.id, { resourceClass: "entity", effects: { update: "auto" } });
+    const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+    const sdk = await TestApiClient.for({
+      organizationId: org.id, userId: owner.id, memberRole: "owner", agentId: agent.agentId,
+    });
+    const pat = await createTestPAT(owner.id, org.id, { scope: "mcp:read mcp:write mcp:admin" });
+    const mcp = { token: pat.token, orgSlug: org.slug };
+    const updateViaSdk = (entity_id: number, name: string) => mcpToolsCall("run_sdk", {
+      script: `export default async (_ctx, client) => client.entities.update(${JSON.stringify({ entity_id, name })});`,
+    }, mcp);
+    for (const [kind, id] of [["agent", agent.agentId], ["pat", pat.id]] as const) {
+      const [first, second, outside] = await Promise.all(["First", "Second", "Outside"].map(name =>
+        createTestEntity({ name: `${kind} ${name}`, organization_id: org.id }),
+      ));
+      await replaceAllowlist(allowlistPath(kind, id), [first, second].map(record => ({
+        action: "entity.update", entity_id: record.id,
+      })));
+      if (kind === "agent") {
+        await sdk.entities.update({ entity_id: first.id, name: "Updated agent first" });
+        await sdk.entities.update({ entity_id: second.id, name: "Updated agent second" });
+        await expect(sdk.entities.update({ entity_id: outside.id, name: "Forbidden" })).rejects.toMatchObject({ httpStatus: 403 });
+      } else {
+        const updated = await updateViaSdk(first.id, "Updated pat first");
+        expect(updated.success, JSON.stringify(updated.error)).toBe(true);
+        await mcpToolsCall("manage_entity", { action: "update", entity_id: second.id, name: "Updated pat second" }, mcp);
+        const blockedSdk = await updateViaSdk(outside.id, "Forbidden");
+        expect(blockedSdk).toMatchObject({ success: false, error: { code: "PERMISSION" } });
+        const blocked = await mcpRequest("tools/call", {
+          name: "manage_entity", arguments: { action: "update", entity_id: outside.id, name: "Forbidden" },
+        }, mcp);
+        expect(blocked.result.isError).toBe(true);
+        const exchange = await postForm("/api/extension-session", { token: pat.token });
+        expect(exchange.status).toBe(200);
+        const { session_token } = await exchange.json();
+        const webWrite = await request("POST", `/api/${org.slug}/manage_entity`, {
+          action: "update", entity_id: outside.id, name: "Forbidden",
+        }, session_token);
+        expect(webWrite.status).toBe(403);
+        const read = await mcpToolsCall("run_sdk", {
+          script: `export default async (_ctx, client) => client.entities.get({entity_id: ${outside.id}});`,
+        }, mcp);
+        expect(read).toMatchObject({ success: true });
+      }
+      const sql = getTestDb();
+      const rows = await sql`SELECT name FROM entities WHERE id IN (${first.id}, ${second.id}, ${outside.id}) ORDER BY name`;
+      expect(rows.map(row => row.name)).toEqual([`Updated ${kind} first`, `Updated ${kind} second`, `${kind} Outside`]);
+    }
+  });
+
+  it("holds named operations for Ask or Check and applies workspace restrictions", async () => {
+    const key = "caller-allowlist-fixture";
+    await createTestConnectorDefinition({
+      key, name: "Caller allowlist fixture", organization_id: org.id, auth_schema: { methods: [{ type: "none" }] },
+    });
+    const sql = getTestDb();
+    const actions = Object.fromEntries(["ask", "check", "log", "restricted", "outside"].map(name => [
+      name, { name, kind: "write" },
+    ]));
+    await sql`UPDATE connector_definitions SET supports_execute = true, actions_schema = ${sql.json(actions)}
+      WHERE organization_id = ${org.id} AND key = ${key}`;
+    await sql`UPDATE connector_versions SET compiled_code = ${`
+      class ConnectorRuntime {
+        async sync() { return { items: [] }; }
+        async execute() { return { success: true, output: { fixture: true } }; }
+      }
+      module.exports = { ConnectorRuntime };
+    `} WHERE connector_key = ${key}`;
+    const { id: connection_id } = await createTestConnection({
+      organization_id: org.id, connector_key: key, created_by: owner.id,
+    });
+    const pat = await createTestPAT(owner.id, org.id, { scope: "mcp:read mcp:write" });
+    const route = allowlistPath("pat", pat.id);
+    const entry = (name: string, effect: string) =>
+      ({ action: "connector.execute", connection_id, operation_key: name, effect });
+    const { revision } = await snapshot();
+    expect((await request("PUT", path(), { revision, rules: [
+      { effect: "auto" },
+      { operation_key: `${key}::restricted`, kind: "guardrail", effect: "deny" },
+    ] })).status).toBe(200);
+    const before = await readAllowlist(route);
+    expect((await request("PUT", route, { revision: before.revision, entries: [entry("missing", "auto")] })).status).toBe(400);
+    await replaceAllowlist(route, [entry("ask", "approval"), entry("check", "check"), entry("log", "log"), entry("restricted", "auto")]);
+    const operationPath = `/api/${org.slug}/manage_operations`;
+    const execute = (operation_key: string) => request("POST", operationPath, {
+      action: "execute", connection_id, operation_key, input: {},
+    }, pat.token);
+    expect(await (await execute("ask")).json()).toMatchObject({ status: "pending_approval" });
+    const check = await (await execute("check")).json();
+    expect(check).toMatchObject({ status: "pending_check", run_id: expect.any(Number) });
+    const logged = await (await execute("log")).json();
+    expect(logged, JSON.stringify(logged)).toMatchObject({ status: "completed", output: { fixture: true } });
+    const [ledger] = await sql`SELECT metadata FROM events WHERE run_id = ${logged.run_id}
+      AND organization_id = ${org.id} AND semantic_type = 'operation' AND superseded_by IS NULL`;
+    expect(ledger?.metadata).toMatchObject({ policy: { effect: "log" } });
+    for (const name of ["outside", "restricted"]) {
+      const response = await execute(name);
+      expect(await response.json(), name).toMatchObject({
+        error: expect.stringContaining(`Policy blocks '${name}'`),
+      });
+    }
+    await replaceAllowlist(route, []);
+    const confirmation = await request("POST", operationPath, {
+      action: "confirm", run_id: check.run_id, statement: "Inspected the inputs",
+    }, pat.token);
+    expect(await confirmation.json()).toMatchObject({ error: expect.stringContaining("Policy now blocks") });
   });
 });
 

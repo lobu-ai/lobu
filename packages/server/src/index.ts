@@ -35,6 +35,7 @@ import {
 	serializeEntityApprovalPolicy,
 	writePermissionPolicy,
 } from "./http/permission-policy-write";
+import { callerActionAllowlist } from "./http/caller-action-allowlists";
 import { readConnectorPolicyCollection, replaceConnectorPolicyCollection } from "./http/connector-policy-collection";
 import { globalCatalogRoutes, orgInstalledRoutes } from "./catalog/routes";
 import { connectionTokenRoutes } from "./connect/connection-token-route";
@@ -1306,6 +1307,7 @@ app.get("/api/:orgSlug/write-permissions", mcpAuth, async (c) => {
 });
 
 app.get("/api/:orgSlug/write-permissions/explain", mcpAuth, explainPermissionPolicy);
+app.on(["GET", "PUT", "DELETE"], "/api/:orgSlug/write-permissions/allowlists/:kind/:id", mcpAuth, callerActionAllowlist);
 app.get("/api/:orgSlug/write-permissions/connector-actions", mcpAuth, readConnectorPolicyCollection);
 app.put("/api/:orgSlug/write-permissions/connector-actions", mcpAuth, replaceConnectorPolicyCollection);
 
