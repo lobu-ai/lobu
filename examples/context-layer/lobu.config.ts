@@ -13,6 +13,9 @@
  */
 import {
   defineAgent,
+  defineAutomation,
+  defineSkill,
+  reactionFromFile,
   defineAuthProfile,
   defineConfig,
   defineConnection,
@@ -22,8 +25,30 @@ import {
 } from "@lobu/cli/config";
 import { CHURN_ROLLUP_SQL } from "./scripts/lib/env.ts";
 
+const definitionSummarySkill = defineSkill({
+  name: "current-metric-definition",
+  description:
+    "Summarize a saved metric-definition snapshot, including withdrawal.",
+  content: `Read this run's saved sources.metric_snapshot with knowledge.read.
+Use only that snapshot for the current definition summary; later source edits
+belong to a later run. Read the skill before completing the window.
+Emit exactly one summaries row. Its metadata must contain
+summary_kind: "current-metric-definition", metric: "churn_rate", the snapshot's
+state, and evidence_event_ids copied from snapshot.evidence[].event_id.
+For ready state, summarize the definition and effective date and cite its event
+ID in the content. Do not infer warehouse numbers or business causes.
+For no_evidence state, explicitly withdraw the prior definition summary: say
+that no current supporting definition is available, preserve the same key, and
+set evidence_event_ids to []. Never return an empty summaries array, retain the
+previous factual summary, or treat absence of evidence as a zero metric value.
+Exact event IDs identify versions. They are explicit references, not an
+automatically maintained dependency graph. The output is refreshed on the next
+successful run; there is no promise of immediate transitive invalidation.`,
+});
+
 const analyst = defineAgent({
   id: "analyst",
+  skills: [definitionSummarySkill],
   dir: ".",
   name: "analyst",
   description:
@@ -295,11 +320,58 @@ const verifiedQuery = defineEntityType({
   },
 });
 
+/**
+ * A complete context workflow on the existing native Automation lifecycle.
+ * The arrival source is evidence of changes; prepare saves the full current
+ * definition independently of that incremental arrival window.
+ */
+const currentDefinitionSummary = defineAutomation({
+  agent: analyst,
+  slug: "current-metric-definition",
+  name: "Current metric definition",
+  prompt:
+    "Use the current-metric-definition skill to summarize this run's saved " +
+    "metric_snapshot. Complete the window with one summaries row, including " +
+    "an explicit no_evidence row when the supporting definition is gone.",
+  skills: ["current-metric-definition"],
+  sources: {
+    definition_changes: `
+      SELECT e.id, e.payload_text, e.metadata
+      FROM events e
+      JOIN entities m ON m.id = ANY(e.entity_ids)
+      WHERE e.semantic_type = 'definition'
+        AND m.entity_type = 'metric-definition'
+        AND m.metadata->>'metric' = 'churn_rate'
+      ORDER BY e.id
+    `,
+  },
+  reaction: reactionFromFile("./context-summary.reaction.ts"),
+  outputs: {
+    summaries: {
+      event: "summary",
+      key: ["summary_kind", "metric"],
+    },
+  },
+  // An empty source must still replace a previous summary with no_evidence.
+  // Preparation also disables source-only fingerprint skipping by design.
+  triggers: [
+    {
+      kind: "schedule",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      execution: "window",
+      active_run: "coalesce",
+      skip_if_unchanged: false,
+    },
+  ],
+});
+
 export default defineConfig({
   orgName: "Kelder Coffee",
   orgDescription:
     "Fictional coffee-subscription company demonstrating Lobu as an org-level context layer",
   agents: [analyst],
+  automations: [currentDefinitionSummary],
   entities: [businessEvent, metricDefinition, verifiedQuery],
   authProfiles: [warehouseAuth],
   connections: [warehouse],
