@@ -27,6 +27,7 @@
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
 import { type DbClient, getDb, pgBigintArray } from "../db/client";
+import { loadCallerActionAllowlist } from "./caller-action-allowlist";
 import {
 	type ConnectorPolicyCategory,
 	type ConnectorPolicyKind,
@@ -509,7 +510,7 @@ export async function resolveActingPrincipal(
 			args.explicitAutomationId,
 			args.organizationId,
 		);
-		if (!args.agentId || owner.ownerAgentId === args.agentId) {
+		if ((!args.agentId && !args.appId?.startsWith("pat:")) || (args.agentId && owner.ownerAgentId === args.agentId)) {
 			return automationPrincipal(args.explicitAutomationId, owner);
 		}
 		// Caller-controlled tag that isn't this agent's own automation — ignore it.
@@ -1419,12 +1420,13 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 
 /** Connector decisions share one evaluator across admission, discovery and inspection. */
 export async function resolveConnectorPolicy(
-	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies"> & { sql?: DbClient },
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlist"> & { sql?: DbClient; sourceRead?: boolean },
 ) {
-	return evaluateConnectorPolicy({
-		...args,
-		policies: await listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
-	});
+	const [policies, allowlist] = await Promise.all([
+		listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
+		args.sourceRead ? null : loadCallerActionAllowlist(args.organizationId, args.actor, args.sql),
+	]);
+	return evaluateConnectorPolicy({ ...args, policies, allowlist });
 }
 
 /** Reconstruct the original requester from a durable operation, never its reviewer. */

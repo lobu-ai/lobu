@@ -89,7 +89,7 @@ async function resolveSourceReadAccess(sql: DbClient, organizationId: string, ru
   if (actor.kind === 'automation') {
     const visibilityUserId = await resolveAutomationConnectionVisibilityUserId({ organizationId, userId: null, actingAutomationId: run.automation_id }, sql);
     if (visibilityUserId !== run.created_by_user_id || !visibilityUserId) return unavailable();
-    const policy = await resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), actor,
+    const policy = await resolveConnectorPolicy({ sourceRead: true, organizationId, connectionId: Number(run.connection_id), actor,
       operation: { connector_key: run.connector_key ?? '', operation_key: DEVICE_FEED_READ_ACTION_KEY, kind: 'read' }, sql });
     // Source reads require current Auto authority and have no approval flow.
     // Return a veto so browser implementation steps cannot inherit an Ask.
