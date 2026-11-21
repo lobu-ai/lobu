@@ -143,6 +143,8 @@ export enum AgentErrorCode {
   PROVIDER_AUTH = "PROVIDER_AUTH",
   /** Model id not valid for the configured provider. */
   PROVIDER_UNKNOWN_MODEL = "PROVIDER_UNKNOWN_MODEL",
+  /** The upstream model service is temporarily unavailable. */
+  PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE",
   /** Provider can't be routed through the gateway proxy (base URL unresolved). */
   PROVIDER_BASE_URL_UNRESOLVED = "PROVIDER_BASE_URL_UNRESOLVED",
   /** No model/provider selected for the agent at all. */
@@ -216,7 +218,7 @@ export interface AgentErrorSpec {
 }
 
 export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
-  // Provider errors — no `message`; the provider's own text is the body.
+  // Without a catalog message, the provider's own text is the body.
   // Provider-level failures (quota, credentials, routing) are fixed on the
   // existing provider's management surface. A model-level failure
   // (unknown/unallowed model) is fixed on the agent's settings.
@@ -229,8 +231,14 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
     ctaLabel: "Reconnect provider",
   },
   [AgentErrorCode.PROVIDER_UNKNOWN_MODEL]: {
+    message:
+      "The selected model is unavailable or does not support this request. Choose another model in agent settings.",
     cta: "agent-settings",
     ctaLabel: "Choose model",
+  },
+  [AgentErrorCode.PROVIDER_UNAVAILABLE]: {
+    message: "The model provider is temporarily unavailable. Please try again.",
+    cta: "none",
   },
   [AgentErrorCode.PROVIDER_BASE_URL_UNRESOLVED]: {
     cta: "provider-management",

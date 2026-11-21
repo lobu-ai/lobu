@@ -19,17 +19,28 @@ export async function fetchModelOptions<T>(opts: {
   url: string;
   headers?: Record<string, string>;
   prefix: string;
+  signal?: AbortSignal;
+  strict?: boolean;
   pick: (payload: T) => Array<{ id: string; label?: string } | null>;
 }): Promise<ModelOption[]> {
-  const response = await fetch(opts.url, {
-    headers: { Accept: "application/json", ...opts.headers },
-  }).catch((err) => {
-    logger.warn({ error: err?.message, url: opts.url }, "fetch failed");
-    return null;
-  });
-  if (!response?.ok) return [];
-
-  const payload = (await response.json().catch(() => ({}))) as T;
+  let payload: T;
+  try {
+    const response = await fetch(opts.url, {
+      headers: { Accept: "application/json", ...opts.headers },
+      redirect: "error",
+      signal: opts.signal ?? AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Model catalog returned HTTP ${response.status}`);
+    }
+    payload = await response.json() as T;
+  } catch {
+    // No URL, headers, or upstream body in diagnostics at the credential boundary.
+    if (opts.strict) throw new Error("Model catalog request failed");
+    logger.warn("Model catalog request failed");
+    return [];
+  }
   return opts
     .pick(payload)
     .filter((item): item is { id: string; label?: string } => Boolean(item))

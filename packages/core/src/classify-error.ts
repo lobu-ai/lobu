@@ -181,7 +181,7 @@ export function classifyErrorMessage(
   // Replaying that corpus with these patterns moves nothing, which is the
   // evidence they do not over-match real traffic.
   if (
-    /not a valid model|unknown model|model [^\n]{0,120}? not found|access to model denied|eligible for using the model|model is only supported in|no endpoints found that support/i.test(
+    /not a valid model|unknown model|model [^\n]{0,120}? not found|model models\/[^\s"\\]{1,120} is no longer available\b|access to model denied|eligible for using the model|model is only supported in|no endpoints found that support/i.test(
       message
     )
   )

@@ -278,13 +278,14 @@ export abstract class BaseProviderModule
    * worker resolves that via `injectSystemKeyFallback`); `getCredential`
    * includes it.
    */
-  private async resolveCredential(
+  protected async resolveCredential(
     agentId: string,
     context: ProviderCredentialContext | undefined,
     opts: { includeSystemEnv: boolean }
   ): Promise<{
     credential: string;
     source: "profile" | "org" | "system";
+    baseUrl?: string;
   } | null> {
     // URL invariant (see inference-invariant.ts): if this org configured a
     // custom upstream for the provider, the request goes to a tenant-defined
@@ -294,10 +295,10 @@ export abstract class BaseProviderModule
       this.providerId,
       resolveOrgId(context?.organizationId) ?? undefined
     );
-    if (
-      invariant.kind === "org-only" ||
-      invariant.kind === "org-credential"
-    ) {
+    if (invariant.kind === "org-only") {
+      return { credential: invariant.credential, source: "org", baseUrl: invariant.baseUrl };
+    }
+    if (invariant.kind === "org-credential") {
       return { credential: invariant.credential, source: "org" };
     }
     if (invariant.kind === "org-only-unavailable") {

@@ -4947,6 +4947,23 @@ describe('agent turn reaper', () => {
     expect(await runRow(runId)).toMatchObject({ error_message: 'Error (HTTP 429)', outcome: 'infra_error' });
   });
 
+  it('delivers upstream unavailability as an infrastructure failure', async () => {
+    const workerId = 'fleet-provider-unavailable';
+    const runId = await claimedTurnRun(workerId);
+    const deploymentName = await armMarkerFor(runId);
+    await markTurnProviderFailed(deploymentName, AgentErrorCode.PROVIDER_UNAVAILABLE,
+      'example: HTTP 503 — PROVIDER_UNAVAILABLE', 503);
+
+    await postAsFleet('/api/workers/complete-agent-turn', { run_id: runId, worker_id: workerId, status: 'failed', error: 'Error' });
+
+    const replies = await threadResponses();
+    expect(replies).toHaveLength(1);
+    expect(replies[0].action_input).toMatchObject({
+      errorCode: AgentErrorCode.PROVIDER_UNAVAILABLE,
+    });
+    expect(await runRow(runId)).toMatchObject({ error_message: 'Error (HTTP 503)', outcome: 'infra_error' });
+  });
+
   it('leaves a bare worker error with the agent when the proxy recorded no provider failure', async () => {
     const workerId = 'fleet-bare-agent-error';
     const runId = await claimedTurnRun(workerId);

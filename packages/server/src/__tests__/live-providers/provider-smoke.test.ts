@@ -17,6 +17,7 @@
  * coverage and a best-effort tool probe without becoming release blockers.
  */
 
+import { ApiKeyProviderModule } from "../../gateway/auth/api-key-provider-module.js";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -143,18 +144,18 @@ async function listModels(
 	credential: Credential,
 ): Promise<string[]> {
 	if (id === "gemini") {
-		const url = new URL(
-			"https://generativelanguage.googleapis.com/v1beta/models",
-		);
-		url.searchParams.set("key", credential.value);
-		const { status, body } = await fetchJson(url.toString(), { method: "GET" });
-		expect(
-			status,
-			`gemini /models returned ${status}: ${JSON.stringify(body)}`,
-		).toBe(200);
-		return ((body as { models?: Array<{ name?: string }> }).models ?? [])
-			.map((model) => model.name?.replace(/^models\//, "").trim())
-			.filter((id): id is string => !!id);
+		const module = new ApiKeyProviderModule({
+			providerId: id,
+			providerDisplayName: provider.displayName,
+			providerIconUrl: "",
+			envVarName: provider.envVarName ?? "",
+			upstreamBaseUrl: provider.upstreamBaseUrl,
+			apiKeyInstructions: "",
+			apiKeyPlaceholder: "",
+			authProfilesManager: {} as never,
+		});
+		const models = await module.discoverModels(credential.value);
+		return (models ?? []).map(({ value }) => value.slice(id.length + 1));
 	}
 
 	if (id === "claude") {
@@ -364,19 +365,23 @@ if (activeIds.length === 0) {
 for (const { id, provider } of flattened) {
 	const credential = resolveCredential(id, provider.envVarName);
 	const required = requiredIds.has(id);
-	const modelId = provider.defaultModel ?? FALLBACK_MODELS[id];
+	const configuredModel = provider.defaultModel ?? FALLBACK_MODELS[id];
+	let discovered: Promise<string[]> | undefined;
+	const discover = () => (discovered ??= listModels(id, provider, credential!));
+	const liveModel = async () => configuredModel ?? (canListModels ? (await discover())[0] : undefined);
 	const canListModels = id === "claude" || id === "gemini" || !!provider.modelsEndpoint;
 
 	describe.skipIf(!credential)(`live: ${id} (${provider.displayName})`, () => {
 		test.skipIf(!canListModels)("lists models with production auth", async () => {
-			const models = await listModels(id, provider, credential!);
+			const models = await discover();
 			expect(models.length, `${id} returned an empty model list`).toBeGreaterThan(
 				0,
 			);
 		});
 
 		test("answers a streamed production-adapter turn", async () => {
-			expect(modelId, `${id} has no configured live model`).toBeDefined();
+			const modelId = await liveModel();
+			expect(modelId, `${id} has no configured or discovered live model`).toBeDefined();
 			const response = await completeWithRetry({
 				id,
 				provider,
@@ -398,7 +403,8 @@ for (const { id, provider } of flattened) {
 		});
 
 		test("returns a parsed streamed tool call", async () => {
-			expect(modelId, `${id} has no configured live model`).toBeDefined();
+			const modelId = await liveModel();
+			expect(modelId, `${id} has no configured or discovered live model`).toBeDefined();
 			const response = await completeWithRetry({
 				id,
 				provider,
