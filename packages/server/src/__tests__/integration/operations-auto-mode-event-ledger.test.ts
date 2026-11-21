@@ -34,6 +34,7 @@ import {
 	seedOwnerContext,
 } from "../setup/test-fixtures";
 import { post } from "../setup/test-helpers";
+import { TestApiClient } from "../setup/test-mcp-client";
 import { reapStaleRuns } from "../../scheduled/check-stalled-executions";
 
 const CONNECTOR = "demo.ops.auto.ledger";
@@ -390,10 +391,23 @@ describe("operation ledger under Auto policy", () => {
 		expect(await operationLedger(orgId, expired.run_id)).toEqual([]);
 
 		// A rule tightened while the run was held wins at confirm.
+		const pendingAtDelete = await execute("delete-connection");
+		expect(pendingAtDelete.status).toBe("pending_check");
 		const tightened = await execute("tighten");
 		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: checkConn.id, kind: "guardrail", effects: { execute: "approval" } });
 		expect(await confirm(tightened.run_id)).toMatchObject({ reason: "policy_changed" });
 		expect((await sql`SELECT approval_status, status FROM runs WHERE id = ${tightened.run_id}`)[0]).toMatchObject({ approval_status: "withdrawn", status: "cancelled" });
+		// Deleting the connection settles the remaining Check without a card.
+		const owner = await TestApiClient.for({ organizationId: orgId, userId, memberRole: "owner" });
+		expect(await owner.connections.delete(checkConn.id)).toMatchObject({ deleted: true });
+		const [deletedCheck] = await sql`
+			SELECT approval_status, status, completed_at FROM runs WHERE id = ${pendingAtDelete.run_id}
+		`;
+		expect(deletedCheck).toMatchObject({ approval_status: "withdrawn", status: "cancelled" });
+		expect(deletedCheck.completed_at).not.toBeNull();
+		expect(await confirm(pendingAtDelete.run_id)).toMatchObject({ reason: "not_pending_check" });
+		expect(await operationLedger(orgId, pendingAtDelete.run_id)).toEqual([]);
+		expect((await sql`SELECT status FROM runs WHERE id = ${expired.run_id}`)[0].status).toBe("timeout");
 	});
 
 	it("a background device Check is not claimable until the agent confirms it", async () => {

@@ -2604,6 +2604,21 @@ export async function handleDelete(
 		});
 
 		const expiredApprovalRunIds = await expirePendingApprovalsBeforeDelete(tx);
+
+    // Check has no approval card. Withdraw it while the connection row is
+    // locked, alongside its tombstone, so it cannot wait on a dead connection.
+    await tx`
+      UPDATE runs
+      SET approval_status = 'withdrawn', status = 'cancelled',
+          error_message = 'Connection deleted before the requester confirmed the check.',
+          completed_at = NOW()
+      WHERE organization_id = ${organizationId}
+        AND connection_id = ${args.connection_id}
+        AND approval_status = 'check'
+        AND status = 'pending'
+        AND run_type = 'action'
+    `;
+
 		await cancelUnclaimedActionRunsBeforeDelete(tx);
 
     // Pause the connection's existing feeds in the same atomic lifecycle

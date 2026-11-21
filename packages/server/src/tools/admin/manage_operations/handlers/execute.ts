@@ -83,6 +83,28 @@ import {
 	type InlineExecutionResult,
 } from "./shared";
 import { eventClientId } from "../../../../auth/event-client-id";
+// The delete transaction takes FOR UPDATE on the connection before settling
+// held runs. A concurrent Ask or Check must see its tombstone before queueing.
+async function assertLiveConnectionForHold(
+	sql: DbClient,
+	organizationId: string,
+	connectionId: number,
+): Promise<void> {
+	const [connection] = await sql`
+		SELECT 1 FROM connections
+		WHERE id = ${connectionId}
+			AND organization_id = ${organizationId}
+			AND deleted_at IS NULL
+		FOR SHARE
+	`;
+	if (!connection) {
+		throw new ToolUserError(
+			`Connection ${connectionId} was deleted while this operation was being queued.`,
+			409,
+		);
+	}
+}
+
 // Update the run to failed status and return the error result in one call.
 // When `deferTerminalWrite` is set the runs write is skipped — the caller
 // (approve's phase 2) persists the terminal state AND the card event in one
@@ -1080,26 +1102,7 @@ export async function handleExecute(
 		// connector-version read into the same tx — safe, it is a read).
 		const { claim, eventId, approvalUrl } = await sql.begin(async (tx) => {
 			await delegation?.assertActive(tx);
-			// Serialize approval queueing against connection deletion: take a SHARE
-			// lock on the connection row and re-verify it is still live. A delete's
-			// tombstone+expiry tx holds FOR UPDATE on the same row, so an in-flight
-			// delete blocks this tx until it commits, then this predicate sees the
-			// tombstone and refuses — an approval can never commit into the gap
-			// between a delete's expiry scan and its tombstone. (The runs
-			// FK key-share lock alone would only serialize, not refuse.)
-			const liveConnection = await tx`
-				SELECT 1 FROM connections
-				WHERE id = ${connection.id}
-					AND organization_id = ${ctx.organizationId}
-					AND deleted_at IS NULL
-				FOR SHARE
-			`;
-			if (liveConnection.length === 0) {
-				throw new ToolUserError(
-					`Connection ${args.connection_id} was deleted while this operation was being queued.`,
-					409,
-				);
-			}
+			await assertLiveConnectionForHold(tx, ctx.organizationId, connection.id);
 			const createdRun = await createConnectorOperationRun({
 				organizationId: ctx.organizationId,
 				connectionId: connection.id,
@@ -1224,6 +1227,7 @@ export async function handleExecute(
 		// requester can act on it until it is confirmed.
 		const claim = await sql.begin(async (tx) => {
 			await delegation?.assertActive(tx);
+			await assertLiveConnectionForHold(tx, ctx.organizationId, connection.id);
 			return createConnectorOperationRun({
 				organizationId: ctx.organizationId,
 				connectionId: connection.id,

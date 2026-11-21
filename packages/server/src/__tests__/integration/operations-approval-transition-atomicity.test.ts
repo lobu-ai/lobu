@@ -32,6 +32,7 @@ import { failClaimedWorkerRun } from "../../worker-api/poll";
 import { initWorkspaceProvider } from "../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
+	createTestAgent,
 	createTestConnection,
 	createTestConnectorDefinition,
 	createTestOrganization,
@@ -1114,14 +1115,9 @@ describe("approval-run transition atomicity", () => {
 		expect(row.status).toBe("pending");
 	});
 
-	it("approval queueing is serialized against connection deletion (no approval lands in the gap)", async () => {
-		// A delete holds the exclusive connection-row lock across its tombstone +
-		// approval-expiry transaction. The queue path must take a SHARE lock on
-		// the same row before inserting a pending approval run, so an approval
-		// cannot commit into the gap between the delete's expiry scan and its
-		// tombstone. (RED today: the queue's run INSERT only serializes via the
-		// runs.connection_id FK, which lets the insert commit AFTER the tombstone
-		// — a pending approval hidden behind a deleted connection, never expired.)
+	it.each(["approval", "check"] as const)("%s queueing is serialized against connection deletion", async (effect) => {
+		// The runs FK lock alone lets an insert proceed after the tombstone.
+		// Queueing must recheck that the connection is live under its lock.
 		const lockConn = await createTestConnection({
 			organization_id: orgId,
 			connector_key: CONNECTOR,
@@ -1129,10 +1125,14 @@ describe("approval-run transition atomicity", () => {
 			visibility: "private",
 		});
 
+		const actorCtx = effect === "check"
+			? { ...humanCtx, agentId: (await createTestAgent({ organizationId: orgId, ownerUserId: userId })).agentId }
+			: humanCtx;
 		await upsertEntityApprovalPolicy(orgId, {
 			resourceClass: "connector_action",
 			connectionId: lockConn.id,
-			effects: { execute: "approval" },
+			...(effect === "check" ? { kind: "guardrail", note: "Verify the request." } : {}),
+			effects: { execute: effect },
 		});
 
 		const locker = postgres(process.env.DATABASE_URL as string, { max: 1 });
@@ -1160,14 +1160,22 @@ describe("approval-run transition atomicity", () => {
 						input: { body: { value: "lock-gap" } },
 					},
 					{} as Env,
-					humanCtx,
+					actorCtx,
 				).then(
 					(result) => ({ ok: result as Record<string, unknown> }),
 					(error) => ({ rejected: String((error as Error).message) }),
 				);
 
-				// Let the queue attempt to land while the delete holds its lock.
-				await new Promise((resolve) => setTimeout(resolve, 200));
+				const [{ pid }] = await tx`SELECT pg_backend_pid() AS pid`;
+				await vi.waitFor(async () => {
+					const [waiting] = await getTestDb()`
+						SELECT EXISTS (
+							SELECT 1 FROM pg_stat_activity
+							WHERE ${pid} = ANY(pg_blocking_pids(pg_stat_activity.pid))
+						) AS blocked
+					`;
+					expect(waiting.blocked).toBe(true);
+				});
 
 				// The delete commits its tombstone; only then may the queue
 				// proceed — and it must be refused because the connection is gone.
@@ -1192,7 +1200,7 @@ describe("approval-run transition atomicity", () => {
 			SELECT count(*)::int AS n FROM runs
 			WHERE connection_id = ${lockConn.id}
 				AND run_type = 'action'
-				AND approval_status = 'pending'
+				AND approval_status = ${effect === 'check' ? 'check' : 'pending'}
 		`;
 		expect(runs[0].n).toBe(0);
 	});
