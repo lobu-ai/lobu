@@ -145,6 +145,18 @@ make:ui-review ARTIFACT=https://proof.example/success
 gh:pr-merge"
 
 : > "$call_log"
+task_worktree="$driver/.claude/worktrees/task"
+git -C "$driver" worktree add -q "$task_worktree" -b task origin/main
+(driver="$task_worktree" && run_bump from-task origin/main 0 0 >/dev/null)
+expect_calls "bump from a task worktree" "gh:pr-create
+make:ui-review ARTIFACT=https://proof.example/from-task
+gh:pr-merge"
+[ -d "$driver/.claude/worktrees/bump-from-task" ] \
+  || fail "a bump run from a task worktree should create its worktree under the main checkout"
+[ ! -e "$task_worktree/.claude/worktrees/bump-from-task" ] \
+  || fail "a bump run from a task worktree must not nest its worktree inside it"
+
+: > "$call_log"
 run_bump annotated-tag release 0 0 >/dev/null
 expect_calls "annotated tag target" "gh:pr-create
 make:ui-review ARTIFACT=https://proof.example/annotated-tag
