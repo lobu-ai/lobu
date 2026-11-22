@@ -320,10 +320,12 @@ sandbox-url:
 sandbox-logs:
 	@bun scripts/sandbox.ts logs
 
-# Offload a build or suite to the sandbox instead of the Mac.
+# Offload a build or suite to the sandbox instead of the Mac. CMD reaches
+# sandbox.ts through the environment: splicing it into this recipe line let the
+# local shell split `cd x && y` and run `y` on the Mac.
 sandbox-run:
 	@: $${CMD?Usage: make sandbox-run CMD='bun test <path>'}
-	@bun scripts/sandbox.ts run $(CMD)
+	@bun scripts/sandbox.ts run
 
 # Stop frees the org-wide running-memory quota; disk and the database survive,
 # so `make sandbox` afterwards restarts without rebuilding the image.
