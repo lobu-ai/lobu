@@ -32,7 +32,10 @@ set -euo pipefail
 SUBMODULE=${1:?Usage: bump-submodule.sh <submodule-path> [target-sha-or-ref]}
 TARGET=${2:-origin/main}
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+# The main checkout, even when run from a task worktree: `--show-toplevel`
+# would nest the bump worktree inside the task worktree, where task-clean
+# (which resolves from the main checkout) cannot find it.
+REPO_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 cd "$REPO_ROOT"
 
 # Verify SUBMODULE is actually a configured submodule
