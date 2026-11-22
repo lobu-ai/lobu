@@ -574,6 +574,28 @@ export function canMintWebSession(
  */
 export const TOKEN_DERIVED_SESSION_USER_AGENT = 'lobu-token-exchange';
 
+const PAT_SESSION_PREFIX = `${TOKEN_DERIVED_SESSION_USER_AGENT}:`;
+
+export function patPrincipalFromSession(session: { userAgent?: string | null } | null | undefined): string | null {
+  const origin = session?.userAgent;
+  if (!origin?.startsWith(PAT_SESSION_PREFIX)) return null;
+  const principal = origin.slice(PAT_SESSION_PREFIX.length);
+  return /^pat:[1-9][0-9]*$/.test(principal) ? principal : null;
+}
+
+/**
+ * The PAT principal a web session minted from this bearer must keep, so the
+ * token's caller allowlist still applies to the session. Every bearer-to-session
+ * mint derives it here.
+ */
+export function patPrincipalOfBearer(authInfo: Pick<AuthInfo, 'tokenType' | 'appPrincipalId'>): string | null {
+  return authInfo.tokenType === 'pat' ? authInfo.appPrincipalId ?? null : null;
+}
+
+export function tokenDerivedSessionUserAgent(patPrincipalId?: string | null): string {
+  return patPrincipalId ? `${PAT_SESSION_PREFIX}${patPrincipalId}` : TOKEN_DERIVED_SESSION_USER_AGENT;
+}
+
 /**
  * Whether a web session came from a bearer credential rather than a person
  * signing in. Such a session may do what the credential's user can do in the
@@ -584,5 +606,5 @@ export const TOKEN_DERIVED_SESSION_USER_AGENT = 'lobu-token-exchange';
 export function isTokenDerivedSession(
   session: { userAgent?: string | null } | null | undefined
 ): boolean {
-  return session?.userAgent === TOKEN_DERIVED_SESSION_USER_AGENT;
+  return session?.userAgent === TOKEN_DERIVED_SESSION_USER_AGENT || patPrincipalFromSession(session) !== null;
 }

@@ -31,6 +31,7 @@ import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import { viewModule } from "./view-module";
 import {
 	addUserToOrganization,
+	createTestAgent,
 	createTestOrganization,
 	createTestEntity,
 	createTestSession,
@@ -739,6 +740,26 @@ describe("view actions", () => {
 				applied?: { entity_id: number; fields: Record<string, unknown> };
 				pending_approval?: { entity_id: number; fields: Record<string, unknown> };
 			}>;
+
+		it("enforces the authenticated agent's allowlist on declared view updates", async () => {
+			const { agentId } = await createTestAgent({ organizationId: orgId, ownerUserId: memberCtx.userId! });
+			const allowed = await createRecord("deal", { notes: "original" });
+			const excluded = await createRecord("deal", { notes: "original" });
+			const sql = getTestDb();
+			await sql`INSERT INTO caller_action_allowlists (organization_id, subject_kind, subject_id, entries)
+				VALUES (${orgId}, 'agent', ${agentId}, ${sql.json([{ action: "entity.update", entity_id: allowed }])})`;
+			const ctx = { ...memberCtx, agentId };
+			const edit = (entity_id: number) => invoke({
+				action: "note",
+				value: { entity_id, set: { notes: "updated" } },
+				interaction_id: `edit-record-${entity_id}`,
+			}, ctx);
+			const before = await eventCount();
+			await expect(edit(excluded)).rejects.toMatchObject({ httpStatus: 403 });
+			expect((await entityRow(excluded)).metadata.notes).toBe("original");
+			expect(await eventCount()).toBe(before);
+			await expect(edit(allowed)).resolves.toMatchObject({ applied: { entity_id: allowed, fields: { notes: "updated" } } });
+		});
 
 		it("applies declared fields, stamps, the change event and the receipt in one transaction, and replays the result", async () => {
 			const deal = await createRecord("deal", { stage: "open", notes: "first call" });

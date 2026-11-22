@@ -1,6 +1,6 @@
 import type { ConnectorOperationRequest, ConnectorOperationResult } from '@lobu/core/contracts/tools/manage-operations';
 import { resolveStoredActingPrincipal } from '../authz/entity-policy';
-import { resolveRunConnectorPolicy } from '../authz/operation-run-policy';
+import { resolveRunConnectorPolicy, storedPolicyPatPrincipal } from '../authz/operation-run-policy';
 import { intervals } from '../config/intervals';
 import { getDb, type DbClient } from '../db/client';
 import type { Env } from '../index';
@@ -25,8 +25,9 @@ export async function executeConnectorOperation(params: Delegation, execute: typ
     const [parent] = await db<{
       organization_id: string; created_by_user_id: string | null; automation_id: number | null;
       policy_principal_kind: string | null; policy_principal_id: string | null;
+      run_metadata: Record<string, unknown> | null;
     }>`SELECT r.organization_id, r.created_by_user_id, r.automation_id,
-          r.policy_principal_kind, r.policy_principal_id
+          r.policy_principal_kind, r.policy_principal_id, r.run_metadata
        FROM runs r JOIN connections c ON c.id = r.connection_id AND c.organization_id = r.organization_id
        WHERE r.id = ${params.parentRunId} AND r.claimed_by = ${params.claimedBy}
          AND (${params.organizationId ?? null}::text IS NULL OR r.organization_id = ${params.organizationId ?? null})
@@ -51,6 +52,8 @@ export async function executeConnectorOperation(params: Delegation, execute: typ
     sourceContext: null,
     agentId: actor.kind === 'agent' ? actor.id : actor.ownerAgentId,
     actingAutomationId: parent.automation_id, actingRunId: params.parentRunId,
+    // The parent's admitting PAT keeps its allowlist on the delegated step.
+    appPrincipalId: storedPolicyPatPrincipal(parent.run_metadata),
     memberRole: null, isAuthenticated: true, tokenType: 'pat', scopedToOrg: true,
     allowCrossOrg: false, grantedOrganizationIds: [parent.organization_id], directSearchFederation: false,
     abortSignal: params.abortSignal,

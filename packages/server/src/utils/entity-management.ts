@@ -9,6 +9,7 @@
 import { deriveToolActorSource } from './apply-context';
 import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { isAssertedManualEdit, isManualUserEdit, type ManualEditRefusal, manualEditRefusal } from '../auth/direct-user-context';
+import { permitsEntityUpdate } from '../authz/caller-action-allowlist';
 import { MEMBER_ENTITY_TYPE_SLUG } from '../tools/constants';
 import type { EntityIdentity } from '@lobu/core/contracts/tools/manage-entity';
 import { attachEntityIdentities, identityMemberExistsSql, identityMemberIdsSql, identityRootSql } from './entity-identity';
@@ -1288,6 +1289,27 @@ export async function updateEntity(
     `;
 		if (current.length === 0) {
 			throw new ToolUserError(`Entity ${entityId} not found`, 404, "NOT_FOUND");
+		}
+		if (!await permitsEntityUpdate({
+			organizationId: ctx.organizationId,
+			actor: {
+				kind: opts?.policyPrincipalKind ?? "agent",
+				id: opts?.principalId ?? mutationPrincipalId({ agentId: ctx.agentId }),
+				ownerAgentId: opts?.ownerAgentId ?? null,
+			},
+			callerAgentId: ctx.agentId,
+			appPrincipalId: ctx.appPrincipalId,
+			entityId,
+			sql: tx,
+		})) {
+			throw new EntityPolicyDenialError({
+				operation: "update",
+				reason: "This entity is outside the caller's action allowlist.",
+				deniedFields: [],
+				entityId,
+				entityType: String(current[0].entity_type),
+				entityOrganizationId: String(current[0].organization_id),
+			});
 		}
 
 		const existing = (
