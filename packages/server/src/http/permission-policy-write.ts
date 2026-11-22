@@ -110,7 +110,7 @@ export function requireHumanWorkspaceAdmin(c: Context, { acceptPolicyToken = fal
 		error: "forbidden",
 		message: acceptPolicyToken
 			? "Use an owner/admin web session or an explicitly granted policies:write token."
-			: "This change requires an owner/admin web session; connected apps and tokens cannot make it.",
+			: "This requires an owner/admin web session; connected apps and tokens cannot use it.",
 	}, 403);
 }
 
