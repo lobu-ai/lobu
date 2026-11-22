@@ -26,6 +26,67 @@ upgrading. Find them with `list_feeds` (`status: "paused"`) and resume each one
 you want with `update_feed` (`status: "active"`). Re-entering credentials
 through a connect link needs at least one enabled feed on the connection.
 
+## [24.13.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.12.0...lobu-v24.13.0) (2026-11-22)
+
+
+### Features
+
+* **agents:** discover live provider models and classify provider outages ([#5105](https://github.com/lobu-ai/lobu/issues/5105)) ([7a9d0f0](https://github.com/lobu-ai/lobu/commit/7a9d0f0d3c271bf817d5b1a785244985721f1828))
+* **build:** upload private per-release web source maps for Faro ([#5103](https://github.com/lobu-ai/lobu/issues/5103)) ([a35bb8a](https://github.com/lobu-ai/lobu/commit/a35bb8aa584464b477c383411d70eb8e17654dc8))
+* **connectors:** hosted Shopify app install with tenant-scoped OAuth and token renewal ([#5059](https://github.com/lobu-ai/lobu/issues/5059)) ([e4b6cd5](https://github.com/lobu-ai/lobu/commit/e4b6cd55baf17c4566b0187689123cceba56b8bd))
+* **connectors:** let agents recover when a browser connector does not recognize the page ([#5073](https://github.com/lobu-ai/lobu/issues/5073)) ([67655a1](https://github.com/lobu-ai/lobu/commit/67655a1b76448b1e41b01f84de0f7075d6934fb7))
+* **issues:** record failed operation runs as issues and tell agents where to report ([#5069](https://github.com/lobu-ai/lobu/issues/5069)) ([5f3c2bc](https://github.com/lobu-ai/lobu/commit/5f3c2bc9afe98e10a7e2222b37ec82479c38387f))
+* **lobu-team:** track gateway 5xx issues and page on an edge burst ([#5091](https://github.com/lobu-ai/lobu/issues/5091)) ([3378505](https://github.com/lobu-ai/lobu/commit/3378505f818d8a47b4f95dce51747425fa7076de))
+* **navigation:** pin a section to the sidebar footer ([#5095](https://github.com/lobu-ai/lobu/issues/5095)) ([d2379ec](https://github.com/lobu-ai/lobu/commit/d2379ec65b381537b223640aa7b597516157e6da))
+* **observability:** attach org and user ids to job and agent-turn spans ([#5096](https://github.com/lobu-ai/lobu/issues/5096)) ([59c8f6d](https://github.com/lobu-ai/lobu/commit/59c8f6d19ac3b1c11eb92c30719bfe6ef82f97dc))
+* **operations:** let devices report typed action failure codes (ACTION_FAILED) ([#5072](https://github.com/lobu-ai/lobu/issues/5072)) ([6d0b0bb](https://github.com/lobu-ai/lobu/commit/6d0b0bb741b95414bf11425f594213c35209a990))
+* **policy:** add agent and PAT action allowlists ([#5108](https://github.com/lobu-ai/lobu/issues/5108)) ([bd8bbbb](https://github.com/lobu-ai/lobu/commit/bd8bbbba746bdf2121c19e384bfd4d13019be9ff))
+* **policy:** Check and Log guardrail modes with agent confirm ([#5057](https://github.com/lobu-ai/lobu/issues/5057)) ([f1ac350](https://github.com/lobu-ai/lobu/commit/f1ac350ecc6ef564405d90ba94cc09c92d8ecf13))
+* **server:** count installs on the first boot of the day ([#5078](https://github.com/lobu-ai/lobu/issues/5078)) ([68e1b72](https://github.com/lobu-ai/lobu/commit/68e1b72323edbf8eddce91fe42323e7de2ff62eb))
+* **shopify:** read orders live instead of storing them ([#5065](https://github.com/lobu-ai/lobu/issues/5065)) ([785836e](https://github.com/lobu-ai/lobu/commit/785836e1f8eca6d33aa7ff5667ebe4dd6f63612a))
+* **views:** report a view's unhandled errors to the host as MCP log messages ([#5099](https://github.com/lobu-ai/lobu/issues/5099)) ([d950fa8](https://github.com/lobu-ai/lobu/commit/d950fa8d638ddf19e22fb221d29174992772b07b))
+
+
+### Bug Fixes
+
+* **apply:** merge system entity kinds and always push declared reactions ([#5079](https://github.com/lobu-ai/lobu/issues/5079)) ([8dd21d7](https://github.com/lobu-ai/lobu/commit/8dd21d7dc3bec96a5785f8db3feadde5b2a6bb66))
+* **automations:** record failed Automation reactions as one error each ([#5092](https://github.com/lobu-ai/lobu/issues/5092)) ([733554d](https://github.com/lobu-ai/lobu/commit/733554dba7fbbc1b00a87429deb847324f776efe))
+* **diagnostics:** classify refused tool callers as user issues ([#5082](https://github.com/lobu-ai/lobu/issues/5082)) ([320561d](https://github.com/lobu-ai/lobu/commit/320561d2bab3cd3874800aac06e9ffc5d8ceecdd))
+* **diagnostics:** report each tool failure once with its real kind ([#5077](https://github.com/lobu-ai/lobu/issues/5077)) ([b1cacc9](https://github.com/lobu-ai/lobu/commit/b1cacc93ca5e08ae0d170af4b778ddebf5790907))
+* **linkedin:** find the profile header without a More menu ([#5063](https://github.com/lobu-ai/lobu/issues/5063)) ([46abe75](https://github.com/lobu-ai/lobu/commit/46abe754ea52c31d7d5fce971cc3cd4dbf6e197f))
+* **lobu-team:** inline the tracker reaction's health helpers ([#5087](https://github.com/lobu-ai/lobu/issues/5087)) ([2483950](https://github.com/lobu-ai/lobu/commit/248395027702fcbeed2ed4d647a93adee929262c))
+* **lobu-team:** open browser request failures only on a spike ([#5061](https://github.com/lobu-ai/lobu/issues/5061)) ([f0388b1](https://github.com/lobu-ai/lobu/commit/f0388b167e5c974bb6e8ea06be1ed7ba60e47c51))
+* **lobu-team:** page on issue reach, not occurrence volume ([#5066](https://github.com/lobu-ai/lobu/issues/5066)) ([accd49d](https://github.com/lobu-ai/lobu/commit/accd49daec06876349e1e76b8a4c9aaa719a2461))
+* **logging:** keep thrown-string causes and skip caller-abandoned admin reads ([#5067](https://github.com/lobu-ai/lobu/issues/5067)) ([f3ba7b6](https://github.com/lobu-ai/lobu/commit/f3ba7b69e231ad7345cbc2af22bf340287e4a4d9))
+* **make:** pass sandbox-run CMD through the environment ([#5113](https://github.com/lobu-ai/lobu/issues/5113)) ([17a6645](https://github.com/lobu-ai/lobu/commit/17a66453aa363843662c27e0e4ebb4e7b85585f6))
+* **observability:** record a failed operation once and name the failed timeline check ([#5104](https://github.com/lobu-ai/lobu/issues/5104)) ([1e23417](https://github.com/lobu-ai/lobu/commit/1e2341737f174635b2f4a6787366bbafdb2066af))
+* **operations:** record device admission refusals as operation failures ([#5081](https://github.com/lobu-ai/lobu/issues/5081)) ([a7d6121](https://github.com/lobu-ai/lobu/commit/a7d6121c8b19eed96d1b52ad168f075ca4447232))
+* **operations:** type device admission refusals instead of reporting INTERNAL ([#5071](https://github.com/lobu-ai/lobu/issues/5071)) ([233a5aa](https://github.com/lobu-ai/lobu/commit/233a5aaecd1b22029ebc4560bc4d19a9273b81fd))
+* **policy:** settle held runs on every connection removal ([#5109](https://github.com/lobu-ai/lobu/issues/5109)) ([16ceee1](https://github.com/lobu-ai/lobu/commit/16ceee199e4ffb1b490ac7fac95d654ddcb876ed))
+* **policy:** withdraw held checks when deleting connections ([#5106](https://github.com/lobu-ai/lobu/issues/5106)) ([4b49959](https://github.com/lobu-ai/lobu/commit/4b4995969624e0b2fad2a00ff45743ed0020a01a))
+* **postgres:** keep replies matched to their queries and drop desynced connections ([#5068](https://github.com/lobu-ai/lobu/issues/5068)) ([252476a](https://github.com/lobu-ai/lobu/commit/252476afad7993c86176ac0fe2f891c3344a48b8))
+* **proxy:** report a relayed provider 5xx as a dependency failure ([#5102](https://github.com/lobu-ai/lobu/issues/5102)) ([7f7af3c](https://github.com/lobu-ai/lobu/commit/7f7af3c71b2cb68dacab8724dca1f8e753fea497))
+* **recall:** bound the pre-turn recall query and skip the substring arm for long queries ([#5090](https://github.com/lobu-ai/lobu/issues/5090)) ([edf4838](https://github.com/lobu-ai/lobu/commit/edf48382ea6083d1ed6e5102171b9813822f1e34))
+* **recall:** bound the words a search is matched and ranked by ([#5086](https://github.com/lobu-ai/lobu/issues/5086)) ([4514f9c](https://github.com/lobu-ai/lobu/commit/4514f9cc66ba0ebccc4b7bd463c99fa899bda976))
+* **scripts:** create bump worktrees under the main checkout ([#5111](https://github.com/lobu-ai/lobu/issues/5111)) ([9431d25](https://github.com/lobu-ai/lobu/commit/9431d25443d9158b3522cd81fd86e06d9137e4c3))
+* **server:** answer missing hashed /assets files with 404 ([#5101](https://github.com/lobu-ai/lobu/issues/5101)) ([224522f](https://github.com/lobu-ai/lobu/commit/224522f31cb1989d6871a21ee7b0eecee3044b62))
+* **server:** log each failure once with its typed kind ([#5083](https://github.com/lobu-ai/lobu/issues/5083)) ([f6f9431](https://github.com/lobu-ai/lobu/commit/f6f943119c76ea5d90dd76735de618a750d53a06))
+* **server:** record a 5xx its caller left as a 499, not a server error ([#5093](https://github.com/lobu-ai/lobu/issues/5093)) ([d953225](https://github.com/lobu-ai/lobu/commit/d9532251bafa6c4dd0e02ef1a82e3e0882d3902b))
+* **server:** record failed feed syncs as issue occurrences ([#5097](https://github.com/lobu-ai/lobu/issues/5097)) ([f463c43](https://github.com/lobu-ai/lobu/commit/f463c433c7c895e2666b0d6ef04d2a731cc398d0))
+* **server:** record where each failing Postgres query was issued ([#5094](https://github.com/lobu-ai/lobu/issues/5094)) ([3f6ecf2](https://github.com/lobu-ai/lobu/commit/3f6ecf246979c4c15b89645866415b60d34d8b3c))
+* **server:** report a refused public render once, under its route ([#5076](https://github.com/lobu-ai/lobu/issues/5076)) ([eab412d](https://github.com/lobu-ai/lobu/commit/eab412df3c9474f59847de0bfd4f644219071b40))
+* **server:** word the human-admin 403 for reads too ([#5114](https://github.com/lobu-ai/lobu/issues/5114)) ([5c36cab](https://github.com/lobu-ai/lobu/commit/5c36cab03b4be3b8ebf954c5a884a5974d0d3267))
+* **shopify:** read orders without buyer identity ([#5074](https://github.com/lobu-ai/lobu/issues/5074)) ([c5cada0](https://github.com/lobu-ai/lobu/commit/c5cada0850aec2f8e69e2c2b1b7668abf8250b9d))
+* **views:** report 5xx event link resolution failures ([#5084](https://github.com/lobu-ai/lobu/issues/5084)) ([79bc5d7](https://github.com/lobu-ai/lobu/commit/79bc5d75748bde1be71a222d7be0333003723b9d))
+* **workspace-purge:** copy borrowed entity types to their users before deleting ([#5085](https://github.com/lobu-ai/lobu/issues/5085)) ([f19e607](https://github.com/lobu-ai/lobu/commit/f19e607d804443ed2e96a9bdef002545cf2feb63))
+
+
+### Performance Improvements
+
+* **recall:** analyze events so the agent index has statistics ([#5075](https://github.com/lobu-ai/lobu/issues/5075)) ([1998b89](https://github.com/lobu-ai/lobu/commit/1998b899b1036c51b7e062b4a239a1150b381cc9))
+* **recall:** give the planner agent_id statistics ([#5080](https://github.com/lobu-ai/lobu/issues/5080)) ([bceafec](https://github.com/lobu-ai/lobu/commit/bceafecc4a74d612d2170520170e9bca77c10998))
+* **recall:** index agent-scoped live events ([#5070](https://github.com/lobu-ai/lobu/issues/5070)) ([50a826d](https://github.com/lobu-ai/lobu/commit/50a826db518cc0e122f82c6f77a4743810517de9))
+
 ## [24.12.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.11.1...lobu-v24.12.0) (2026-11-19)
 
 
