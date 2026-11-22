@@ -19,7 +19,7 @@ import {
   deriveWorkspaceEventCausality,
   type WorkspaceEventActivationTaskPayload,
 } from '../../../automations/workspace-event-contract';
-import { createDbClientFromEnv, getDb, parsePgNumberArray } from '../../../db/client';
+import { createDbClientFromEnv, getDb, parsePgNumberArray, pgBigintArray } from '../../../db/client';
 import type { Env } from '../../../index';
 import { ToolUserError } from '../../../utils/errors';
 import { verifyWindowToken } from '../../../utils/jwt';
@@ -659,27 +659,20 @@ export async function handleCompleteWindow(
     }
 
     // ============================================
-    // STEP 8: Link content to window (bulk INSERT)
-    // Build VALUES clause for bulk insert
+    // STEP 8: Link content to window
     // ============================================
     if (batchContentIds.length > 0) {
-      let nextWindowEventId = await getNextNumericId(tx, 'automation_run_events');
-      const valuePlaceholders: string[] = [];
-      const insertParams: unknown[] = [];
-      let pIdx = 1;
-      for (const contentId of batchContentIds) {
-        valuePlaceholders.push(`($${pIdx}, $${pIdx + 1}, $${pIdx + 2}, $${pIdx + 3}, NOW())`);
-        insertParams.push(nextWindowEventId, runId, contentId, Number(automationId));
-        nextWindowEventId += 1;
-        pIdx += 4;
-      }
-
-      await tx.unsafe(
-        `INSERT INTO automation_run_events (id, run_id, event_id, automation_id, created_at)
-         VALUES ${valuePlaceholders.join(', ')}
-         ON CONFLICT DO NOTHING`,
-        insertParams
-      );
+      const firstLinkId = await getNextNumericId(tx, 'automation_run_events');
+      // One array parameter keeps the statement below the driver limit
+      // regardless of how many signed pages the caller completed.
+      await tx`
+        INSERT INTO automation_run_events (id, run_id, event_id, automation_id, created_at)
+        SELECT ${firstLinkId}::bigint + item.position - 1, ${runId},
+          item.event_id, ${automationId}, NOW()
+        FROM unnest(${pgBigintArray(batchContentIds)}::bigint[])
+          WITH ORDINALITY AS item(event_id, position)
+        ON CONFLICT DO NOTHING
+      `;
     }
 
     // The content this window_token actually granted. Promotion (8.5) validates

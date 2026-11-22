@@ -4,7 +4,7 @@ import { generateWindowToken, verifyWindowToken } from '../../../utils/jwt';
 import { fingerprintAutomationSources } from '../../../tools/get_content/automation-mode';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { clearAuthCacheForTests } from '../../../auth';
-import { closeDbSingleton, type DbClient } from '../../../db/client';
+import { closeDbSingleton, pgBigintArray, type DbClient } from '../../../db/client';
 import type { Env } from '../../../index';
 import { runAutomationReactionTask } from '../../../automations/reaction-task';
 import { createAutomationRun } from '../../../runs/queue-service';
@@ -769,6 +769,49 @@ describe('Automation window claim and recovery', () => {
     );
     expect(afterPartialRead.status).toBe('completed');
   });
+
+  it('completes and retains every event link in a large multi-page window', async () => {
+    // Four parameters per link used to exceed postgres.js's 65,534 limit.
+    const eventCount = 16_384;
+    const claimed = await claim();
+    const events = await sql<{ id: number | string }>`
+      INSERT INTO events (organization_id, entity_ids, origin_id, payload_type,
+        payload_text, semantic_type, connector_key, occurred_at, created_at)
+      SELECT ${orgId}, ${pgBigintArray([entityId])}::bigint[],
+        'large-window-' || item, 'text', 'Window fixture', 'content', 'test.connector',
+        ${claimed.context.window_start}::timestamptz, ${claimed.context.window_start}::timestamptz
+      FROM generate_series(1, ${eventCount}::int) AS item
+      RETURNING id
+    `;
+    const { iat: _issued, ...receipt } = await verifyWindowToken(claimed.context.window_token, ENV);
+    const windowTokens: string[] = [];
+    for (let start = 0; start < events.length; start += 500) {
+      const ids = events.slice(start, start + 500).map((event) => Number(event.id));
+      windowTokens.push(await generateWindowToken({
+        ...receipt, content_ids: ids, content_count: ids.length,
+      }, ENV));
+    }
+    const input = {
+      automation_id: String(automationId), run_id: claimed.run_id,
+      window_tokens: windowTokens, extracted_data: { signals: [] },
+    };
+    await expect(api.automations.completeWindow(input)).resolves.toMatchObject({
+      completed_now: true, content_linked: eventCount,
+    });
+    await expect(api.automations.completeWindow(input)).resolves.toMatchObject({
+      completed_now: false, content_linked: 0,
+    });
+    const links = await sql<{ event_id: number | string }>`
+      SELECT event_id FROM automation_run_events
+      WHERE run_id = ${claimed.run_id} AND automation_id = ${automationId}
+      ORDER BY event_id
+    `;
+    expect(links.map((link) => Number(link.event_id))).toEqual(
+      events.map((event) => Number(event.id)).sort((a, b) => a - b)
+    );
+    const [after] = await sql`SELECT next_window_start FROM automations WHERE id = ${automationId}`;
+    expect(new Date(after.next_window_start).toISOString()).toBe(claimed.context.window_end);
+  }, 30_000);
 
   it('requires the latest lease token alongside earlier source pages', async () => {
     const start = dayStart(1);
