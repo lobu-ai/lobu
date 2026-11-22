@@ -1297,6 +1297,7 @@ export async function updateEntity(
 				id: opts?.principalId ?? mutationPrincipalId({ agentId: ctx.agentId }),
 				ownerAgentId: opts?.ownerAgentId ?? null,
 			},
+			callerAgentId: ctx.agentId,
 			appPrincipalId: ctx.appPrincipalId,
 			entityId,
 			sql: tx,

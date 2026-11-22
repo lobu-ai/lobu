@@ -32,6 +32,7 @@ import {
   DEFAULT_SCOPES_STRING,
   isTokenDerivedSession,
   patPrincipalFromSession,
+  patPrincipalOfBearer,
   tokenDerivedSessionUserAgent,
 } from './oauth/scopes';
 import { PersonalAccessTokenService, recordAccessTokenEvent } from './tokens';
@@ -568,7 +569,7 @@ async function resolveDeepLinkToken(
       userId: authInfo.userId,
       organizationId: authInfo.organizationId,
       tokenDerived: true,
-      patPrincipalId: authInfo.tokenType === 'pat' ? authInfo.appPrincipalId ?? null : null,
+      patPrincipalId: patPrincipalOfBearer(authInfo),
     };
   }
   // Otherwise treat it as a Better Auth session token. Better Auth's adapter

@@ -583,6 +583,15 @@ export function patPrincipalFromSession(session: { userAgent?: string | null } |
   return /^pat:[1-9][0-9]*$/.test(principal) ? principal : null;
 }
 
+/**
+ * The PAT principal a web session minted from this bearer must keep, so the
+ * token's caller allowlist still applies to the session. Every bearer-to-session
+ * mint derives it here.
+ */
+export function patPrincipalOfBearer(authInfo: Pick<AuthInfo, 'tokenType' | 'appPrincipalId'>): string | null {
+  return authInfo.tokenType === 'pat' ? authInfo.appPrincipalId ?? null : null;
+}
+
 export function tokenDerivedSessionUserAgent(patPrincipalId?: string | null): string {
   return patPrincipalId ? `${PAT_SESSION_PREFIX}${patPrincipalId}` : TOKEN_DERIVED_SESSION_USER_AGENT;
 }

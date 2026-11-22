@@ -354,6 +354,25 @@ describe("caller action allowlists", () => {
     expect(await reset.json()).toEqual(before);
   });
 
+  it("preserves the caller's PAT allowlist through Chrome sibling session minting", async () => {
+    await getTestDb()`UPDATE organization SET metadata = ${JSON.stringify({ personal_org_for_user_id: owner.id })} WHERE id = ${org.id}`;
+    const pat = await createTestPAT(owner.id, org.id, { scope: "mcp:read mcp:write mcp:admin device_worker:run" });
+    const allowed = await createTestEntity({ name: "Allowed by PAT", organization_id: org.id });
+    const excluded = await createTestEntity({ name: "Excluded by PAT", organization_id: org.id });
+    await replaceAllowlist(allowlistPath("pat", pat.id), [{ action: "entity.update", entity_id: allowed.id }]);
+    const minted = await request("POST", "/api/me/devices/mint-child-token", { platform: "chrome-extension" }, pat.token);
+    expect(minted.status).toBe(200);
+    const body = await minted.json();
+    expect(typeof body.session_token).toBe("string");
+    const update = (entity_id: number) => request("POST", `/api/${org.slug}/manage_entity`, {
+      action: "update", entity_id, name: "Updated through sibling session",
+    }, body.session_token);
+    expect((await update(excluded.id)).status).toBe(403);
+    expect((await update(allowed.id)).status).toBe(200);
+    const [unmodified] = await getTestDb()`SELECT name FROM entities WHERE id = ${excluded.id}`;
+    expect(unmodified.name).toBe("Excluded by PAT");
+  });
+
   it("limits agent SDK and PAT SDK/MCP updates to the two named records", async () => {
     await upsertEntityApprovalPolicy(org.id, { resourceClass: "entity", effects: { update: "auto" } });
     const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
@@ -400,7 +419,7 @@ describe("caller action allowlists", () => {
         expect(read).toMatchObject({ success: true });
       }
       const sql = getTestDb();
-      const rows = await sql`SELECT name FROM entities WHERE id IN (${first.id}, ${second.id}, ${outside.id}) ORDER BY name`;
+      const rows = await sql`SELECT name FROM entities WHERE id IN (${first.id}, ${second.id}, ${outside.id}) ORDER BY id`;
       expect(rows.map(row => row.name)).toEqual([`Updated ${kind} first`, `Updated ${kind} second`, `${kind} Outside`]);
     }
   });

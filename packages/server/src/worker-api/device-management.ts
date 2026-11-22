@@ -13,7 +13,7 @@
 import { isKnownPlatform } from '@lobu/core';
 import type { Context } from 'hono';
 import { createAuth } from '../auth';
-import { canMintWebSession, TOKEN_DERIVED_SESSION_USER_AGENT } from '../auth/oauth/scopes';
+import { canMintWebSession, patPrincipalOfBearer, tokenDerivedSessionUserAgent } from '../auth/oauth/scopes';
 import { findExistingPersonalOrg } from '../auth/personal-org-provisioning';
 import {
   type AuditedAccessToken,
@@ -616,9 +616,10 @@ export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
       try {
         const auth = await createAuth(c.env, c.req.raw);
         const ctx = await auth.$context;
-        // Minted from the caller's bearer, so it is not a person's sign-in.
+        // Minted from the caller's bearer, so it is not a person's sign-in. A
+        // PAT caller's principal rides along so its allowlist binds the session.
         const session = await ctx.internalAdapter.createSession(userId, undefined, {
-          userAgent: TOKEN_DERIVED_SESSION_USER_AGENT,
+          userAgent: tokenDerivedSessionUserAgent(patPrincipalOfBearer(callerAuth)),
         });
         sessionToken = session?.token ?? null;
       } catch (err) {

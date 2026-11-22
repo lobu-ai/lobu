@@ -41,19 +41,22 @@ export function callerActionAllowlistSnapshot(organizationId: string, subject: A
 }
 
 /**
- * Every allowlist bound to this call: the acting (or owning) agent's and the
- * PAT's. A PAT may bind its MCP session to an agent, so the agent's list never
- * replaces the token's; callers apply each list and keep the strictest result.
+ * Every allowlist bound to this call: the acting (or owning) agent's, the
+ * authenticated caller agent's, and the PAT's. A PAT may bind its MCP session
+ * to an agent, so the agent's list never replaces the token's; callers apply
+ * each list and keep the strictest result.
  */
 export async function loadCallerActionAllowlists(
 	organizationId: string,
 	actor: Pick<ActingPrincipal, "kind" | "id" | "ownerAgentId">,
 	appPrincipalId?: string | null,
 	sql?: DbClient,
+	callerAgentId?: string | null,
 ): Promise<AllowedAction[][]> {
 	const subjects = new Map<string, AllowlistSubject>();
-	const agentId = actor.kind === "agent" ? actor.id : actor.ownerAgentId;
-	if (agentId) subjects.set(`agent:${agentId}`, { kind: "agent", id: agentId });
+	for (const agentId of [actor.kind === "agent" ? actor.id : actor.ownerAgentId, callerAgentId]) {
+		if (agentId) subjects.set(`agent:${agentId}`, { kind: "agent", id: agentId });
+	}
 	for (const principal of [actor.kind === "app" ? actor.id : null, appPrincipalId]) {
 		if (principal?.startsWith("pat:")) subjects.set(principal, { kind: "pat", id: principal.slice(4) });
 	}
@@ -85,11 +88,19 @@ export function allowedConnectorEffect(
 export async function permitsEntityUpdate(args: {
 	organizationId: string;
 	actor: Pick<ActingPrincipal, "kind" | "id" | "ownerAgentId">;
+	/**
+	 * The authenticated agent behind the call. A declared View write runs under
+	 * the clicking user's policy principal, yet an agent invoking it stays bound
+	 * to its own list.
+	 */
+	callerAgentId?: string | null;
 	appPrincipalId?: string | null;
 	entityId: number;
 	sql?: DbClient;
 }): Promise<boolean> {
-	const allowlists = await loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql);
+	const allowlists = await loadCallerActionAllowlists(
+		args.organizationId, args.actor, args.appPrincipalId, args.sql, args.callerAgentId,
+	);
 	return allowlists.every((entries) =>
 		entries.some((entry) => entry.action === "entity.update" && entry.entity_id === args.entityId)
 	);
