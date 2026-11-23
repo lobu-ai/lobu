@@ -23,7 +23,8 @@
  * Kept free of tool and gateway imports so any write surface can reach it.
  */
 
-import { getDb } from '../db/client';
+import { type DbClient, getDb } from '../db/client';
+import { encodeExternalAutomationClaimOwner } from './external-claim-owner';
 
 /** The Automation a durable write is attributed to, after verification. */
 interface AutomationAttribution {
@@ -84,6 +85,38 @@ export async function verifiedAutomationSource(
     LIMIT 1
   `;
   return rows[0] ? declared : null;
+}
+
+/**
+ * The declared Automation this caller is running right now, or null.
+ *
+ * A declared source may attribute a write, but it decides whose connector rules
+ * apply only while this caller holds the declared run's unexpired window lease,
+ * the same claim `claim_next_window` and `complete_window` check. Otherwise an
+ * app, person or agent could name any Automation and borrow its Always allow.
+ */
+export async function leasedAutomationId(
+  sql: DbClient,
+  caller: {
+    organizationId: string;
+    userId: string | null;
+    agentId?: string | null;
+    clientId?: string | null;
+  },
+  declared: DeclaredAutomationSource | null | undefined
+): Promise<number | null> {
+  if (!declared || (!caller.userId && !caller.agentId && !caller.clientId)) return null;
+  const rows = await sql`
+    SELECT 1 FROM runs
+    WHERE id = ${declared.run_id}
+      AND automation_id = ${declared.automation_id}
+      AND organization_id = ${caller.organizationId}
+      AND run_type = 'automation'
+      AND status = 'running'
+      AND claimed_by = ${encodeExternalAutomationClaimOwner(caller)}
+      AND expires_at > current_timestamp
+  `;
+  return rows.length > 0 ? declared.automation_id : null;
 }
 
 /**

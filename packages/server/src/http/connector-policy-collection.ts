@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Context } from "hono";
 import { type ConnectorPolicyKind, canonicalConnectorPolicyScope } from "../authz/connector-policy";
 import {
+  automationIdFromPrincipalId,
   deleteEntityApprovalPolicy,
   type EntityApprovalPolicy,
   type EntityApprovalPolicyInput,
@@ -10,7 +11,8 @@ import {
   validatePolicyKindAndNote,
   withConnectorPolicyTransaction,
 } from "../authz/entity-policy";
-import type { DbClient } from "../db/client";
+import { appKeyProblem, resolvePolicyPrincipal } from "../authz/policy-principal";
+import { type DbClient, getDb } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
 import { parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy, validateConnectorPolicyTarget } from "./permission-policy-write";
 
@@ -33,27 +35,52 @@ function serializeRule(policy: EntityApprovalPolicy) {
   };
 }
 
-/** No query = the org rules; `principal_kind=app` (optionally with one app key) = rules for connected apps. */
-type CollectionPrincipal = { principalKind: "app" | null; principalId: string | null };
+/**
+ * No query = the org rules; `principal_kind=app` or `automation` (optionally
+ * with one app key or `automation:<id>`) = rules for connected apps or Automations.
+ */
+type CollectionPrincipal = { principalKind: "app" | "automation" | null; principalId: string | null };
 
-const APP_KEY_PREFIXES = ["web:", "client:", "local:", "pat:"];
 
 function collectionPrincipal(c: Context): CollectionPrincipal | string {
   const kind = c.req.query("principal_kind");
   const id = c.req.query("principal_id");
-  if (kind === undefined) return id === undefined ? { principalKind: null, principalId: null } : "principal_id requires principal_kind=app.";
-  if (kind !== "app") return "principal_kind must be 'app'; agent rules are managed on the agent.";
-  if (id === undefined) return { principalKind: "app", principalId: null };
-  if (id.length > 255 || id.trim() !== id || !APP_KEY_PREFIXES.some(prefix => id.startsWith(prefix) && id.length > prefix.length)) {
-    return "principal_id must be an app key: web:<domain>, client:<id>, local:<name> or pat:<id>.";
+  if (kind === undefined) return id === undefined ? { principalKind: null, principalId: null } : "principal_id requires principal_kind=app or automation.";
+  if (kind !== "app" && kind !== "automation") return "principal_kind must be 'app' or 'automation'; agent rules are managed on the agent.";
+  if (id === undefined) return { principalKind: kind, principalId: null };
+  if (kind === "automation") {
+    return automationIdFromPrincipalId(id) === null ? "principal_id must be automation:<id>." : { principalKind: "automation", principalId: id };
   }
-  // Derived web keys are lowercase; a mixed-case rule would never match a caller.
-  if (id.startsWith("web:") && id !== id.toLowerCase()) return "A web: app key must be lowercase.";
-  return { principalKind: "app", principalId: id };
+  const problem = appKeyProblem(id, "principal_id");
+  return problem ?? { principalKind: "app", principalId: id };
 }
 
-async function readSnapshot(org: string, principal: CollectionPrincipal, tx?: DbClient) {
-  const policies = (await listEntityApprovalPolicies(org, "connector_action", tx))
+/**
+ * An app or Automation may hold one kind of grant: Always allow for one action
+ * on one connection, named by its own id. Anything else it is given only tightens.
+ */
+function callerGrantProblem(principal: CollectionPrincipal, policy: EntityApprovalPolicyInput) {
+  const noun = principal.principalKind === "app" ? "an app" : "an Automation";
+  if (policy.effects?.execute !== "auto" || principal.principalId === null) {
+    throw new Error(`A rule for ${noun} must be a guardrail; use a workspace grant to allow.`);
+  }
+  // A local client names itself, so any local tool could claim the name.
+  if (principal.principalId.startsWith("local:")) {
+    throw new Error("An app that only names itself (local:) can't be allowed; add a workspace rule instead.");
+  }
+  if (policy.connectionId === null || !policy.operationKey || policy.operationCategory !== null) {
+    throw new Error("An app or Automation can only be allowed one action on one connection.");
+  }
+}
+
+async function automationExists(org: string, principalId: string) {
+  const id = automationIdFromPrincipalId(principalId);
+  const rows = await getDb()`SELECT 1 FROM automations WHERE organization_id = ${org} AND id = ${id} LIMIT 1`;
+  return rows.length > 0;
+}
+
+function snapshotOf(all: readonly EntityApprovalPolicy[], principal: CollectionPrincipal) {
+  const policies = all
     .filter(p => p.principalKind === principal.principalKind && (principal.principalKind === null || p.principalId === principal.principalId) &&
       p.effects.execute !== undefined)
     .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
@@ -64,6 +91,10 @@ async function readSnapshot(org: string, principal: CollectionPrincipal, tx?: Db
   return { policies, revision, rules: policies.map(serializeRule) };
 }
 
+async function readSnapshot(org: string, principal: CollectionPrincipal, tx?: DbClient) {
+  return snapshotOf(await listEntityApprovalPolicies(org, "connector_action", tx), principal);
+}
+
 /** Saved rules only: catalog metadata belongs to the existing inspection endpoint. */
 export async function readConnectorPolicyCollection(c: Context) {
   const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
@@ -72,6 +103,36 @@ export async function readConnectorPolicyCollection(c: Context) {
   if (typeof principal === "string") return c.json({ error: "invalid_request", message: principal }, 400);
   const { revision, rules } = await readSnapshot(c.get("organizationId")!, principal);
   return c.json({ revision, rules });
+}
+
+/**
+ * Every app and Automation with rules of its own. Each entry is exactly what that
+ * caller's collection GET returns, so edits go through the collection PUT.
+ */
+export async function readConnectorPolicyCallers(c: Context) {
+  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
+  if (denied) return denied;
+  if (Object.keys(c.req.queries()).length) return c.json({ error: "invalid_request", message: "This endpoint takes no query parameters." }, 400);
+  const org = c.get("organizationId")!;
+  const all = await listEntityApprovalPolicies(org, "connector_action");
+  const principals = new Map<string, { principalKind: "app" | "automation"; principalId: string }>();
+  for (const policy of all) {
+    const { principalKind, principalId } = policy;
+    if ((principalKind === "app" || principalKind === "automation") && principalId !== null && policy.effects.execute !== undefined) {
+      principals.set(JSON.stringify([principalKind, principalId]), { principalKind, principalId });
+    }
+  }
+  const sql = getDb();
+  const callers = await Promise.all([...principals.values()].map(async principal => {
+    const { revision, rules } = snapshotOf(all, principal);
+    const { label } = await resolvePolicyPrincipal(sql, org, { kind: principal.principalKind, id: principal.principalId });
+    return { principal_kind: principal.principalKind, principal_id: principal.principalId, label, revision, rules };
+  }));
+  // A caller that is gone has no label; it is still listed so its rules can be cleared.
+  const sortName = (caller: { label: string | null; principal_id: string }) => (caller.label ?? caller.principal_id).toLowerCase();
+  callers.sort((a, b) => a.principal_kind.localeCompare(b.principal_kind) || sortName(a).localeCompare(sortName(b)) ||
+    a.principal_id.localeCompare(b.principal_id));
+  return c.json({ callers });
 }
 
 /** Replace the org's connector rules as one compare-and-swap, preserving every other policy class/principal. */
@@ -103,8 +164,7 @@ export async function replaceConnectorPolicyCollection(c: Context) {
       const parsed = parsePolicy({ ...scope, resource_class: "connector_action", effects: { execute: effect } }, false);
       // The collection is the whole desired state, so an omitted note clears it.
       const checked = validatePolicyKindAndNote({ ...parsed, kind: kind as ConnectorPolicyKind | undefined, note: (note ?? null) as string | null });
-      // An app rule can only tighten what the app's user may do, so it is always a guardrail.
-      if (principal.principalKind === "app" && checked.kind !== "guardrail") throw new Error("A rule for an app must be a guardrail; use a workspace grant to allow.");
+      if (principal.principalKind !== null && checked.kind !== "guardrail") callerGrantProblem(principal, parsed);
       const policy = { ...parsed, ...principal, kind: checked.kind, note: checked.note ?? null };
       const key = scopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
@@ -113,6 +173,11 @@ export async function replaceConnectorPolicyCollection(c: Context) {
     });
   } catch (error) {
     return c.json({ error: "invalid_request", message: (error as Error).message }, 400);
+  }
+  // Clearing the rules of a deleted Automation stays possible.
+  if (principal.principalKind === "automation" && principal.principalId !== null && policies.length &&
+    !(await automationExists(org, principal.principalId))) {
+    return c.json({ error: "invalid_request", message: "Automation not found in this workspace." }, 400);
   }
   const current = await readSnapshot(org, principal);
   if (revision !== current.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);

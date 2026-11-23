@@ -244,6 +244,24 @@ export function evaluateConnectorPolicy(args: {
 	const restrictions = grants.filter(
 		(rule) => rule.principalKind !== null && namesActor(rule),
 	);
+	// The caller's own Auto rule for this exact action on this exact connection
+	// lifts every Ask first for it. Only a rule naming this caller (or an
+	// Automation's agent) counts; a rule for every agent or every app never does.
+	const lifts = restrictions.filter(
+		(rule) =>
+			rule.principalId !== null &&
+			rule.connectionId !== null &&
+			rule.operationKey !== null &&
+			rule.operationCategory === null &&
+			rule.effects.execute === "auto",
+	);
+	const ownLift = lifts.some((rule) => rule.principalKind === args.actor.kind);
+	// An Automation's agent lifts Asks for it too, except an Ask set for
+	// Automations, so "Ask next time" on an Automation still asks.
+	const lifted = (rule: EntityApprovalPolicy) =>
+		rule.effects.execute === "approval" &&
+		lifts.length > 0 &&
+		(ownLift || rule.principalKind !== "automation");
 	// Every matching guardrail applies after the grant fold. A guardrail can only
 	// log, check, hold or block: a stored `auto` (rejected on write) or any
 	// unrecognised effect fails closed to deny.
@@ -260,11 +278,15 @@ export function evaluateConnectorPolicy(args: {
 	};
 	for (const rule of [...decisive, ...restrictions]) {
 		const stored = rule.effects.execute;
+		if (lifted(rule)) continue;
 		// Invalid stored values fail closed. New connector rules only accept the three effects.
 		fold(rule, stored === "auto" || stored === "approval" ? stored : "deny");
 	}
 	for (const rule of guardrails) {
 		const stored = rule.effects.execute;
+		// Block, Log and Check still apply, including a Check asked of a caller
+		// that cannot confirm it.
+		if (lifted(rule)) continue;
 		let candidate: WriteEffect =
 			stored === "log" || stored === "check" || stored === "approval" ? stored : "deny";
 		// Only an agent can confirm its own Check. A person or an Automation

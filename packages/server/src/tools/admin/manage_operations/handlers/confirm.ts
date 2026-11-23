@@ -180,6 +180,7 @@ export async function handleConfirm(
 			cardEntityIds: await resolveConnectionCardEntityIds(tx, run.connection_id),
 			runId: run.id,
 			policy: { ...policy, check },
+			principal,
 			failedMessage: null,
 		});
 		return {

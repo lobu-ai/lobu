@@ -7,9 +7,10 @@ import { getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
+import { leasedAutomationId } from "../../../../automations/automation-source";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
 import { applyRunConnectorPolicyAtClaim, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
@@ -664,11 +665,14 @@ export async function insertDispatchCard(
 		runId: number;
 		/** The deciding policy, plus the confirmation for a Check. */
 		policy: ConnectorPolicyResult & { check?: { statement: string; confirmed_at: string } };
+		/** Who the policy decided for, so the card's rule buttons act for that caller. */
+		principal: ConnectorPolicyPrincipal;
 		/** Set when the run was born failed. */
 		failedMessage: string | null;
 	},
 ): Promise<number> {
-	const { ctx, connection, operation, input, runId, policy } = p;
+	const { ctx, connection, operation, input, runId } = p;
+	const policy = { ...p.policy, principal: p.principal };
 	const bornFailed = p.failedMessage !== null;
 	const initiator = resolveRunInitiator(ctx);
 	const event = await insertEvent(
@@ -970,11 +974,13 @@ export async function handleExecute(
 		}, "VALIDATION");
 	}
 
+	// A declared Automation is whose rules apply only while this caller holds
+	// its run's window lease; otherwise the caller stays itself.
 	const actor = delegation?.actor ?? await resolveActingPrincipal(sql, {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
-		explicitAutomationId: args.automation_source?.automation_id ?? null,
+		explicitAutomationId: await leasedAutomationId(sql, ctx, args.automation_source),
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 		appId: ctx.appPrincipalId ?? null,
 	});
@@ -1310,7 +1316,7 @@ export async function handleExecute(
 		// A device run whose manifest admission fails is born terminal, so its
 		// only card IS the terminal one — there is nothing to supersede later.
 		await insertDispatchCard(tx, {
-			ctx, connection, operation, input, cardEntityIds, policy,
+			ctx, connection, operation, input, cardEntityIds, policy, principal,
 			runId: createdRunId,
 			failedMessage: createdRun.status === "failed" ? createdRun.errorMessage ?? "" : null,
 		});

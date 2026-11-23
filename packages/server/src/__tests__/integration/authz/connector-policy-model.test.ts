@@ -358,6 +358,51 @@ describe("org connector policy scopes", () => {
 		await expect(save({ connectionId, effects: { execute: "check" } })).rejects.toThrow(/guardrail modes/);
 	});
 
+	it("a caller's own exact Auto rule lifts Ask first for that caller only, never Block, Check or Log", async () => {
+		const operationKey = qualifiedOperationKey(operation.connector_key, operation.operation_key);
+		const app: ActingPrincipal = { kind: "app", id: "pat:fixture", ownerAgentId: null, ownerResolved: true };
+		const otherApp: ActingPrincipal = { ...app, id: "pat:other" };
+		const otherAgent: ActingPrincipal = { ...agent, id: "other-agent" };
+		const ownedAutomation: ActingPrincipal = { kind: "automation", id: "automation:7", ownerAgentId: agent.id, ownerResolved: true };
+		const codeAutomation: ActingPrincipal = { kind: "automation", id: "automation:8", ownerAgentId: null, ownerResolved: true };
+		const askAll = await save({ effects: { execute: "approval" } });
+		const askHere = await save({ connectionId, operationKey, kind: "guardrail", effects: { execute: "approval" } });
+		// A broader rule for this agent, or an exact rule for every agent, lifts nothing.
+		await save({ principalKind: "agent", principalId: agent.id, connectionId, effects: { execute: "auto" } });
+		await save({ principalKind: "agent", connectionId, operationKey, effects: { execute: "auto" } });
+		expect((await decide(agent)).effect).toBe("approval");
+
+		const agentAllow = await save({ principalKind: "agent", principalId: agent.id, connectionId, operationKey, effects: { execute: "auto" } });
+		const appAllow = await save({ principalKind: "app", principalId: app.id, connectionId, operationKey, effects: { execute: "auto" } });
+		const automationAllow = await save({ principalKind: "automation", principalId: codeAutomation.id, connectionId, operationKey, effects: { execute: "auto" } });
+		for (const [caller, allow] of [[agent, agentAllow], [ownedAutomation, agentAllow], [app, appAllow], [codeAutomation, automationAllow]] as const) {
+			const result = await decide(caller);
+			expect(result.effect, caller.id!).toBe("auto");
+			expect(result.ruleIds, caller.id!).toContain(allow.id);
+			expect(result.ruleIds, caller.id!).not.toContain(askAll.id);
+			expect(result.ruleIds, caller.id!).not.toContain(askHere.id);
+		}
+		for (const caller of [otherAgent, otherApp, human]) {
+			expect(await decide(caller), String(caller.id)).toMatchObject({ effect: "approval", ruleIds: [askAll.id, askHere.id] });
+		}
+		// "Ask next time" on an Automation outranks its agent's Always allow,
+		// which still lifts the workspace Asks for the agent and the Automation.
+		const askOwned = await save({ principalKind: "automation", principalId: ownedAutomation.id, connectionId, operationKey, kind: "guardrail", effects: { execute: "approval" } });
+		expect(await decide(ownedAutomation)).toMatchObject({ effect: "approval", ruleIds: [askOwned.id] });
+		expect((await decide(agent)).effect).toBe("auto");
+		await save({ principalKind: "automation", principalId: ownedAutomation.id, connectionId, operationKey, effects: { execute: "auto" } });
+		expect((await decide(ownedAutomation)).effect).toBe("auto");
+
+		const log = await save({ connectionId, kind: "guardrail", effects: { execute: "log" } });
+		expect(await decide(app)).toMatchObject({ effect: "log", ruleIds: [log.id], reason: "guardrail" });
+		// Only a caller that can confirm a Check gets one; the rest are still asked.
+		const check = await save({ connectorKey: operation.connector_key, kind: "guardrail", effects: { execute: "check" } });
+		expect(await decide(app)).toMatchObject({ effect: "check", ruleIds: [check.id] });
+		expect(await decide(codeAutomation)).toMatchObject({ effect: "approval", ruleIds: [check.id] });
+		const block = await save({ principalKind: "app", principalId: app.id, kind: "guardrail", effects: { execute: "deny" } });
+		expect(await decide(app)).toMatchObject({ effect: "deny", ruleIds: [block.id] });
+	});
+
 	it("an allowed actions list binds a caller's writes only and is named as the reason", async () => {
 		const policies = await listEntityApprovalPolicies(orgId, "connector_action");
 		const evaluate = (op: typeof operation | { connector_key: string; operation_key: string; kind: "read" }, allowlists: Parameters<typeof evaluateConnectorPolicy>[0]["allowlists"]) =>

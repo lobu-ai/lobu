@@ -377,8 +377,10 @@ export function automationIdFromPrincipalId(
 	principalId: string | null | undefined,
 ): number | null {
 	if (!principalId?.startsWith("automation:")) return null;
-	const id = Number(principalId.slice("automation:".length));
-	return Number.isFinite(id) ? id : null;
+	const digits = principalId.slice("automation:".length);
+	const id = Number(digits);
+	// Only the canonical form {@link mutationPrincipalId} writes names an Automation.
+	return Number.isSafeInteger(id) && id > 0 && String(id) === digits ? id : null;
 }
 
 /**

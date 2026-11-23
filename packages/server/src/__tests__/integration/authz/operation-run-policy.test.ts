@@ -15,6 +15,7 @@ import { createConnectorOperationRun } from '../../../runs/queue-service';
 import { NOTIFICATION_DELIVERY_TASK } from '../../../scheduled/task-definitions';
 import { supersedeActionEvent } from '../../../tools/admin/approval-events';
 import { waitForDeviceActionRunWithOptions } from '../../../tools/admin/device-action-wait';
+import { encodeExternalAutomationClaimOwner } from '../../../automations/external-claim-owner';
 import { executeOperationInline, handleExecute } from '../../../tools/admin/manage_operations/handlers/execute';
 import { qualifiedOperationKey } from '../../../tools/admin/manage_operations/handlers/shared';
 import type { ToolContext } from '../../../tools/registry';
@@ -323,6 +324,60 @@ describe('operation policy at durable dispatch', () => {
     const held = await execute();
     expect(held.status).toBe('pending_approval');
     expect(await state(held.run_id)).toMatchObject({ approval_status: 'pending' });
+  });
+
+  it.each(['app', 'agent'] as const)('does not let a %s borrow an Automation grant through attribution', async (kind) => {
+    const agent = await createTestAgent({ organizationId, agentId: 'attribution-agent', ownerUserId: ownerId });
+    const automationId = 7001;
+    await sql`INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug)
+      VALUES (${automationId}, ${automationId}, ${organizationId}, ${agent.agentId}, ${ownerId}, 'Attribution fixture', 'attribution-fixture')`;
+    await upsertEntityApprovalPolicy(organizationId, {
+      resourceClass: 'connector_action', principalKind: 'automation', principalId: `automation:${automationId}`,
+      connectionId, operationKey: qualifiedOperationKey(connectorKey, 'perform'), effects: { execute: 'auto' },
+    });
+    const ctx = {
+      organizationId, userId: ownerId, memberRole: 'owner', isAuthenticated: true,
+      tokenType: 'oauth', scopedToOrg: true, baseUrl: 'https://gateway.example.test/lobu',
+      ...(kind === 'app' ? { appPrincipalId: 'web:policy-caller.test' } : { agentId: agent.agentId }),
+    } as ToolContext;
+    const args = {
+      action: 'execute' as const, connection_id: connectionId, operation_key: 'perform', input: {},
+      activation: { kind: 'page_visit' as const, urls: ['https://example.test/draft'], expires_in_seconds: 300 },
+    };
+    const principalId = kind === 'app' ? ctx.appPrincipalId : ctx.agentId;
+    for (const attribution of [undefined, { automation_id: automationId, run_id: 7002 }]) {
+      const result = await handleExecute({ ...args, automation_source: attribution }, ctx, {} as Env) as { run_id: number; status: string };
+      expect(result.status).toBe('pending_approval');
+      const [persisted] = await sql`SELECT policy_principal_kind, policy_principal_id FROM runs WHERE id = ${result.run_id}`;
+      expect(persisted).toMatchObject({ policy_principal_kind: kind, policy_principal_id: principalId });
+      expect(await decision(result.run_id)).toMatchObject({ effect: 'approval' });
+      expect(await admit(result.run_id)).toBe(false);
+    }
+    const trusted = await handleExecute(args, { ...ctx, actingAutomationId: automationId }, {} as Env) as { run_id: number; status: string };
+    expect(trusted.status).toBe('in_progress');
+    expect(await decision(trusted.run_id)).toMatchObject({ effect: 'auto' });
+    const [persisted] = await sql`SELECT policy_principal_kind, policy_principal_id FROM runs WHERE id = ${trusted.run_id}`;
+    expect(persisted).toMatchObject({ policy_principal_kind: 'automation', policy_principal_id: `automation:${automationId}` });
+
+    // An external processor holding the run's window lease is running the
+    // Automation, so its rules apply. Another caller's or a lapsed lease is not.
+    const [window] = await sql<{ id: number }>`INSERT INTO runs (organization_id, run_type, automation_id, status)
+      VALUES (${organizationId}, 'automation', ${automationId}, 'running') RETURNING id`;
+    const leased = { automation_id: automationId, run_id: Number(window.id) };
+    const lease = (claimedBy: string, seconds: number) => sql`UPDATE runs
+      SET claimed_by = ${claimedBy}, expires_at = now() + make_interval(secs => ${seconds}) WHERE id = ${leased.run_id}`;
+    const ownLease = encodeExternalAutomationClaimOwner(ctx);
+    for (const [claimedBy, seconds, status, principal] of [
+      [ownLease, 300, 'in_progress', ['automation', `automation:${automationId}`]],
+      [encodeExternalAutomationClaimOwner({ userId: 'someone-else' }), 300, 'pending_approval', [kind, principalId]],
+      [ownLease, -1, 'pending_approval', [kind, principalId]],
+    ] as const) {
+      await lease(claimedBy, seconds);
+      const result = await handleExecute({ ...args, automation_source: leased }, ctx, {} as Env) as { run_id: number; status: string };
+      expect(result.status, `${claimedBy} ${seconds}`).toBe(status);
+      const [row] = await sql`SELECT policy_principal_kind, policy_principal_id FROM runs WHERE id = ${result.run_id}`;
+      expect([row.policy_principal_kind, row.policy_principal_id]).toEqual(principal);
+    }
   });
 
   it('the inline executor parks and notifies before invoking its backend', async () => {

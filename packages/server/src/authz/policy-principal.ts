@@ -4,6 +4,18 @@ import { automationIdFromPrincipalId, type EntityPolicyPrincipalKind } from "./e
 
 const PRINCIPAL_KINDS: readonly EntityPolicyPrincipalKind[] = ["user", "agent", "automation", "app"];
 
+const APP_KEY_PREFIXES = ["web:", "client:", "local:", "pat:"];
+
+/** Why `key` can't name a connected app, or null when it is a well-formed app key. */
+export function appKeyProblem(key: string, field: string): string | null {
+	if (key.length > 255 || key.trim() !== key || !APP_KEY_PREFIXES.some((prefix) => key.startsWith(prefix) && key.length > prefix.length)) {
+		return `${field} must be an app key: web:<domain>, client:<id>, local:<name> or pat:<id>.`;
+	}
+	// Derived web keys are lowercase; a mixed-case key would never match a caller.
+	if (key.startsWith("web:") && key !== key.toLowerCase()) return "A web: app key must be lowercase.";
+	return null;
+}
+
 async function appLabel(sql: DbClient, organizationId: string, appKey: string): Promise<string | null> {
 	const separator = appKey.indexOf(":");
 	const prefix = appKey.slice(0, separator);
