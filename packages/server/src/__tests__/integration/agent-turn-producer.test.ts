@@ -59,7 +59,9 @@ import { newGatewayInlineOwner } from '../../runs/run-lease';
 import { Hono } from 'hono';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { McpProxy } from '../../gateway/auth/mcp/proxy';
-import { isAuthorizationReadOnlyToolName } from '../../tools/registry';
+import { isAuthorizationReadOnlyToolName, type ToolContext } from '../../tools/registry';
+import { manageOperations } from '../../tools/admin/manage_operations';
+import type { Env } from '../../index';
 import { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
 import { createPostgresAgentConfigStore } from '../../lobu/stores/postgres-stores';
 import { buildAgentsNamespace } from '../../sandbox/namespaces/agents';
@@ -1331,6 +1333,55 @@ describe('agent turn producer', () => {
       initiator_ref: { automation_id: automationId, run_id: Number(runRow!.id) },
       created_by_user_id: null,
     });
+    // The window's `automation` run is its attributed record, not the turn.
+    const [windowTurn] = await sql`SELECT automation_id FROM runs WHERE id = ${runs.at(-1)!.id}`;
+    expect(windowTurn!.automation_id).toBeNull();
+  });
+
+  it('attributes a reply Automation chat turn to its Automation, keeping the chat sender as initiator', async () => {
+    // A reply_to_source Automation writes no `automation` run: the chat bridge
+    // stamps its id on the admitted message, and the turn is the only run it
+    // produces, so the turn is what operations.listRuns must find for it.
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    const foreignOrg = await createTestOrganization();
+    const author = await createTestUser({ name: 'Reply Author' });
+    const insertReplyAutomation = async (organizationId: string, slug: string) => {
+      const [row] = await sql<{ id: number }>`
+        INSERT INTO automations (organization_id, created_by, automation_group_id, name, slug, managed_agent_id)
+        VALUES (${organizationId}, ${author.id}, 0, ${slug}, ${slug}, ${AGENT_ID}) RETURNING id
+      `;
+      const id = Number(row!.id);
+      await sql`UPDATE automations SET automation_group_id = ${id} WHERE id = ${id}`;
+      return id;
+    };
+    const replyId = await insertReplyAutomation(org.id, 'chat-reply');
+    const foreignId = await insertReplyAutomation(foreignOrg.id, 'foreign-reply');
+    const replyMessage = (automationId: number, conversationId: string) => ({
+      ...messageFor(org.id),
+      conversationId,
+      messageId: `1700000000.000100:automation:${automationId}`,
+      platformMetadata: { automationId, automationDeliveryId: `delivery-${conversationId}` },
+    });
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(claudeModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(replyMessage(replyId, 'conv-reply'), deps);
+    // An id that names another organization's Automation attributes nothing.
+    await enqueueMessage(replyMessage(foreignId, 'conv-foreign'), deps);
+
+    const turns = await sql`
+      SELECT automation_id, initiator_kind FROM runs WHERE run_type = 'agent_turn' ORDER BY id
+    `;
+    expect(turns.map((turn) => ({ ...turn, automation_id: turn.automation_id === null ? null : Number(turn.automation_id) })))
+      .toEqual([
+        { automation_id: replyId, initiator_kind: 'agent_session' },
+        { automation_id: null, initiator_kind: 'agent_session' },
+      ]);
+
+    const listed = (await manageOperations({ action: 'list_runs', automation_ids: [replyId] }, {} as Env, {
+      organizationId: org.id, userId: author.id, memberRole: 'owner', isAuthenticated: true,
+      tokenType: 'oauth', scopes: ['mcp:admin'], scopedToOrg: false, allowCrossOrg: false,
+    } as ToolContext)) as { runs: Array<{ run_type: string; automation_id: unknown }> };
+    expect(listed.runs.map((run) => [run.run_type, Number(run.automation_id)])).toEqual([['agent_turn', replyId]]);
   });
 
   it('advertises seeded inputs with the standard workspace tools', async () => {

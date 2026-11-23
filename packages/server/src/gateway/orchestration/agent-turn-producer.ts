@@ -1303,7 +1303,8 @@ export async function enqueueAgentTurn(
 
     const rows = await sql.begin(async (tx) => {
       await lockAgentTurnConversation(tx, data.organizationId!, data.agentId!, data.conversationId);
-      const [source] = await tx`SELECT id, initiator_kind, initiator_ref, created_by_user_id FROM runs
+      const [source] = await tx`SELECT id, initiator_kind, initiator_ref, created_by_user_id,
+          action_input->'platformMetadata'->'automationId' AS admitted_automation_id FROM runs
         WHERE id = ${data.runId!} AND organization_id = ${data.organizationId!}
           AND run_type = 'chat_message' AND queue_name = 'messages'
           AND action_input->>'messageId' = ${data.messageId} FOR UPDATE`;
@@ -1318,12 +1319,22 @@ export async function enqueueAgentTurn(
         agentId: turnClaims.agentId, userId: admittedHumanId,
         sourceContext: { platform: turnClaims.platform, conversationId: turnClaims.conversationId },
       }) : initiator;
+      // A reply_to_source Automation writes no `automation` run, so its turn is
+      // the run that carries its id. The id comes off the durable admission the
+      // chat bridge wrote, and only names this org's Automation for this agent.
+      // It attributes the run only: the initiator stays the chat sender, and a
+      // window turn's `automation` run remains that window's attributed record.
+      const admittedAutomationId = source.admitted_automation_id;
+      const replyAutomationId = !automationIntent && typeof admittedAutomationId === "number"
+        && Number.isSafeInteger(admittedAutomationId) && admittedAutomationId > 0 ? admittedAutomationId : null;
       return tx<{ id: number }>`INSERT INTO runs (
         id, organization_id, run_type, status, approval_status, action_input, created_at, run_at, parent_run_id,
-        initiator_kind, initiator_ref, created_by_user_id
+        initiator_kind, initiator_ref, created_by_user_id, automation_id
       ) VALUES (${runId}, ${data.organizationId!}, 'agent_turn', 'pending', 'auto',
         ${tx.json({ turn, credential: provider.credential, reply })}, now(), now(), ${data.runId!},
-        ${admittedInitiator.initiatorKind}, ${tx.json(admittedInitiator.initiatorRef)}, ${admittedInitiator.createdByUserId}) RETURNING id`;
+        ${admittedInitiator.initiatorKind}, ${tx.json(admittedInitiator.initiatorRef)}, ${admittedInitiator.createdByUserId},
+        (SELECT id FROM automations WHERE id = ${replyAutomationId} AND organization_id = ${data.organizationId!}
+          AND managed_agent_id = ${data.agentId!})) RETURNING id`;
     });
 
     logger.info(

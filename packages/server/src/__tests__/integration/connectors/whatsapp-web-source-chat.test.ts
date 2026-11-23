@@ -635,7 +635,11 @@ describe("WhatsApp Web source chat", () => {
     await drain();
     expect((await ingressJobs())[0].status).toBe("completed");
     expect(enqueued).toHaveLength(1);
-    expect(enqueued[0]).toMatchObject({ agentId, messageText: expect.stringContaining("hello bot") });
+    // The admitted message names its reply Automation; the turn producer
+    // attributes the agent turn to it from this field.
+    expect(enqueued[0]).toMatchObject({
+      agentId, messageText: expect.stringContaining("hello bot"), platformMetadata: { automationId: replyId },
+    });
     await completeTurns();
     expect(sends).toHaveLength(1);
     expect(sends[0].input).toEqual({ chat_jid: DM_JID, text: "Reply from the agent" });
