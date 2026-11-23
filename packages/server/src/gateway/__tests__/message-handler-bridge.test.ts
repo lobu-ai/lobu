@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import {
   type MatchingAutomationActivation,
   planAutomationActivations,
@@ -32,15 +41,17 @@ import {
  */
 const linkedMemberActor = async () => ({ access: "member" as const, actorUserId: "member-routing-test" });
 
-/** Transcript capture writes to Postgres, so this DB-free suite records it. */
-const realChannelTranscript = { ...channelTranscript };
+/** Transcript capture writes to Postgres, so this DB-free suite records it.
+ * A spy, not a module mock: suites sharing this Bun process need the real
+ * capture back once this file is done. */
 const capturedMessages: Array<{ channelId: string; text: string }> = [];
-mock.module("../connections/channel-transcript.js", () => ({
-  ...realChannelTranscript,
-  captureChannelMessage: (params: { channelId: string; text: string }) => {
-    capturedMessages.push({ channelId: params.channelId, text: params.text });
-  },
-}));
+const captureSpy = spyOn(
+  channelTranscript,
+  "captureChannelMessage"
+).mockImplementation((params) => {
+  capturedMessages.push({ channelId: params.channelId, text: params.text });
+});
+afterAll(() => captureSpy.mockRestore());
 
 /** The reply cooldown operations are injected so this unit suite stays DB-free. */
 const cooldownClaims: number[] = [];
