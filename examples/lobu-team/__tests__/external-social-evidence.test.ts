@@ -1235,8 +1235,10 @@ test("empty native LinkedIn receipts retain skipped-card limitations through not
         },
       }
     );
+    // Nothing was read, so the owner hears about it, with the limitation.
+    expect(send.mock.calls[0]![0].title).toBe("Couldn't read LinkedIn today");
     expect(send.mock.calls[0]![0].body).toContain(
-      "linkedin: 0 text posts, partial"
+      `${skipped ?? "unknown"} skipped cards`
     );
   }
   const h = fixture();
