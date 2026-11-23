@@ -29,6 +29,8 @@ export type ClientOptions = {
     | `${string}://${string}/lobu`
     | `${string}://${string}/lobu`
     | `${string}://${string}/lobu`
+    | `${string}://${string}/lobu`
+    | `${string}://${string}/lobu`
     | (string & {});
 };
 
@@ -9590,6 +9592,34 @@ export type GetGithubAppInstallCallbackData = {
 };
 
 export type GetGithubAppInstallCallbackResponses = {
+  /**
+   * OK
+   */
+  200: unknown;
+};
+
+export type GetShopifyInstallData = {
+  body?: never;
+  path?: never;
+  query?: never;
+  url: "/shopify/install";
+};
+
+export type GetShopifyInstallResponses = {
+  /**
+   * OK
+   */
+  200: unknown;
+};
+
+export type GetShopifyOauthCallbackData = {
+  body?: never;
+  path?: never;
+  query?: never;
+  url: "/shopify/oauth_callback";
+};
+
+export type GetShopifyOauthCallbackResponses = {
   /**
    * OK
    */

@@ -56,6 +56,10 @@ import type {
   GetGithubAppInstallCallbackResponses,
   GetGithubAppInstallData,
   GetGithubAppInstallResponses,
+  GetShopifyInstallData,
+  GetShopifyInstallResponses,
+  GetShopifyOauthCallbackData,
+  GetShopifyOauthCallbackResponses,
   ListMetricsData,
   ListMetricsErrors,
   ListMetricsResponses,
@@ -1286,3 +1290,27 @@ export const getGithubAppInstallCallback = <
     unknown,
     ThrowOnError
   >({ url: "/github/app/install/callback", ...options });
+
+/**
+ * GET /shopify/install
+ */
+export const getShopifyInstall = <ThrowOnError extends boolean = false>(
+  options?: Options<GetShopifyInstallData, ThrowOnError>,
+): RequestResult<GetShopifyInstallResponses, unknown, ThrowOnError> =>
+  (options?.client ?? client).get<
+    GetShopifyInstallResponses,
+    unknown,
+    ThrowOnError
+  >({ url: "/shopify/install", ...options });
+
+/**
+ * GET /shopify/oauth_callback
+ */
+export const getShopifyOauthCallback = <ThrowOnError extends boolean = false>(
+  options?: Options<GetShopifyOauthCallbackData, ThrowOnError>,
+): RequestResult<GetShopifyOauthCallbackResponses, unknown, ThrowOnError> =>
+  (options?.client ?? client).get<
+    GetShopifyOauthCallbackResponses,
+    unknown,
+    ThrowOnError
+  >({ url: "/shopify/oauth_callback", ...options });
