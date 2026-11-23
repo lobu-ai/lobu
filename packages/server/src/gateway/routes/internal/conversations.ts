@@ -217,6 +217,18 @@ async function sendAsOperation(
           },
           409
         );
+      // The agent judges a Check itself: the message names the rule and how
+      // to confirm or cancel the held run.
+      case "pending_check":
+        return c.json(
+          {
+            error: `Held by a workspace check (run ${runId}); not sent yet. ${String(result.message ?? "")}`,
+            code: "PENDING_CHECK",
+            run_id: runId,
+            expires_at: result.expires_at ?? null,
+          },
+          409
+        );
       case "in_progress":
         return c.json(
           {

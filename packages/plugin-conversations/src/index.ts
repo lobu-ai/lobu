@@ -158,9 +158,13 @@ export async function sendMessage(
       { method: "POST", body: JSON.stringify(args) },
       "Failed to send message"
     );
-    // A send outside this conversation waits for a person to approve it. That
-    // is an outcome, not a failure: retrying would only ask again.
-    if (errorCode === "PENDING_APPROVAL" && errorMessage) {
+    // A send outside this conversation waits for a person to approve it, or
+    // for this agent to confirm a check. That is an outcome, not a failure:
+    // retrying would only hold it again.
+    if (
+      (errorCode === "PENDING_APPROVAL" || errorCode === "PENDING_CHECK") &&
+      errorMessage
+    ) {
       return textResult(errorMessage);
     }
     if (error) return error;

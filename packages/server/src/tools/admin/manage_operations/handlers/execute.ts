@@ -1058,10 +1058,13 @@ export async function handleExecute(
 		if (control) runMetadata = { ...runMetadata, browser_recovery_control: control };
 	}
 	// Only a caller that can judge and reach operations.confirm is held for a
-	// Check. A delegated connector step or a chat transport send has no confirm
-	// path, and an Automation script cannot judge, so its Check is asked of a
-	// person instead.
-	const canConfirm = !delegation && !chatTransport && !isAutomationScriptCall(ctx);
+	// Check. A delegated connector step has no confirm path, and an Automation
+	// script cannot judge, so its Check is asked of a person instead. An agent's
+	// chat send confirms from the turn's MCP session, which acts as the agent:
+	// a send for an Automation turn is held for that Automation, which the
+	// session cannot confirm as, so it is asked too.
+	const canConfirm = !delegation && !isAutomationScriptCall(ctx) &&
+		!(chatTransport && ctx.actingAutomationId != null);
 	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner" ||
 		(policy.effect === "check" && !canConfirm);
 	const holdForCheck = !shouldQueue && policy.effect === "check";
