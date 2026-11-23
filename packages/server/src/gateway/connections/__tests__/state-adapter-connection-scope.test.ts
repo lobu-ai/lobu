@@ -70,4 +70,22 @@ describe("connection-scoped inbound state", () => {
       expect(delivered.mock.calls[0]![2].attachments).toHaveLength(1);
     }
   });
+
+  test("Telegram channel metadata resolves from the SDK's prefixed channel id", async () => {
+    const adapter = await telegramPlatform.createAdapter(
+      { botToken: "test-token", userName: "test-bot", mode: "webhook" },
+      { connection: { id: "telegram-test", organizationId: "org-one" } as PlatformConnection },
+    );
+    // Telegram's Bot API answers only for the bare chat id.
+    adapter.telegramFetch = async (method: string, params: { chat_id: string }) => {
+      if (String(params.chat_id) !== "-100123") {
+        throw new Error("Bad Request: chat not found");
+      }
+      return method === "getChat"
+        ? { id: -100123, type: "supergroup", title: "Ops Room" }
+        : 3;
+    };
+    const info = await adapter.fetchChannelInfo("telegram:-100123");
+    expect(info).toMatchObject({ id: "-100123", name: "Ops Room", isDM: false });
+  });
 });
