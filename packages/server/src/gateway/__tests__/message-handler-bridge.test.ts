@@ -1,10 +1,20 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import {
   type MatchingAutomationActivation,
   planAutomationActivations,
 } from "../../automations/activation.js";
 import { matchingAutomationTriggers } from "../../automations/event-trigger.js";
 import { normalizeStatefulChatCommand } from "../commands/command-spelling.js";
+import * as channelTranscript from "../connections/channel-transcript.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
   buildAttachmentTranscriptText,
@@ -30,6 +40,18 @@ import {
  * Slack and Google Chat e2e suites.
  */
 const linkedMemberActor = async () => ({ access: "member" as const, actorUserId: "member-routing-test" });
+
+/** Transcript capture writes to Postgres, so this DB-free suite records it.
+ * A spy, not a module mock: suites sharing this Bun process need the real
+ * capture back once this file is done. */
+const capturedMessages: Array<{ channelId: string; text: string }> = [];
+const captureSpy = spyOn(
+  channelTranscript,
+  "captureChannelMessage"
+).mockImplementation((params) => {
+  capturedMessages.push({ channelId: params.channelId, text: params.text });
+});
+afterAll(() => captureSpy.mockRestore());
 
 /** The reply cooldown operations are injected so this unit suite stays DB-free. */
 const cooldownClaims: number[] = [];
@@ -954,22 +976,35 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     }
   });
 
-  test("a rejected Automation filter cannot be bypassed by channel fallback", async () => {
-    const trigger = {
-      kind: "event" as const,
-      connector_key: "slack",
-      connection_id: 42,
-      event_types: ["message.created"],
-      match: { channel_id: CHANNEL_ID, mention_only: true },
-      execution: "turn" as const,
-      active_run: "queue" as const,
-      output: "reply_to_source" as const,
-      skip_if_unchanged: false,
-    };
+  // A linked channel answers only through its Automations, whether the
+  // connection has no owning agent, an admin-set one, or the hosted preview's
+  // placeholder. A connection with an owning agent still records the message.
+  const mentionOnlyTrigger = {
+    kind: "event" as const,
+    connector_key: "slack",
+    connection_id: 42,
+    event_types: ["message.created"],
+    match: { channel_id: CHANNEL_ID, mention_only: true },
+    execution: "turn" as const,
+    active_run: "queue" as const,
+    output: "reply_to_source" as const,
+    skip_if_unchanged: false,
+  };
+  test.each([
+    { name: "workspace install", previewMode: false, agentId: undefined, recorded: 0 },
+    { name: "owned workspace install", previewMode: false, agentId: TEMPLATE_AGENT_ID, recorded: 1 },
+    { name: "hosted preview", previewMode: true, agentId: TEMPLATE_AGENT_ID, recorded: 1 },
+  ])("a rejected Automation filter cannot be bypassed by channel fallback ($name)", async ({ previewMode, agentId, recorded }) => {
+    capturedMessages.length = 0;
     activationMarks.length = 0;
-    const { bridge, enqueueMessage, resolveForConnection } = makePreviewHarness({
-      agentId: undefined,
-      previewMode: false,
+    const {
+      bridge,
+      enqueueMessage,
+      resolveForConnection,
+      materializeConnectionFallbackLink,
+    } = makePreviewHarness({
+      agentId,
+      previewMode,
       metadata: { teamId: "T_WS", botUserId: "U_BOT" },
       fallbackSubscription: {
         agentId: "filtered-agent",
@@ -984,7 +1019,7 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
           agentKind: null,
           model: null,
           instructions: "Only respond to mentions.",
-          trigger,
+          trigger: mentionOnlyTrigger,
         },
       ],
     });
@@ -999,8 +1034,40 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(enqueueMessage).not.toHaveBeenCalled();
     expect(activationMarks).toEqual([]);
     expect(resolveForConnection).not.toHaveBeenCalled();
+    expect(materializeConnectionFallbackLink).not.toHaveBeenCalled();
     // Linked + filter-rejected must not spam the "link your agent" notice.
     expect(thread.post).not.toHaveBeenCalled();
+    expect(capturedMessages).toHaveLength(recorded);
+  });
+
+  test("an answer click in a mention-only linked channel still reaches the owning agent", async () => {
+    const { bridge, enqueueMessage } = makePreviewHarness({
+      previewMode: false,
+      metadata: { teamId: "T_WS", botUserId: "U_BOT" },
+      fallbackSubscription: { agentId: TEMPLATE_AGENT_ID, organizationId: "org-connection" },
+      automations: [
+        {
+          automationId: 74,
+          organizationId: "org-connection",
+          agentId: TEMPLATE_AGENT_ID,
+          deviceWorkerId: null,
+          agentKind: null,
+          model: null,
+          instructions: "Only respond to mentions.",
+          trigger: mentionOnlyTrigger,
+        },
+      ],
+    });
+
+    await bridge.ingestClick({
+      userId: "U_USER",
+      channelId: CHANNEL_ID,
+      conversationId: THREAD_ID,
+      value: "Approve",
+      thread: makeThread(undefined),
+    });
+
+    expect(enqueueMessage).toHaveBeenCalledTimes(1);
   });
 
   test("recordChannelMessages skips agent turns for Automation-routed subscribed messages", async () => {
@@ -1266,50 +1333,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
     expect(materializeConnectionFallbackLink).toHaveBeenCalledTimes(1);
     const call = materializeConnectionFallbackLink.mock.calls[0] as unknown[];
     expect(call[5]).toBeUndefined(); // enterprise E… id is never used as a team
-  });
-
-  test("connection fallback materialization is create-only so it cannot clobber an existing link", async () => {
-    // A mention-only Automation exists but rejected this non-mention message, so
-    // routing falls to the connection owner. The bridge still calls the
-    // materializer — but it's create-only (see the DB-level preserve test in
-    // agent-thread-list-scope-all), so an existing explicit link is never
-    // relinked to the connection owner even under a check-then-write race.
-    const automation: MatchingAutomationActivation = {
-      automationId: 71,
-      organizationId: "org-connection",
-      agentId: "mention-only-agent",
-      deviceWorkerId: null,
-      agentKind: null,
-      model: null,
-      instructions: "Respond helpfully to the incoming message.",
-      minCooldownSeconds: 0,
-      trigger: {
-        kind: "event",
-        connector_key: "slack",
-        connection_id: 42,
-        event_types: ["message.created"],
-        match: { channel_id: CHANNEL_ID, mention_only: true },
-        execution: "turn",
-        active_run: "steer",
-        output: "reply_to_source",
-        skip_if_unchanged: false,
-      },
-    };
-    const { bridge, enqueueMessage, materializeConnectionFallbackLink } =
-      makePreviewHarness({
-        previewMode: false,
-        automations: [automation],
-      });
-    const thread = makeThread(undefined);
-
-    await bridge.handleMessage(
-      thread,
-      makeMessage({ raw: { team_id: "TREAL" } }),
-      "subscribed",
-    );
-
-    expect(enqueueMessage).toHaveBeenCalledTimes(1);
-    expect(materializeConnectionFallbackLink).toHaveBeenCalledTimes(1);
   });
 
   test("hosted-preview fallback does NOT materialize its placeholder agent", async () => {
