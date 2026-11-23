@@ -72,6 +72,7 @@ describe("manage_automations update — version-owned fields are not silently dr
 	let agentId: string;
 	let automationId: string;
 	const previewConnectionId = "preview-update-version";
+	const otherPreviewConnectionId = "preview-update-version-other";
 	let previewUpdate: { automationId: string; triggers: AutomationTrigger[] };
 	let previewVersion: { automationId: string; triggers: AutomationTrigger[] };
 
@@ -106,6 +107,12 @@ describe("manage_automations update — version-owned fields are not silently dr
 			agentId: previewHostAgent.agentId,
 			platform: "slack",
 			settings: { previewMode: true },
+		});
+		await insertChatConnectionRow({
+			id: otherPreviewConnectionId,
+			organizationId: previewHostOrg.id,
+			agentId: previewHostAgent.agentId,
+			platform: "slack",
 		});
 		previewUpdate = await createCrossOrgPreviewAutomation("update");
 		previewVersion = await createCrossOrgPreviewAutomation("version");
@@ -157,6 +164,22 @@ describe("manage_automations update — version-owned fields are not silently dr
 			LIMIT 1
 		`;
 		return { automationId: String(automation.id), triggers: automation.triggers };
+	}
+
+	function withMatch(
+		triggers: AutomationTrigger[],
+		match: Record<string, unknown>,
+	): AutomationTrigger[] {
+		return triggers.map((trigger) =>
+			trigger.kind === "event"
+				? ({ ...trigger, match: { ...trigger.match, ...match } } as AutomationTrigger)
+				: trigger,
+		);
+	}
+
+	function eventConnectionId(triggers: AutomationTrigger[]): number | undefined {
+		const trigger = triggers.find((candidate) => candidate.kind === "event");
+		return trigger && "connection_id" in trigger ? trigger.connection_id ?? undefined : undefined;
 	}
 
 	it("returns saved execution settings in Automation detail and preserves an explicit clear", async () => {
@@ -307,6 +330,76 @@ describe("manage_automations update — version-owned fields are not silently dr
 					action: "update",
 					automation_id: previewUpdate.automationId,
 					triggers: changedTriggers,
+				},
+				TEST_ENV,
+				ownerCtx,
+			),
+		).rejects.toThrow("was not found in this organization");
+	});
+
+	it("lets a chat-link Automation keep its linked foreign connection while editing trigger options", async () => {
+		const mentionOnly = withMatch(previewUpdate.triggers, { mention_only: true });
+		const result = (await executeTool(
+			"manage_automations",
+			{
+				action: "update",
+				automation_id: previewUpdate.automationId,
+				triggers: mentionOnly,
+			},
+			TEST_ENV,
+			ownerCtx,
+		)) as { updated_fields?: string[] };
+		expect(result.updated_fields).toContain("triggers");
+		const [stored] = await getTestDb()<{ triggers: AutomationTrigger[] }>`
+			SELECT triggers FROM automations WHERE id = ${previewUpdate.automationId}
+		`;
+		expect(stored.triggers).toMatchObject([
+			{ connection_id: eventConnectionId(previewUpdate.triggers), match: { mention_only: true } },
+		]);
+
+		const versioned = await createCrossOrgPreviewAutomation("version-mention");
+		const version = (await executeTool(
+			"manage_automations",
+			{
+				action: "create_version",
+				automation_id: versioned.automationId,
+				triggers: withMatch(versioned.triggers, { mention_only: true }),
+			},
+			TEST_ENV,
+			ownerCtx,
+		)) as { version?: number };
+		expect(version.version).toBe(2);
+	});
+
+	it("rejects swapping a chat-link Automation onto a different foreign connection", async () => {
+		const [other] = await getTestDb()<{ id: number }>`
+			SELECT id FROM connections WHERE slug = ${`agentconn-${otherPreviewConnectionId}`}
+		`;
+		const swapped = previewUpdate.triggers.map((trigger) =>
+			trigger.kind === "event" ? { ...trigger, connection_id: Number(other.id) } : trigger,
+		);
+		await expect(
+			executeTool(
+				"manage_automations",
+				{ action: "update", automation_id: previewUpdate.automationId, triggers: swapped },
+				TEST_ENV,
+				ownerCtx,
+			),
+		).rejects.toThrow("was not found in this organization");
+	});
+
+	it("rejects a foreign connection on an Automation that is not a chat link", async () => {
+		const untagged = await createCrossOrgPreviewAutomation("untagged");
+		await getTestDb()`
+			UPDATE automations SET tags = '{}'::text[] WHERE id = ${untagged.automationId}
+		`;
+		await expect(
+			executeTool(
+				"manage_automations",
+				{
+					action: "update",
+					automation_id: untagged.automationId,
+					triggers: withMatch(untagged.triggers, { mention_only: true }),
 				},
 				TEST_ENV,
 				ownerCtx,

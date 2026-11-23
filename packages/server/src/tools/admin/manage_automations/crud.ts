@@ -67,6 +67,7 @@ import {
   assertAutomationInstructions,
   assertAutomationOutputsUseWindowExecution,
   assertAutomationTriggerConnections,
+  chatLinkStoredTriggers,
   automationTriggersEqual,
   resolveAutomationTriggerWrite,
 } from '../../../automations/triggers';
@@ -605,7 +606,12 @@ export async function handleUpdate(
     args.triggers !== undefined &&
     !automationTriggersEqual(currentRow.triggers ?? [], triggerWrite.triggers)
   ) {
-    await assertAutomationTriggerConnections(sql, currentRow.organization_id, triggerWrite.triggers);
+    await assertAutomationTriggerConnections(
+      sql,
+      currentRow.organization_id,
+      triggerWrite.triggers,
+      chatLinkStoredTriggers(currentRow.tags as string | string[] | null, currentRow.triggers)
+    );
     // Trigger shape alone can force the instruction rule (event-turn → schedule
     // with an empty current prompt must fail). Callers that need to change both
     // triggers and instructions atomically must use create_version with both
