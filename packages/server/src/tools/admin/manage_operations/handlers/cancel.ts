@@ -1,5 +1,6 @@
 import type { Static } from '@sinclair/typebox';
 import { resolveActingPrincipal } from '../../../../authz/entity-policy';
+import { leasedAutomationOfHeldRun } from '../../../../automations/automation-source';
 import { getDb } from '../../../../db/client';
 import { withFailureCode } from '../../../../utils/errors';
 import type { ToolContext } from '../../../registry';
@@ -8,7 +9,9 @@ import { callerIsAdmin } from '../../helpers/db-helpers';
 import type { CancelAction, ManageOperationsResult } from '../schemas';
 
 /** The run and its card settle together; the existing worker lease fences stop
- * a cancelled run being claimed or overwritten by a late completion. */
+ * a cancelled run being claimed or overwritten by a late completion. An external
+ * processor withdraws an Automation's run while it holds that Automation's
+ * window lease. */
 export async function handleCancel(
   args: Static<typeof CancelAction>,
   ctx: ToolContext,
@@ -18,6 +21,7 @@ export async function handleCancel(
     organizationId: ctx.organizationId,
     userId: ctx.userId,
     agentId: ctx.agentId,
+    explicitAutomationId: await leasedAutomationOfHeldRun(sql, ctx, args.run_id),
     sessionAutomationId: ctx.actingAutomationId,
     appId: ctx.appPrincipalId ?? null,
   });

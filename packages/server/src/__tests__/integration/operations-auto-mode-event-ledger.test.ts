@@ -18,6 +18,7 @@
 
 import { qualifiedOperationKey } from "../../tools/admin/manage_operations/handlers/shared";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
+import { encodeExternalAutomationClaimOwner } from "../../automations/external-claim-owner";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -418,6 +419,60 @@ describe("operation ledger under Auto policy", () => {
 		expect(await confirm(pendingAtDelete.run_id)).toMatchObject({ reason: "not_pending_check" });
 		expect(await operationLedger(orgId, pendingAtDelete.run_id)).toEqual([]);
 		expect((await sql`SELECT status FROM runs WHERE id = ${expired.run_id}`)[0].status).toBe("timeout");
+	});
+
+	it("an external runner settles its Automation's Check only while it holds the window lease", async () => {
+		const sql = getTestDb();
+		const runner = await createTestUser({ name: "External runner member" });
+		await addUserToOrganization(runner.id, orgId);
+		const runnerCtx: ToolContext = { ...ctx, userId: runner.id, memberRole: "member", appPrincipalId: "web:external-runner.test" };
+		const checkConn = await createTestConnection({ organization_id: orgId, connector_key: CONNECTOR, created_by: runner.id, visibility: "private" });
+		await sql`UPDATE connections SET auth_profile_id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId}) WHERE id = ${checkConn.id}`;
+		// An external Automation that runs an agent is held for a Check, which its
+		// processor must be able to settle.
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: runner.id, name: "External runner agent" });
+		const automationId = 7101;
+		await sql`INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, execution_config, created_by, name, slug)
+			VALUES (${automationId}, ${automationId}, ${orgId}, ${agent.agentId}, ${sql.json({ executor: { kind: "external" } })},
+				${runner.id}, 'External runner fixture', 'external-runner-fixture')`;
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: checkConn.id, effects: { execute: "auto" } });
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectionId: checkConn.id, kind: "guardrail",
+			principalKind: "automation", principalId: `automation:${automationId}`, note: "Only echo values from the window", effects: { execute: "check" },
+		});
+		const [window] = await sql<{ id: number }>`INSERT INTO runs (organization_id, run_type, automation_id, status)
+			VALUES (${orgId}, 'automation', ${automationId}, 'running') RETURNING id`;
+		const lease = (claimedBy: string, seconds: number) => sql`UPDATE runs
+			SET claimed_by = ${claimedBy}, expires_at = now() + make_interval(secs => ${seconds}) WHERE id = ${window.id}`;
+		const ownLease = encodeExternalAutomationClaimOwner(runnerCtx);
+		const otherLease = encodeExternalAutomationClaimOwner({ userId: "synthetic-other-runner" });
+		await lease(ownLease, 300);
+		const execute = async (value: string) => {
+			const held = await manageOperations({
+				action: "execute", connection_id: checkConn.id, operation_key: "echo", input: { value },
+				automation_source: { automation_id: automationId, run_id: Number(window.id) },
+			}, {} as Env, runnerCtx) as Record<string, unknown> & { run_id: number };
+			expect(held).toMatchObject({ status: "pending_check", policy: { principal: { kind: "automation", id: `automation:${automationId}` } } });
+			return held.run_id;
+		};
+		const confirm = (runId: number) => manageOperations({ action: "confirm", run_id: runId, statement: "The window asked for this value." }, {} as Env, runnerCtx) as Promise<Record<string, unknown>>;
+		const cancel = (runId: number) => manageOperations({ action: "cancel", run_id: runId }, {} as Env, runnerCtx) as Promise<Record<string, unknown>>;
+
+		// Someone else's lease or a lapsed one does not make the caller the Automation.
+		const confirmed = await execute("confirmed");
+		const withdrawn = await execute("withdrawn");
+		for (const [claimedBy, seconds] of [[otherLease, 300], [ownLease, -1]] as const) {
+			await lease(claimedBy, seconds);
+			expect(await confirm(confirmed), `${claimedBy} ${seconds}`).toHaveProperty("error");
+			expect(await cancel(withdrawn), `${claimedBy} ${seconds}`).toHaveProperty("error");
+		}
+
+		await lease(ownLease, 300);
+		expect(await confirm(confirmed)).toMatchObject({ run_id: confirmed, status: "completed" });
+		expect((await sql`SELECT run_metadata FROM runs WHERE id = ${confirmed}`)[0].run_metadata.policy_check)
+			.toMatchObject({ statement: "The window asked for this value." });
+		expect(await cancel(withdrawn)).toMatchObject({ cancelled: true });
+		expect((await sql`SELECT approval_status FROM runs WHERE id = ${withdrawn}`)[0].approval_status).toBe("withdrawn");
 	});
 
 	it("a background device Check is not claimable until the agent confirms it", async () => {

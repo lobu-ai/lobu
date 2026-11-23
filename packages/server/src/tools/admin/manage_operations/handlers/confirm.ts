@@ -1,5 +1,6 @@
 import type { Static } from "@sinclair/typebox";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
+import { leasedAutomationOfHeldRun } from "../../../../automations/automation-source";
 import {
 	allowlistRefusal,
 	POLICY_CHECK_METADATA_KEY,
@@ -28,9 +29,10 @@ const noReactionTracking = async (): Promise<void> => {};
 /**
  * Release a run a Check held. Only the principal that requested it may
  * confirm, with the input it was held with; the policy is re-read first, so a
- * rule tightened since the hold still wins. The release, its statement and the
- * run's ledger card commit together, then the run dispatches as an Auto run
- * would have.
+ * rule tightened since the hold still wins. An external processor confirms as
+ * the Automation it held the run for while it still holds that Automation's
+ * window lease. The release, its statement and the run's ledger card commit
+ * together, then the run dispatches as an Auto run would have.
  */
 export async function handleConfirm(
 	args: Static<typeof ConfirmAction>,
@@ -47,6 +49,7 @@ export async function handleConfirm(
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
+		explicitAutomationId: await leasedAutomationOfHeldRun(sql, ctx, args.run_id),
 		sessionAutomationId: ctx.actingAutomationId,
 		appId: ctx.appPrincipalId ?? null,
 	});
