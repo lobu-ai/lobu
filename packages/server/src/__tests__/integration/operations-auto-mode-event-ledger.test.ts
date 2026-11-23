@@ -197,6 +197,9 @@ describe("operation ledger under Auto policy", () => {
 		});
 		expect(Number(dispatched.connection_id)).toBe(connectionId);
 		expect(dispatched.metadata.operation_key).toBe("echo");
+		// The card names who the policy decided for, so its rule buttons can act for that caller.
+		const decided = { effect: "auto", principal: { kind: "user", id: null, label: null } };
+		expect(dispatched.metadata.policy).toMatchObject(decided);
 		expect(dispatched.superseded_by).not.toBeNull();
 
 		expect(terminal).toMatchObject({
@@ -204,6 +207,7 @@ describe("operation ledger under Auto policy", () => {
 			interaction_output: { value: "auto-ok" },
 			superseded_by: null,
 		});
+		expect(terminal.metadata.policy).toMatchObject(decided);
 		// Every version is titled by the operation's name, not its raw key: an
 		// agent reading the ledger sees titles without the structured fields.
 		expect(dispatched.title).toBe("Echo — dispatched");
@@ -376,7 +380,10 @@ describe("operation ledger under Auto policy", () => {
 		expect(run.run_metadata.policy_check).toMatchObject({ statement: "The user asked for this value." });
 		const ledger = await operationLedger(orgId, held.run_id);
 		expect(ledger.map((row) => row.interaction_status)).toEqual(["approved", "completed"]);
-		expect(ledger[0].metadata.policy).toMatchObject({ check: { statement: "The user asked for this value." } });
+		expect(ledger[0].metadata.policy).toMatchObject({
+			check: { statement: "The user asked for this value." },
+			principal: { kind: "agent", id: agent.agentId, label: "Check fixture agent" },
+		});
 		expect(await confirm(held.run_id)).toMatchObject({ reason: "not_pending_check" });
 
 		// Cancel withdraws a held check without leaving a card behind.
