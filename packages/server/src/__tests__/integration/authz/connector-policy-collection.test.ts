@@ -613,17 +613,104 @@ describe("connected app caller identity", () => {
     expect(await cancelled.json()).toMatchObject({ cancelled: true });
   });
 
-  it("accepts only guardrails for an app and rejects malformed app scopes", async () => {
-    const empty = await (await request("GET", appPath("web:example.com"))).json();
-    for (const rule of [{ effect: "approval" }, { effect: "auto", kind: "grant" }, { effect: "auto", kind: "guardrail" }]) {
-      const loosened = await request("PUT", appPath("web:example.com"), { revision: empty.revision, rules: [rule] });
-      expect(loosened.status, JSON.stringify(rule)).toBe(400);
+  it("allows an app or Automation one action on one connection only, and rejects malformed caller scopes", async () => {
+    const exact = { connection_id: connectionId, operation_key: "app-policy::needs_approval", effect: "auto" };
+    async function refusal(route: string, rule: Record<string, unknown>) {
+      const empty = await (await request("GET", route)).json();
+      const refused = await request("PUT", route, { revision: empty.revision, rules: [rule] });
+      expect(refused.status, `${route} ${JSON.stringify(rule)}`).toBe(400);
+      return ((await refused.json()) as { message: string }).message;
     }
-    const grant = await request("PUT", appPath("web:example.com"), { revision: empty.revision, rules: [{ effect: "deny" }] });
-    expect(await grant.json()).toMatchObject({ message: "A rule for an app must be a guardrail; use a workspace grant to allow." });
-    for (const query of ["?principal_kind=agent&principal_id=x", "?principal_id=web:example.com", "?principal_kind=app&principal_id=example.com", "?principal_kind=app&principal_id=%20web:example.com", "?principal_kind=app&principal_id=web:Example.com"]) {
+    const mustGuard = "A rule for an app must be a guardrail; use a workspace grant to allow.";
+    const oneAction = "An app or Automation can only be allowed one action on one connection.";
+    for (const [rule, message] of [
+      [{ effect: "approval" }, mustGuard],
+      [{ effect: "deny" }, mustGuard],
+      [{ ...exact, effect: "approval" }, mustGuard],
+      [{ effect: "auto" }, oneAction],
+      [{ connection_id: connectionId, effect: "auto" }, oneAction],
+      [{ operation_key: exact.operation_key, effect: "auto" }, oneAction],
+    ] as const) {
+      expect(await refusal(appPath("web:example.com"), rule)).toBe(message);
+    }
+    expect(await refusal(appPath("web:example.com"), { effect: "auto", kind: "guardrail" })).toMatch(/only log, check, require approval or block/);
+    // A rule for every app, or for a client that only names itself, never allows.
+    expect(await refusal(`${path()}?principal_kind=app`, exact)).toBe(mustGuard);
+    expect(await refusal(appPath("local:Synthetic CLI"), exact)).toBe("An app that only names itself (local:) can't be allowed; add a workspace rule instead.");
+    expect(withoutIds((await setRules(appPath("web:example.com"), [exact])).rules)).toEqual([exact]);
+
+    const sql = getTestDb();
+    const insertAutomation = async (organizationId: string) => Number((await sql`
+      WITH next_id AS (SELECT nextval('automations_id_seq')::integer AS id)
+      INSERT INTO automations (id, automation_group_id, organization_id, created_by, name, slug)
+      SELECT id, id, ${organizationId}, ${owner.id}, 'Synthetic code Automation', 'synthetic-code-automation' FROM next_id
+      RETURNING id`)[0].id);
+    const automationPath = (id: string) => `${path()}?principal_kind=automation&principal_id=${encodeURIComponent(id)}`;
+    const automationId = await insertAutomation(org.id);
+    expect(withoutIds((await setRules(automationPath(`automation:${automationId}`), [exact])).rules)).toEqual([exact]);
+    expect(await refusal(automationPath(`automation:${automationId}`), { effect: "auto" })).toBe(oneAction);
+    const foreignId = await insertAutomation((await createTestOrganization()).id);
+    for (const id of [foreignId, automationId + 1000]) {
+      expect(await refusal(automationPath(`automation:${id}`), exact)).toBe("Automation not found in this workspace.");
+      // Clearing a missing Automation's rules stays possible.
+      expect((await setRules(automationPath(`automation:${id}`), [])).rules).toEqual([]);
+    }
+    // Only callers with rules of their own are listed: apps first, then Automations.
+    const { callers } = await (await request("GET", `${path()}/callers`)).json() as { callers: Array<Record<string, unknown>> };
+    expect(callers.map(({ principal_kind, principal_id, label, rules }) => ({ principal_kind, principal_id, label, rules: withoutIds(rules as Array<Record<string, unknown>>) }))).toEqual([
+      { principal_kind: "app", principal_id: "web:example.com", label: "example.com", rules: [exact] },
+      { principal_kind: "automation", principal_id: `automation:${automationId}`, label: "Synthetic code Automation", rules: [exact] },
+    ]);
+    expect((await request("GET", `${path()}/callers?principal_kind=app`)).status).toBe(400);
+    const member = await createTestUser();
+    await addUserToOrganization(member.id, org.id, "member");
+    cookie = (await createTestSession(member.id)).cookieHeader;
+    expect((await request("GET", `${path()}/callers`)).status).toBe(403);
+    cookie = (await createTestSession(owner.id)).cookieHeader;
+
+    for (const query of [
+      "?principal_kind=agent&principal_id=x", "?principal_id=web:example.com", "?principal_kind=app&principal_id=example.com",
+      "?principal_kind=app&principal_id=%20web:example.com", "?principal_kind=app&principal_id=web:Example.com",
+      "?principal_kind=automation&principal_id=automation:abc", "?principal_kind=automation&principal_id=automation:01",
+      "?principal_kind=automation&principal_id=automation:0", "?principal_kind=automation&principal_id=7",
+    ]) {
       expect((await request("GET", `${path()}${query}`)).status, query).toBe(400);
     }
     expect(withoutIds((await snapshot()).rules)).toEqual([{ effect: "auto" }]);
+  });
+
+  it("an app's own Always allow lifts a workspace Ask for that app only", async () => {
+    const exact = { connection_id: connectionId, operation_key: "app-policy::needs_approval" };
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail" }]);
+    const named = await oauthToken(["https://app.example.com/callback"]);
+    const other = await oauthToken(["https://tools.example.org/cb"]);
+    const explain = async (requester: string) => {
+      const response = await request("GET", `/api/${org.slug}/write-permissions/explain?connection_id=${connectionId}&operation_key=needs_approval&${requester}`);
+      return { status: response.status, body: await response.json() as { effect?: string } };
+    };
+    expect((await explain("app_key=web%3Aexample.com")).body.effect).toBe("approval");
+    const held = await execute(named.token);
+    expect(held.body.status).toBe("pending_approval");
+
+    // The approval history names the caller the policy decided for.
+    const listed = await request("POST", `/api/${org.slug}/manage_operations`, { action: "list_runs", run_types: ["action"] });
+    const { runs } = await listed.json() as { runs: Array<{ id: number; policy_principal: unknown }> };
+    expect(runs.find(run => run.id === held.body.run_id)?.policy_principal).toEqual({ kind: "app", id: "web:example.com", label: "example.com" });
+
+    const saved = await setRules(appPath("web:example.com"), [{ ...exact, effect: "auto" }]);
+    expect((await explain("app_key=web%3Aexample.com")).body.effect).toBe("auto");
+    expect((await explain("app_key=web%3Aexample.org")).body.effect).toBe("approval");
+    const allowed = await execute(named.token);
+    expect(allowed.status, JSON.stringify(allowed.body)).toBe(200);
+    expect(allowed.body.status).not.toBe("pending_approval");
+    expect((await execute(other.token)).body.status).toBe("pending_approval");
+
+    // The Policies page finds the app's rules, editable with the collection's own revision.
+    const callers = await (await request("GET", `${path()}/callers`)).json();
+    expect(callers).toEqual({ callers: [{ principal_kind: "app", principal_id: "web:example.com", label: "example.com", revision: saved.revision, rules: saved.rules }] });
+
+    for (const requester of ["app_key=example.com", "app_key=web%3AExample.com", "app_key=web%3Aexample.com&automation_id=1"]) {
+      expect((await explain(requester)).status, requester).toBe(400);
+    }
   });
 });

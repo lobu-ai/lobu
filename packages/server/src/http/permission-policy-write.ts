@@ -10,6 +10,7 @@ import {
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../authz/entity-policy";
+import { appKeyProblem } from "../authz/policy-principal";
 import { isLegalActionEffect, isWriteEffect, type WriteAction } from "../authz/write-action-manifest";
 import { getDb } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
@@ -333,16 +334,20 @@ export async function explainPermissionPolicy(c: Context) {
 	let automationId: number | null;
 	let operationKey: string | null;
 	let agentId: string | null;
+	let appKey: string | null;
 	try {
 		connectionId = optionalId(c.req.query("connection_id"), "connection_id");
 		automationId = optionalId(c.req.query("automation_id"), "automation_id");
 		operationKey = optionalString(c.req.query("operation_key"), "operation_key");
 		agentId = optionalString(c.req.query("agent_id"), "agent_id");
+		appKey = optionalString(c.req.query("app_key"), "app_key");
 	} catch (error) {
 		return invalid(c, (error as Error).message);
 	}
-	if (!connectionId || !operationKey || (agentId && automationId))
-		return invalid(c, "Specify connection_id and operation_key, with at most one agent_id or automation_id.");
+	if (!connectionId || !operationKey || [agentId, automationId, appKey].filter((requester) => requester).length > 1)
+		return invalid(c, "Specify connection_id and operation_key, with at most one agent_id, automation_id or app_key.");
+	const appKeyError = appKey ? appKeyProblem(appKey, "app_key") : null;
+	if (appKeyError) return invalid(c, appKeyError);
 	const resolved = await getOperationForConnection(organizationId, connectionId, operationKey);
 	if (!resolved) return c.json({ error: "not_found", message: "Operation not found on this connection." }, 404);
 	const actor = await resolveActingPrincipal(getDb(), {
@@ -350,6 +355,7 @@ export async function explainPermissionPolicy(c: Context) {
 		userId: c.get("user")?.id,
 		agentId,
 		sessionAutomationId: automationId,
+		appId: appKey,
 	});
 	const result = await resolveConnectorPolicy({ organizationId, connectionId, operation: resolved.operation, actor });
 	return c.json({ effect: result.effect, rule_ids: result.ruleIds, reason: result.reason });

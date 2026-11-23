@@ -17,6 +17,8 @@ import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
 import { isPublicReader } from "../../../access-control";
+import type { ConnectorPolicyPrincipal } from "../../../../authz/connector-policy";
+import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { listOrgActivity } from "../activity-feed";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../../run-decider";
 export async function handleListActivity(
@@ -219,6 +221,7 @@ export async function handleListRuns(
            r.approval_status, r.status, r.error_message, r.items_collected, r.checkpoint,
            r.created_at, r.completed_at,
            r.initiator_kind, r.initiator_ref, r.created_by_user_id,
+           r.policy_principal_kind, r.policy_principal_id,
            f.feed_key, f.display_name AS feed_display_name,
            c.display_name AS connection_display_name,
            r.target_device_worker_id,
@@ -235,10 +238,33 @@ export async function handleListRuns(
   const [countResult, rows] = await Promise.all([countQuery, query]);
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  // The caller a policy decided for, named once per distinct caller on the page.
+  // An anonymous reader of a public workspace never learns who asked.
+  const publicReader = isPublicReader(ctx);
+  const principals = new Map<string, Promise<ConnectorPolicyPrincipal>>();
+  const policyPrincipalOf = (kind: string | null, id: string | null) => {
+    if (kind === null || publicReader) return null;
+    const key = JSON.stringify([kind, id]);
+    let principal = principals.get(key);
+    if (!principal) {
+      principal = resolvePolicyPrincipal(sql, ctx.organizationId, { kind, id });
+      principals.set(key, principal);
+    }
+    return principal;
+  };
+  const runs = await Promise.all(
+    pageRows.map(async ({ policy_principal_kind, policy_principal_id, ...row }) => ({
+      ...publicRunRecord(row),
+      policy_principal: await policyPrincipalOf(
+        policy_principal_kind as string | null,
+        policy_principal_id as string | null,
+      ),
+    })),
+  );
 
   return {
 		action: "list_runs",
-    runs: pageRows.map((row) => publicRunRecord(row)),
+    runs,
     total: Number(countResult[0]?.total ?? 0),
     limit,
     offset,
