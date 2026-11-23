@@ -9,6 +9,7 @@ import {
 import {
 	runtimeConnectionIdToSlug,
 	runtimeConnectionPredicate,
+	slugToRuntimeConnectionId,
 } from "../../lobu/stores/connections-projection.js";
 import { requireOrgId } from "../../lobu/stores/org-context.js";
 import { getNextNumericId } from "../../tools/admin/helpers/db-helpers.js";
@@ -22,6 +23,74 @@ import { authorizedChatLinkIds, canLinkChatOrganizations } from "./chat-link-aut
 const logger = createLogger("automation-channel-subscriptions");
 const CHAT_LINK_TAG = "system:chat-link";
 const CHAT_LINK_PROMPT = "Respond helpfully to the incoming message.";
+const CHANNEL_LABEL_TIMEOUT_MS = 2_000;
+
+/**
+ * Resolves a chat channel's human-readable label (`#general`) through the
+ * connection's own chat adapter, or null when the platform has none. The
+ * gateway registers its ChatInstanceManager here at boot. This module cannot
+ * import the manager: the platform registry the manager loads already imports
+ * this module (Google Chat installs), and a cycle through that registry can
+ * read it before it is initialized.
+ */
+type ChatChannelLabelResolver = (
+	runtimeConnectionId: string,
+	channelId: string,
+) => Promise<string | null>;
+
+let channelLabelResolver: ChatChannelLabelResolver | null = null;
+
+export function setChatChannelLabelResolver(
+	resolver: ChatChannelLabelResolver | null,
+): void {
+	channelLabelResolver = resolver;
+}
+
+/**
+ * Best-effort, bounded label for a new chat link's name. No resolver on this
+ * process, no adapter lookup, a DM, a provider error or a slow provider all
+ * yield null, so the link is named after the channel id and never fails
+ * because of its name.
+ */
+async function resolveChannelLabel(
+	sql: DbClient,
+	platform: string,
+	connectionId: number,
+	channelId: string,
+): Promise<string | null> {
+	const resolver = channelLabelResolver;
+	if (!resolver) return null;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const [row] = await sql<{ slug: string; credential_mode: string | null }>`
+			SELECT slug, credential_mode
+			FROM connections
+			WHERE id = ${connectionId}
+			  AND connector_key = ${platform}
+			  AND deleted_at IS NULL
+			LIMIT 1
+		`;
+		if (!row) return null;
+		// A connector-transport row (credential_mode NULL) runs under its numeric id.
+		const runtimeId =
+			row.credential_mode == null
+				? String(connectionId)
+				: slugToRuntimeConnectionId(row.slug);
+		const timeout = new Promise<null>((resolve) => {
+			timer = setTimeout(() => resolve(null), CHANNEL_LABEL_TIMEOUT_MS);
+		});
+		const label = await Promise.race([resolver(runtimeId, channelId), timeout]);
+		return label?.trim() || null;
+	} catch (err) {
+		logger.debug(
+			{ platform, connectionId, channelId, error: String(err) },
+			"chat-link channel label lookup failed (using id)",
+		);
+		return null;
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
 
 /**
  * Routing projection of an active Automation event trigger. It carries no state
@@ -444,6 +513,16 @@ export class AutomationSubscriptionService {
 			channelId,
 			teamId,
 		});
+		// Resolved before the write so no provider call runs under the link's
+		// advisory lock. Used only when this creates the link: a relink keeps
+		// whatever name the Automation has, which the user may have changed.
+		const label = await resolveChannelLabel(
+			sql,
+			platform,
+			options.connectionId,
+			channelId,
+		);
+		const name = `Messages in ${label ?? channelId}`;
 
 		const write = async (tx: DbClient): Promise<boolean> => {
 			// Serialize concurrent create/relink for the same org+connection+channel.
@@ -553,7 +632,7 @@ export class AutomationSubscriptionService {
 					status, created_by, created_at, updated_at, automation_group_id,
 					next_window_start
 				) VALUES (
-					${automationId}, ${`Messages in ${channelId}`}, ${`chat-${platform}-${automationId}`},
+					${automationId}, ${name}, ${`chat-${platform}-${automationId}`},
 					'Chat subscription', ${organizationId}, '{}'::bigint[],
 					NULL, NULL, ${tx.json([trigger])}, ${agentId}, '{}'::jsonb,
 					${model ? tx.json({ model }) : null}, '[]'::jsonb, 1, NULL,
@@ -567,7 +646,7 @@ export class AutomationSubscriptionService {
 					id, automation_id, version, name, description, prompt,
 					version_sources, change_notes, created_by, created_at
 				) VALUES (
-					${versionId}, ${automationId}, 1, ${`Messages in ${channelId}`},
+					${versionId}, ${automationId}, 1, ${name},
 					'Chat subscription', ${CHAT_LINK_PROMPT}, '[]'::jsonb,
 					'Created from chat link', ${createdBy}, current_timestamp
 				)
