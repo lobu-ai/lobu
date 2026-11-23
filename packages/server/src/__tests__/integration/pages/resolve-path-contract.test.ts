@@ -5,7 +5,9 @@
  * reusable MCP client/session helper introduced in this PR.
  */
 
+import { createHash, randomBytes } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   addUserToOrganization,
@@ -14,6 +16,7 @@ import {
   createTestConnectorDefinition,
   createTestOAuthClient,
   createTestOrganization,
+  createTestSession,
   createTestUser,
 } from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
@@ -494,6 +497,80 @@ describe('resolve_path workspace counts', () => {
     // Registered nowhere and holding no token here: not this workspace's.
     await createTestOAuthClient({ client_name: 'Stranger' });
     expect((await resolveCounts(fixture)).clients).toBe(before);
+  });
+
+  it('counts an app connected through bare /mcp OAuth', async () => {
+    // A ChatGPT or Claude connector authorizes the bare `/mcp` resource: the
+    // grant names the workspace in `granted_organization_ids` and leaves
+    // `organization_id` unset. Missing it kept Home on "Connect your agent"
+    // after the user had connected one.
+    const before = (await resolveCounts(fixture)).clients;
+    const origin = 'http://localhost';
+    const redirectUri = `${origin}/bare-counts-callback`;
+    const resource = `${origin}/mcp`;
+    const scope = 'mcp:read';
+    const registration = await post('/oauth/register', {
+      body: {
+        client_name: 'Bare Counts App',
+        redirect_uris: [redirectUri],
+        grant_types: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+      },
+    });
+    expect(registration.status).toBe(201);
+    const { client_id: clientId } = (await registration.json()) as { client_id: string };
+
+    const verifier = randomBytes(32).toString('base64url');
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    const session = await createTestSession(fixture.userId);
+    const consent = await post('/oauth/authorize/consent', {
+      body: {
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope,
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        resource,
+        organization_ids: [fixture.orgId],
+        workspace_access: 'selected',
+        authorization_intent: createAuthorizationIntent(
+          {
+            client_id: clientId,
+            redirect_uri: redirectUri,
+            response_type: 'code',
+            scope,
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+            resource,
+          },
+          'test-jwt-secret-for-testing-only'
+        ),
+        approved: true,
+      },
+      cookie: session.cookieHeader,
+      headers: { Origin: origin },
+    });
+    expect(consent.status).toBe(200);
+    const { redirect_url: redirectUrl } = (await consent.json()) as { redirect_url: string };
+    const tokenResponse = await post('/oauth/token', {
+      body: {
+        grant_type: 'authorization_code',
+        code: new URL(redirectUrl).searchParams.get('code'),
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        resource,
+      },
+    });
+    expect(tokenResponse.status).toBe(200);
+
+    const sql = getTestDb();
+    const [grant] = await sql`
+      SELECT organization_id FROM oauth_tokens
+      WHERE client_id = ${clientId} AND token_type = 'access'
+    `;
+    expect(grant?.organization_id).toBeNull();
+    expect((await resolveCounts(fixture)).clients).toBe(before + 1);
   });
 
   it('counts active automations', async () => {
