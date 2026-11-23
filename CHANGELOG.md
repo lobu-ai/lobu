@@ -26,6 +26,26 @@ upgrading. Find them with `list_feeds` (`status: "paused"`) and resume each one
 you want with `update_feed` (`status: "active"`). Re-entering credentials
 through a connect link needs at least one enabled feed on the connection.
 
+## [24.14.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.13.0...lobu-v24.14.0) (2026-11-23)
+
+
+### Features
+
+* **examples:** demonstrate context summary lifecycle ([#5021](https://github.com/lobu-ai/lobu/issues/5021)) ([3973a78](https://github.com/lobu-ai/lobu/commit/3973a78edcc567bd05ce477c974f3390e6123bfe))
+* **policies:** let one caller be always allowed or blocked at one action ([#5124](https://github.com/lobu-ai/lobu/issues/5124)) ([54d20bd](https://github.com/lobu-ai/lobu/commit/54d20bdec7cc515d3b65b4316cf1684b83411d1b))
+* **policies:** name who asked, explain allowlist holds, never hold a person ([#5120](https://github.com/lobu-ai/lobu/issues/5120)) ([48b11bb](https://github.com/lobu-ai/lobu/commit/48b11bba9c30fa3ed0084dcec27e486949ec5d65))
+
+
+### Bug Fixes
+
+* **automations:** link large windows without exceeding SQL parameter limits ([#5115](https://github.com/lobu-ai/lobu/issues/5115)) ([7f1d068](https://github.com/lobu-ai/lobu/commit/7f1d068fff981b42858eac79f82782d7f38708f8))
+* **memory:** return matching passages in recall previews ([#5022](https://github.com/lobu-ai/lobu/issues/5022)) ([2d553d3](https://github.com/lobu-ai/lobu/commit/2d553d316cfc5a502abc09751853be94a3d0a3ce))
+* **postgres:** accept a top-level LIMIT in live connection queries ([#5126](https://github.com/lobu-ai/lobu/issues/5126)) ([792fc25](https://github.com/lobu-ai/lobu/commit/792fc25f2a6ff34a96377e21f9346c00aaa0aa44))
+* **sandbox:** name run_sdk when a read-only script calls a write method ([#5127](https://github.com/lobu-ai/lobu/issues/5127)) ([aff7fde](https://github.com/lobu-ai/lobu/commit/aff7fde5f35ed82c138aa963c0ed87bdf7a0cd17))
+* **skills:** preserve authorized instructions across apply and execution ([#4979](https://github.com/lobu-ai/lobu/issues/4979)) ([8166250](https://github.com/lobu-ai/lobu/commit/8166250b8190fa9e564cbc1328019099268561aa))
+* **smoke:** verify durable memory from the installed CLI ([#5023](https://github.com/lobu-ai/lobu/issues/5023)) ([b31992d](https://github.com/lobu-ai/lobu/commit/b31992d8e58a9d7f5ed1c9a67530b9acddaa210d))
+* **test:** build default test agent ids from hex ([#5121](https://github.com/lobu-ai/lobu/issues/5121)) ([4e66cba](https://github.com/lobu-ai/lobu/commit/4e66cbad15069a0bddefb273a8e88f766067b467))
+
 ## [24.13.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.12.0...lobu-v24.13.0) (2026-11-22)
 
 
