@@ -129,6 +129,8 @@ export async function runAutomationAutoPauseNotificationSweep(
 				resourceType: "automation",
 				resourceId: String(row.id),
 				resourceUrl: buildAutomationUrl(row.organization_slug, row.id),
+				// An admin warning, not news for every channel bound to the org.
+				deliveryScope: "targeted",
 				idempotencyKey: automationAutoPauseNotificationKey(
 					row.id,
 					row.schedule_auto_paused_at,

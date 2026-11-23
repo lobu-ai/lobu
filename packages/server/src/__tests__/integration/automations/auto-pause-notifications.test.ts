@@ -4,8 +4,31 @@ import {
 	runAutomationAutoPauseNotificationSweep,
 } from "../../../automations/auto-pause-notifications";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
+import { createTestAutomationSubscription } from "../../setup/automation-subscriptions";
+import {
+	createTestAgent,
+	createTestEntity,
+	insertChatConnectionRow,
+} from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
+
+// A channel bound to the org's agent: a system notice must never reach it.
+async function bindSlackChannel(organizationId: string, agentId: string) {
+	await insertChatConnectionRow({
+		id: `conn-${agentId}`,
+		organizationId,
+		agentId,
+		platform: "slack",
+	});
+	await createTestAutomationSubscription({
+		organizationId,
+		agentId,
+		connectionSlug: `agentconn-conn-${agentId}`,
+		platform: "slack",
+		channelId: "slack:C_BOUND",
+		teamId: "T_TEST",
+	});
+}
 
 async function createScheduledAutomation(name: string) {
 	const workspace = await TestWorkspace.create({ name: `${name} workspace` });
@@ -20,6 +43,7 @@ async function createScheduledAutomation(name: string) {
 		agentId: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-agent`,
 		name: `${name} agent`,
 	});
+	await bindSlackChannel(workspace.org.id, agent.agentId);
 	const created = (await workspace.owner.automations.create({
 		entity_id: entity.id,
 		slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-automation`,
@@ -112,6 +136,10 @@ describe("Automation schedule auto-pause notifications", () => {
 			resource_type: "automation",
 			resource_id: String(automationId),
 		});
+		expect(
+			(firstEvents[0]?.metadata as { delivery_request: { targets: unknown[] } })
+				.delivery_request.targets,
+		).toEqual([]);
 
 		const secondPause = new Date("2026-08-27T13:00:00.000Z");
 		await sql`

@@ -5,11 +5,34 @@ import {
 } from "../../../automations/schedule-overdue-notifications";
 import { listOrgActivity } from "../../../tools/admin/manage_operations/activity-feed";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
-import { createTestAgent, createTestEntity } from "../../setup/test-fixtures";
+import { createTestAutomationSubscription } from "../../setup/automation-subscriptions";
+import {
+	createTestAgent,
+	createTestEntity,
+	insertChatConnectionRow,
+} from "../../setup/test-fixtures";
 import { TestWorkspace } from "../../setup/test-mcp-client";
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
+
+// A channel bound to the org's agent: a system notice must never reach it.
+async function bindSlackChannel(organizationId: string, agentId: string) {
+	await insertChatConnectionRow({
+		id: `conn-${agentId}`,
+		organizationId,
+		agentId,
+		platform: "slack",
+	});
+	await createTestAutomationSubscription({
+		organizationId,
+		agentId,
+		connectionSlug: `agentconn-conn-${agentId}`,
+		platform: "slack",
+		channelId: "slack:C_BOUND",
+		teamId: "T_TEST",
+	});
+}
 
 async function createScheduledAutomation(name: string, cron: string) {
 	const workspace = await TestWorkspace.create({ name: `${name} workspace` });
@@ -24,6 +47,7 @@ async function createScheduledAutomation(name: string, cron: string) {
 		agentId: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-agent`,
 		name: `${name} agent`,
 	});
+	await bindSlackChannel(workspace.org.id, agent.agentId);
 	const created = (await workspace.owner.automations.create({
 		entity_id: entity.id,
 		slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-automation`,
@@ -96,6 +120,11 @@ describe("Automation schedule overdue notifications", () => {
 		expect(sent[0].title).toBe('Automation "Unclaimed digest" has not run');
 		expect(sent[0].payload_text).toContain("external client");
 		expect(sent[0].target_user_ids).toContain(workspace.users.owner.id);
+		const [request] = await getTestDb()`
+			SELECT metadata->'delivery_request' AS delivery_request
+			FROM events WHERE id = ${sent[0].id}
+		`;
+		expect(request.delivery_request.targets).toEqual([]);
 
 		// Home files the notice under the Automation it is about.
 		const feed = await listOrgActivity({

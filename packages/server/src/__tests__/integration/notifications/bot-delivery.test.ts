@@ -16,6 +16,11 @@ import {
 	resolveNotificationDeliveryPlan,
 } from "../../../notifications/service";
 import { getNextNumericId } from "../../../tools/admin/helpers/db-helpers";
+import {
+	notifyBrowserAuthExpired,
+	notifyConnectionStoppedCollecting,
+	notifyInvitationReceived,
+} from "../../../notifications/triggers";
 import { notify } from "../../../tools/admin/notify";
 import type { ToolContext } from "../../../tools/registry";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
@@ -107,6 +112,38 @@ describe("resolveBotDeliveryTargets", () => {
 		expect(event.metadata.delivery_request.ownerDm).toBeNull();
 		const targets = await sql`SELECT user_id FROM notification_targets WHERE event_id = ${result.event_id}`;
 		expect(targets).toEqual([{ user_id: user.id }]);
+	});
+
+	// System notices address an org's admins or one invitee. They reach those
+	// people's inboxes, never every channel bound to the org's agents.
+	it.each([
+		["connection stopped collecting", (orgId: string) => notifyConnectionStoppedCollecting({
+			orgId, connectionId: 1, connectorKey: "linkedin", displayName: null,
+			summary: "No new posts for 2 days.", lastError: null,
+		})],
+		["browser sign-in expired", (orgId: string) => notifyBrowserAuthExpired({
+			orgId, connectionId: 1, connectorKey: "linkedin",
+		})],
+		["member invitation", (orgId: string, userId: string) => notifyInvitationReceived({
+			orgId, userId, orgName: "Acme", invitationId: "inv-1",
+		})],
+	] as const)("does not broadcast a %s notice", async (_name, send) => {
+		const org = await createTestOrganization();
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		const agent = await createTestAgent({ organizationId: org.id, agentId: "notifier" });
+		await seedSlackConnection({ organizationId: org.id, agentId: agent.agentId, connectionId: "conn-notifier" });
+		await seedBinding({ organizationId: org.id, agentId: agent.agentId, connectionId: "conn-notifier", channelId: "slack:C_UNRELATED" });
+
+		await send(org.id, user.id);
+
+		const events = await getTestDb()`
+			SELECT DISTINCT e.id, e.metadata FROM events e
+			JOIN notification_targets t ON t.event_id = e.id
+			WHERE e.organization_id = ${org.id}
+		`;
+		expect(events).toHaveLength(1);
+		expect(events[0].metadata.delivery_request.targets).toEqual([]);
 	});
 
 	it("resolves an active connection to its bound channel", async () => {

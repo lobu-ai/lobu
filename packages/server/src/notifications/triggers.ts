@@ -15,10 +15,13 @@ import type { ActionOrigin } from "./action-card-state";
 import { createNotificationForUsers, getOrgSlug } from "./service";
 import { resolveRunDeciderUserId } from "../tools/admin/run-decider";
 
-/** Notification content minus the org id (the dispatch helpers stamp it). */
+/**
+ * Notification content minus the org id and delivery scope (the dispatch
+ * helpers stamp both).
+ */
 type OrgNotification = Omit<
 	Parameters<typeof createNotificationForUsers>[1],
-	"organizationId"
+	"organizationId" | "deliveryScope"
 >;
 
 type FieldChangeApprovalDetails = {
@@ -407,6 +410,10 @@ async function getOrgAdminUserIds(organizationId: string, sql: DbClient = getDb(
  * poke the org's SSE keys so inboxes refresh. Every trigger below ends here;
  * what varies is recipient resolution — admins (with the org slug fetched for
  * URL building) vs an explicit user — kept explicit per trigger.
+ *
+ * Every trigger addresses specific people, so delivery is always targeted: it
+ * reaches their inbox, an owner DM, or an explicit chat origin, never every
+ * channel bound to the org's agents. See CreateNotificationParams.deliveryScope.
  */
 async function sendNotification(
 	orgId: string,
@@ -417,6 +424,7 @@ async function sendNotification(
 	await createNotificationForUsers(userIds, {
 		organizationId: orgId,
 		...notification,
+		deliveryScope: "targeted",
 	}, transaction);
 	if (!transaction) emit(orgId, { keys: ["notifications", "notifications-unread-count"] });
 }
@@ -554,10 +562,6 @@ export async function notifyActionApprovalNeeded(params: {
 			connectionId: params.connectionId,
 			channelId: params.channelId,
 			teamId: params.teamId,
-			// Never org-wide. An approval with no resolved chat target reaches its
-			// admins through the inbox + approval URL; broadcasting it into every
-			// bound channel is noise, not reach. See CreateNotificationParams.
-			deliveryScope: "targeted",
 			ownerUserId: resolveApprovalDmTarget(params),
 			mcpActivity: params.mcpActivity,
 			actionOrigin: params.actionOrigin,
@@ -599,7 +603,6 @@ export async function notifyConnectionPermissionRequest(params: {
 			? "Its account authorization expired or was revoked. Reconnect it to restore access."
 			: "Connect your account to finish setting up this connection.",
 		ownerUserId: connection.created_by,
-		deliveryScope: "targeted",
 		semanticType: CONNECTION_AUTHORIZATION_KIND,
 		payloadData: {
 			connector: params.connectorKey,
