@@ -12,6 +12,7 @@ import { serializeSigned } from 'hono/utils/cookie';
 import { hashClientSecret } from '../../auth/oauth/clients';
 import { NON_PUBLIC_OAUTH_SCOPES } from '../../auth/oauth/scopes';
 import { slugify, type MessagePayload } from '@lobu/core';
+import { randomBytes } from 'node:crypto';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import { pgBigintArray, pgTextArray } from '../../db/client';
 import { ensureUniqueConnectionSlug } from '../../utils/connections';
@@ -174,7 +175,7 @@ export async function createTestAgent(options: {
 }): Promise<TestAgent> {
   const sql = getTestDb();
   const agentId =
-    options.agentId ?? `agent-${generateSecureToken(8).toLowerCase()}`;
+    options.agentId ?? `agent-${randomBytes(8).toString('hex')}`;
   const name = options.name ?? `Test Agent ${agentId.slice(-4)}`;
   const ownerUserId = options.ownerUserId ?? `user_${generateSecureToken(8)}`;
 
