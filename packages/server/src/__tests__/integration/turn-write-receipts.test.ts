@@ -85,14 +85,49 @@ function message(messageId: string): MessagePayload {
 }
 
 /** A stored agent turn for `messageId` (one per call: a re-run) and its worker credential. */
-async function turn(messageId: string): Promise<{ token: string; runId: number }> {
-  const payload = message(messageId);
+async function turn(messageId: string, payload: MessagePayload = message(messageId)): Promise<{ token: string; runId: number }> {
   const runId = await insertAgentTurnRun(payload);
   const token = await mintTurnToken(payload, runId);
   // The gateway admits a turn's side-effecting call only from the attempt
   // that holds the run, named by the credential the run stores.
   await getTestDb()`UPDATE runs SET action_input = action_input || ${getTestDb().json({ credential: token })}::jsonb WHERE id = ${runId}`;
   return { token, runId };
+}
+
+/** A turn of the agent's managed Automation, whose sends act for that Automation. */
+async function automationTurn(messageId: string): Promise<{ token: string; runId: number }> {
+  const sql = getTestDb();
+  const [automation] = await sql<{ id: number }>`
+    SELECT id FROM automations WHERE organization_id = ${org.id} AND managed_agent_id = ${AGENT} ORDER BY id LIMIT 1
+  `;
+  // An Automation executes one run at a time: finish the previous turn's.
+  await sql`UPDATE runs SET status = 'completed' WHERE automation_id = ${automation!.id} AND status = 'running'`;
+  const [automationRun] = await sql<{ id: number }>`
+    INSERT INTO runs (organization_id, run_type, automation_id, status, approved_input, created_at)
+    VALUES (${org.id}, 'automation', ${automation!.id}, 'running', ${sql.json({ trigger_execution: 'turn' })}, NOW())
+    RETURNING id
+  `;
+  return turn(messageId, {
+    ...message(messageId),
+    conversationId: buildAutomationRunConversationId(AGENT, Number(automation!.id), Number(automationRun!.id)),
+  } as MessagePayload);
+}
+
+/** One tool call on the embedded MCP lane, made with a turn's worker credential. */
+async function mcpTool(worker: string, name: string, args: Record<string, unknown>) {
+  const token = mintGatewayMcpToken(worker)!;
+  const headers = { 'X-Lobu-Memory-Direct-Auth': '1' };
+  const init = await post(`/mcp/${org.slug}`, {
+    body: { jsonrpc: '2.0', method: 'initialize', id: 0, params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'turn', version: '1' } } },
+    token, headers,
+  });
+  const session = init.headers.get('mcp-session-id') as string;
+  const response = await post(`/mcp/${org.slug}`, {
+    body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+    token, headers: { ...headers, 'mcp-session-id': session, 'X-MCP-Format': 'json' },
+  });
+  const body = (await response.json()) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } };
+  return { isError: body.result?.isError === true, text: body.result?.content?.[0]?.text ?? '{}', body };
 }
 
 function call(path: string, token: string, body: unknown, headers: Record<string, string> = {}) {
@@ -282,21 +317,9 @@ describe('turn write receipts on the worker delivery routes', () => {
 describe('turn write receipts on entity create', () => {
   async function create(messageId: string, name: string, expectError = false, entityType = 'company') {
     const { token: worker } = await turn(messageId);
-    const token = mintGatewayMcpToken(worker)!;
-    const headers = { 'X-Lobu-Memory-Direct-Auth': '1' };
-    const init = await post(`/mcp/${org.slug}`, {
-      body: { jsonrpc: '2.0', method: 'initialize', id: 0, params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'turn', version: '1' } } },
-      token, headers,
-    });
-    const session = init.headers.get('mcp-session-id') as string;
-    const response = await post(`/mcp/${org.slug}`, {
-      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'manage_entity', arguments: { action: 'create', entity_type: entityType, name } } },
-      token, headers: { ...headers, 'mcp-session-id': session, 'X-MCP-Format': 'json' },
-    });
-    const body = (await response.json()) as { result?: { isError?: boolean; content?: Array<{ text?: string }> } };
-    expect(body.result?.isError === true, JSON.stringify(body)).toBe(expectError);
-    const text = body.result?.content?.[0]?.text ?? '{}';
-    return expectError ? text : JSON.parse(text);
+    const result = await mcpTool(worker, 'manage_entity', { action: 'create', entity_type: entityType, name });
+    expect(result.isError, JSON.stringify(result.body)).toBe(expectError);
+    return expectError ? result.text : JSON.parse(result.text);
   }
   async function companies(name: string) {
     return getTestDb()`SELECT id FROM entities WHERE organization_id = ${org.id} AND name = ${name} AND deleted_at IS NULL`;
@@ -407,7 +430,7 @@ describe('turn write receipts over the real media services', () => {
 
 describe('send_message: a reply in the asking conversation vs a post elsewhere', () => {
   const sql = () => getTestDb();
-  async function rule(effect: 'auto' | 'approval' | 'deny', kind: 'grant' | 'guardrail' = 'grant') {
+  async function rule(effect: 'auto' | 'check' | 'approval' | 'deny', kind: 'grant' | 'guardrail' = 'grant') {
     const [policy] = await sql()<{ id: number }>`
       INSERT INTO write_approval_policies (organization_id, resource_class, principal_kind, principal_id, operation_key, connector_key, kind)
       VALUES (${org.id}, 'connector_action', NULL, NULL, ${qualifiedOperationKey('slack', 'send_message')}, 'slack', ${kind}) RETURNING id
@@ -462,6 +485,41 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     expect(repeat.status, await repeat.clone().text()).toBe(200);
     expect(await repeat.json()).toMatchObject({ run_id: heldBody.run_id, deliveredInBand: false });
     expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it("a post elsewhere that a check holds waits for the agent's own confirmation, then posts once", async () => {
+    await rule('check', 'guardrail');
+    const asked = await turn('p3-check-1');
+    const held = await call('/internal/conversations/send', asked.token, { target: channelTarget, text: 'checked post' });
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody).toMatchObject({ code: 'PENDING_CHECK', run_id: expect.any(Number), expires_at: expect.any(String) });
+    expect(posted).not.toHaveBeenCalled();
+    expect((await sendRuns()).find((run) => run.id === heldBody.run_id)).toMatchObject({ status: 'pending', approval_status: 'check' });
+
+    // The agent confirms from its own MCP session, the way its turn would.
+    const confirmed = await mcpTool(asked.token, 'run_sdk', {
+      script: `export default async (_ctx, client) => client.operations.confirm({ run_id: ${heldBody.run_id}, statement: 'The user asked me to post this to the channel.' });`,
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect(posted).toHaveBeenCalledWith(CONNECTION, expect.objectContaining({ channelId: 'C_RECEIPTS', threadId: undefined }));
+    expect((await sendRuns()).find((run) => run.id === heldBody.run_id)).toMatchObject({ status: 'completed', approval_status: 'auto' });
+
+    // Asking again for the same input answers with the delivered run.
+    const repeat = await call('/internal/conversations/send', (await turn('p3-check-1')).token, { target: channelTarget, text: 'checked post' });
+    expect(repeat.status, await repeat.clone().text()).toBe(200);
+    expect(await repeat.json()).toMatchObject({ run_id: heldBody.run_id, deliveredInBand: false });
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it("an Automation turn's checked post is asked of a person: its MCP session acts as the agent, not the Automation", async () => {
+    await rule('check', 'guardrail');
+    const held = await call('/internal/conversations/send', (await automationTurn('p3-check-automation-1')).token, { target: channelTarget, text: 'checked for an Automation' });
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody.code).toBe('PENDING_APPROVAL');
+    expect(posted).not.toHaveBeenCalled();
   });
 
   it('a blocked post elsewhere is refused and nothing is posted', async () => {
@@ -717,21 +775,7 @@ describe('send_message: an audience guardrail asks only where more people will s
   it("an Automation turn is never a reply, even into the thread it read", async () => {
     await guardrail('approval', 'workspace');
     answers.C_RECEIPTS = {};
-    const [automation] = await sql()<{ id: number }>`
-      SELECT id FROM automations WHERE organization_id = ${org.id} AND managed_agent_id = ${AGENT} ORDER BY id LIMIT 1
-    `;
-    const [automationRun] = await sql()<{ id: number }>`
-      INSERT INTO runs (organization_id, run_type, automation_id, status, approved_input, created_at)
-      VALUES (${org.id}, 'automation', ${automation!.id}, 'running', ${sql().json({ trigger_execution: 'turn' })}, NOW())
-      RETURNING id
-    `;
-    const payload = {
-      ...message('aud-automation-1'),
-      conversationId: buildAutomationRunConversationId(AGENT, Number(automation!.id), Number(automationRun!.id)),
-    } as MessagePayload;
-    const runId = await insertAgentTurnRun(payload);
-    const token = await mintTurnToken(payload, runId);
-    await sql()`UPDATE runs SET action_input = action_input || ${sql().json({ credential: token })}::jsonb WHERE id = ${runId}`;
+    const { token } = await automationTurn('aud-automation-1');
 
     const held = await send('aud-automation-1', target, 'into the source thread', token);
     const heldBody = await held.json();
