@@ -23,7 +23,7 @@ function cut(text: string, units: number) {
 
 /** The processor posts each reply-worthy item itself while it holds the
  * window, so a clean run sends nothing here. This reaction speaks only when the
- * owner has something to act on: a blocked source or an unverified scan.
+ * owner has something to act on: an unread source or an unverified scan.
  * Notifications do not inherit the external caller's cross-workspace grant,
  * and never describe unchecked content as verified. */
 export async function deliverExternalSocial(
@@ -52,7 +52,13 @@ export async function deliverExternalSocial(
     Array.isArray(preflight.issues) &&
     preflight.attested === socialEvidenceShape(d) &&
     d.findings.every((f: any) => findingHasReceipt(f, policy));
-  const blocked = coverage.filter((c: any) => c.status === "blocked");
+  // A source counts as unread when it was blocked, or when its read was partial
+  // and yielded no post at all (every card skipped): nothing from it was checked.
+  const blocked = coverage.filter(
+    (c: any) =>
+      c.status === "blocked" ||
+      (c.status === "partial" && Number(c.posts_read) === 0)
+  );
   const result = {
     evidence_verified: verified,
     verified_findings: verified ? d.findings.length : 0,
