@@ -11,7 +11,7 @@
 // To repeat just this smoke using that candidate's verified runtime cache:
 //   node scripts/daemon-mcp-smoke.mjs /tmp/lobu-candidate/node_modules/.bin/lobu /tmp/lobu-candidate/daemon-mcp-logs /tmp/lobu-candidate/runtime
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -313,10 +313,101 @@ async function main() {
   mcp = await connect(bootstrap.device_token);
   await check("MCP handshake, tools discovery and authentication", async () => {
     const { tools } = await mcp.listTools();
-    for (const name of ["run_sdk", "query_sdk", "search_sdk"])
+    for (const name of [
+      "run_sdk",
+      "query_sdk",
+      "search_sdk",
+      "save_memory",
+      "search_memory",
+    ])
       assert.ok(tools.some((tool) => tool.name === name));
     await assert.rejects(() => connect("owl_pat_invalid_smoke_token"));
   });
+  // Each invocation starts the installed CLI and a new MCP session against the
+  // same gateway and disposable Postgres.
+  function memoryRun(tool, args) {
+    const name = `memory-cli-${tool}`;
+    const result = spawnSync(
+      process.execPath,
+      [cli, "memory", "run", tool, JSON.stringify(args)],
+      {
+        cwd: project,
+        env: {
+          ...env,
+          LOBU_API_TOKEN: bootstrap.device_token,
+          LOBU_MEMORY_URL: `${origin}/mcp/${org.slug}`,
+        },
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 2_000_000,
+      }
+    );
+    logs.set(name, `${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, `${name} failed (see its failure log)`);
+    const reply = JSON.parse(result.stdout);
+    assert.notEqual(reply.isError, true, `${name} returned an MCP error`);
+    return reply;
+  }
+
+  const memoryMarker = `Published artifact memory smoke ${randomUUID()}`;
+  let savedMemory;
+  await check("installed CLI saves durable memory over MCP", async () => {
+    savedMemory = memoryRun("save_memory", {
+      title: "Synthetic artifact memory",
+      content: memoryMarker,
+      semantic_type: "observation",
+    }).structuredContent;
+    assert.ok(savedMemory, "Memory save omitted its result");
+    assert.ok(Number.isSafeInteger(savedMemory.id) && savedMemory.id > 0);
+    assert.ok(
+      typeof savedMemory.durable_at === "string" &&
+        Number.isFinite(Date.parse(savedMemory.durable_at)),
+      "Memory save omitted its durable receipt"
+    );
+  });
+  await check(
+    "fresh CLI MCP session reads the exact saved memory",
+    async () => {
+      const exact = memoryRun("query_sdk", {
+        title: "Verify durable artifact memory",
+        script: `export default async (_ctx, client) => client.knowledge.read({ content_ids: [${savedMemory.id}] });`,
+      }).structuredContent;
+      assert.ok(exact, "Exact memory read omitted its result");
+      assert.equal(exact.success, true);
+      assert.equal(exact.return_truncated, undefined);
+      const stored = exact.return_value.content.find(
+        (row) => Number(row.id) === savedMemory.id
+      );
+      assert.ok(stored, "Saved memory was not exactly readable");
+      assert.equal(stored.payload_text, memoryMarker);
+    }
+  );
+  await check(
+    "fresh CLI MCP session finds the saved memory by text",
+    async () => {
+      const recalled = memoryRun("search_memory", {
+        query: memoryMarker,
+        include_content: true,
+        include_connections: false,
+        include_public_catalogs: false,
+        content_limit: 5,
+      });
+      // Search's public MCP result is text. Match the event ID and unique
+      // payload in one record section, rather than across different hits.
+      const records = recalled.content
+        ?.filter((block) => block.type === "text")
+        .flatMap((block) => block.text.split(/^#{1,6} /m));
+      assert.ok(
+        records?.some(
+          (record) =>
+            record.includes(`**Lobu event ID**: ${savedMemory.id}\n`) &&
+            record.includes(memoryMarker)
+        ),
+        "A fresh MCP session could not recall the saved memory"
+      );
+    }
+  );
   const connectorCatalog = await json("/catalog?kinds=connectors");
   const catalogEntries = connectorCatalog.catalogs.connectors.entries;
   await check(
