@@ -6,8 +6,26 @@ import {
   type EvidencePolicy,
 } from "./external-social-evidence";
 
-/** Notifications do not inherit the external caller's cross-workspace grant.
- * They report preflight status, and never describe unchecked content as verified. */
+const PLATFORM_NAMES: Record<string, string> = {
+  reddit: "Reddit",
+  linkedin: "LinkedIn",
+  x: "X",
+  hackernews: "Hacker News",
+};
+const platformName = (p: string) => PLATFORM_NAMES[p] ?? p;
+// The notification validator counts UTF-16 units; never end on a split
+// surrogate pair.
+function cut(text: string, units: number) {
+  const out = text.slice(0, units);
+  const last = out.charCodeAt(out.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? out.slice(0, -1) : out;
+}
+
+/** The processor posts each reply-worthy item itself while it holds the
+ * window, so a clean run sends nothing here. This reaction speaks only when the
+ * owner has something to act on: a blocked source or an unverified scan.
+ * Notifications do not inherit the external caller's cross-workspace grant,
+ * and never describe unchecked content as verified. */
 export async function deliverExternalSocial(
   ctx: any,
   client: any,
@@ -25,7 +43,6 @@ export async function deliverExternalSocial(
     client,
     ctx.automation?.id
   );
-  const b = d.briefings[0];
   const coverage = m.coverage;
   const preflight = m.evidence_verification;
   // This is the external caller's attestation, not a server-side receipt check.
@@ -35,25 +52,34 @@ export async function deliverExternalSocial(
     Array.isArray(preflight.issues) &&
     preflight.attested === socialEvidenceShape(d) &&
     d.findings.every((f: any) => findingHasReceipt(f, policy));
-  const summary = verified
-    ? coverage
-        .map(
-          (c: any) => `${c.platform}: ${c.posts_read} text posts, ${c.status}`
-        )
-        .join("; ")
-    : "Source verification missing. This completed window is not a verified scan; findings require reprocessing.";
-  // The notification validator counts UTF-16 units; never end on a split
-  // surrogate pair.
-  let body = (
-    summary + (verified ? `\n\n${String(b.content || "")}` : "")
-  ).slice(0, 980);
-  const last = body.charCodeAt(body.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) body = body.slice(0, -1);
+  const blocked = coverage.filter((c: any) => c.status === "blocked");
+  const result = {
+    evidence_verified: verified,
+    verified_findings: verified ? d.findings.length : 0,
+    notification_id: null as number | null,
+  };
+  if (verified && blocked.length === 0) return result;
+
+  const names = (list: any[]) =>
+    list.map((c: any) => platformName(c.platform)).join(", ");
+  const title = verified
+    ? `Couldn't read ${names(blocked)} today`
+    : "Check today's social suggestions before using them";
+  const body = verified
+    ? [
+        `Today's social scan couldn't read ${names(blocked)}, so nothing from ${blocked.length === 1 ? "it" : "them"} was checked.`,
+        ...blocked
+          .filter((c: any) => String(c.detail ?? "").trim())
+          .map(
+            (c: any) =>
+              `${platformName(c.platform)}: ${cut(String(c.detail).trim(), 200)}`
+          ),
+        "The other sources were read; anything worth replying to was posted separately.",
+      ].join("\n")
+    : `Today's scan of ${names(coverage)} finished without checking its findings against the posts they quote. Double-check any reply suggestion from this run against the original post before using it.`;
   const sent = await client.notifications.send({
-    title: verified
-      ? "Social research briefing"
-      : "Social research needs evidence",
-    body,
+    title,
+    body: cut(body, 980),
     recipients: [ownerId],
     resource_url: `/${policy.workspace}/automations/${automationId}`,
     idempotency_key: `social-briefing:${automationId}:${ctx.window.run_id}`,
@@ -62,9 +88,5 @@ export async function deliverExternalSocial(
       run_id: Number(ctx.window.run_id),
     },
   });
-  return {
-    evidence_verified: verified,
-    verified_findings: verified ? d.findings.length : 0,
-    notification_id: sent.event_id,
-  };
+  return { ...result, notification_id: sent.event_id };
 }
