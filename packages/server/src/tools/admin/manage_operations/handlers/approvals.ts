@@ -1,5 +1,6 @@
 import { IdentityAssociationStaleError, rememberIdentityRejection } from "../../../../utils/identity-association";
-import { connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { allowlistRefusal, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { lockIdentityOrganization } from "../../../../utils/relationship-validation";
 import { hasDelegatedIdentity, isHumanDecision } from "../../../../auth/direct-user-context";
 
@@ -1321,8 +1322,11 @@ export async function handleApprove(
 		sql,
 	});
 	if (policy?.effect === "deny") {
-		const why = `Policy now blocks '${pendingRun.action_key}' for the requesting principal${connectorPolicyNoteSuffix(policy)}.`;
-		const explanation = explainConnectorPolicy(policy);
+		const why = policy.reason === "allowlist"
+			? allowlistRefusal(pendingRun.action_key)
+			: `Policy now blocks '${pendingRun.action_key}' for the requesting principal${connectorPolicyNoteSuffix(policy)}.`;
+		const explanation = explainConnectorPolicy(policy, await resolvePolicyPrincipal(sql, ctx.organizationId,
+			{ kind: pendingRun.policy_principal_kind, id: pendingRun.policy_principal_id }));
 		const reviewer = await resolveReviewer(ctx);
 		// The claim re-asserts `approval_status = 'pending'`, so a run approved
 		// concurrently (or otherwise no longer pending) matches ZERO rows. In

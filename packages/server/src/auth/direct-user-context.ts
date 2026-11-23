@@ -44,6 +44,16 @@ export function isManualUserEdit(ctx: IdentityContext): boolean {
   return !!ctx.userId && !hasDelegatedIdentity(ctx) && !ctx.sourceContext;
 }
 
+/**
+ * A person acting in the web app: a signed-in session caller making a manual
+ * edit. Connector rules never hold them. A token, OAuth app, CLI, chat turn,
+ * agent or Automation fails this test, and so does an in-process caller that
+ * does not present a web session (connector chat sends present `pat`).
+ */
+export function isPersonInWebApp(ctx: IdentityContext & { tokenType?: string | null }): boolean {
+  return ctx.tokenType === 'session' && isManualUserEdit(ctx);
+}
+
 /** Why a `manual_edit` assertion is refused; null when it is honoured. */
 export type ManualEditRefusal = 'missing_scope' | 'delegated_caller';
 

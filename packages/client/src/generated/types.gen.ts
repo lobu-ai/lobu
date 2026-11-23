@@ -5596,12 +5596,18 @@ export type ManageOperationsResponses = {
             | "device_owner"
             | "unresolved_principal"
             | "parent_approval"
-            | "unavailable_operation";
+            | "unavailable_operation"
+            | "allowlist";
           rules: Array<{
             id: number;
             kind: "grant" | "guardrail";
             note?: string;
           }>;
+          principal?: {
+            kind: "user" | "agent" | "automation" | "app";
+            id: string | null;
+            label: string | null;
+          };
         };
         reason?: "not_pending_check" | "check_expired" | "policy_changed";
       }
@@ -5627,12 +5633,18 @@ export type ManageOperationsResponses = {
             | "device_owner"
             | "unresolved_principal"
             | "parent_approval"
-            | "unavailable_operation";
+            | "unavailable_operation"
+            | "allowlist";
           rules: Array<{
             id: number;
             kind: "grant" | "guardrail";
             note?: string;
           }>;
+          principal?: {
+            kind: "user" | "agent" | "automation" | "app";
+            id: string | null;
+            label: string | null;
+          };
         };
       }
     | {
@@ -5649,12 +5661,18 @@ export type ManageOperationsResponses = {
             | "device_owner"
             | "unresolved_principal"
             | "parent_approval"
-            | "unavailable_operation";
+            | "unavailable_operation"
+            | "allowlist";
           rules: Array<{
             id: number;
             kind: "grant" | "guardrail";
             note?: string;
           }>;
+          principal?: {
+            kind: "user" | "agent" | "automation" | "app";
+            id: string | null;
+            label: string | null;
+          };
         };
       }
     | {

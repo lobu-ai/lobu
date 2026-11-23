@@ -1,6 +1,7 @@
 import type { Static } from "@sinclair/typebox";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import {
+	allowlistRefusal,
 	POLICY_CHECK_METADATA_KEY,
 	connectorPolicyNoteSuffix,
 	explainConnectorPolicy,
@@ -8,6 +9,7 @@ import {
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
 import { resolveActingPrincipal } from "../../../../authz/entity-policy";
 import { resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from "../../../../config/intervals";
 import { getDb } from "../../../../db/client";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
@@ -115,13 +117,18 @@ export async function handleConfirm(
 			: "run";
 		if (deviceAccess === "refuse") return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 
-		const policy = await resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId: run.id, sql: tx });
+		const [policy, principal] = await Promise.all([
+			resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId: run.id, sql: tx }),
+			resolvePolicyPrincipal(tx, ctx.organizationId, { kind: run.policy_principal_kind, id: run.policy_principal_id }),
+		]);
 		if (!policy || policy.effect === "deny") {
-			const why = `Policy now blocks '${run.action_key}'${policy ? connectorPolicyNoteSuffix(policy) : "."}`;
+			const why = policy?.reason === "allowlist"
+				? allowlistRefusal(run.action_key)
+				: `Policy now blocks '${run.action_key}'${policy ? connectorPolicyNoteSuffix(policy) : "."}`;
 			await settle("rejected", why);
 			return withFailureCode({
 				error: why,
-				...(policy ? { policy: explainConnectorPolicy(policy) } : {}),
+				...(policy ? { policy: explainConnectorPolicy(policy, principal) } : {}),
 			}, "PERMISSION");
 		}
 		if (policy.effect === "approval" || deviceAccess === "ask_owner") {
@@ -130,7 +137,7 @@ export async function handleConfirm(
 			return withFailureCode({
 				error: `${why} Run ${run.id} was withdrawn; call operations.execute again to request approval.`,
 				reason: "policy_changed" as const,
-				policy: explainConnectorPolicy(policy, deviceAccess === "ask_owner"),
+				policy: explainConnectorPolicy(policy, principal, deviceAccess === "ask_owner"),
 			}, "PRECONDITION_FAILED");
 		}
 

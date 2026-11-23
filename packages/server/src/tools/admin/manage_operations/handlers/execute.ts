@@ -9,9 +9,11 @@ import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { type ConnectorPolicyExplanation, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
-import { applyRunConnectorPolicyAtClaim, POLICY_PAT_PRINCIPAL_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { applyRunConnectorPolicyAtClaim, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
+import { isPersonInWebApp } from "../../../../auth/direct-user-context";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { type DbClient, getDb } from "../../../../db/client";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
@@ -621,14 +623,21 @@ async function pendingCheckResult(
 	held?: ConnectorPolicyExplanation,
 ): Promise<ManageOperationsResult> {
 	const sql = getDb();
-	const [run] = await sql<{ expires_at: Date }>`
-		SELECT expires_at FROM runs WHERE id = ${runId} AND organization_id = ${ctx.organizationId}
+	const [run] = await sql<{ expires_at: Date; policy_principal_kind: string | null; policy_principal_id: string | null }>`
+		SELECT expires_at, policy_principal_kind, policy_principal_id
+		FROM runs WHERE id = ${runId} AND organization_id = ${ctx.organizationId}
 	`;
 	if (!run) throw new Error(`Check run ${runId} disappeared after creation.`);
 	// A replay explains the hold under the current policy, which confirm
 	// re-evaluates anyway.
-	const current = held ? null : await resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId, sql });
-	const policy = held ?? (current ? explainConnectorPolicy(current) : { reason: "guardrail" as const, rules: [] });
+	let policy = held;
+	if (!policy) {
+		const [current, principal] = await Promise.all([
+			resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId, sql }),
+			resolvePolicyPrincipal(sql, ctx.organizationId, { kind: run.policy_principal_kind, id: run.policy_principal_id }),
+		]);
+		policy = explainConnectorPolicy(current ?? { effect: "check", ruleIds: [], rules: [], reason: "guardrail" }, principal);
+	}
 	return {
 		action: "execute",
 		run_id: runId,
@@ -969,18 +978,27 @@ export async function handleExecute(
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 		appId: ctx.appPrincipalId ?? null,
 	});
-	const policy = await resolveConnectorPolicy({
-		organizationId: ctx.organizationId,
-		connectionId: connection.id,
-		operation,
-		actor,
-		appPrincipalId: ctx.appPrincipalId ?? null,
-		sql,
-	});
+	// Rules stop agents, apps and Automations, never a person in the web app.
+	// A delegated step answers to the parent run's requester instead.
+	const person = !delegation && isPersonInWebApp(ctx);
+	const [policy, principal] = await Promise.all([
+		resolveConnectorPolicy({
+			organizationId: ctx.organizationId,
+			connectionId: connection.id,
+			operation,
+			actor,
+			appPrincipalId: ctx.appPrincipalId ?? null,
+			person,
+			sql,
+		}),
+		resolvePolicyPrincipal(sql, ctx.organizationId, actor),
+	]);
 	if (policy.effect === "deny") {
 		return withFailureCode({
-			error: `Policy blocks '${operation.operation_key}' for this principal${connectorPolicyNoteSuffix(policy) || "."}`,
-			policy: explainConnectorPolicy(policy),
+			error: policy.reason === "allowlist"
+				? allowlistRefusal(operation.operation_key)
+				: `Policy blocks '${operation.operation_key}' for this principal${connectorPolicyNoteSuffix(policy) || "."}`,
+			policy: explainConnectorPolicy(policy, principal),
 		}, "PERMISSION");
 	}
 	// A device-pinned connection runs on one member's own machine
@@ -1016,6 +1034,7 @@ export async function handleExecute(
 	runMetadata = {
 		...runMetadata,
 		...(patPrincipalId ? { [POLICY_PAT_PRINCIPAL_METADATA_KEY]: patPrincipalId } : {}),
+		...(person ? { [POLICY_PERSON_METADATA_KEY]: true } : {}),
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 		...(turnOrigin ? { turn_origin: turnOrigin } : {}),
@@ -1033,7 +1052,7 @@ export async function handleExecute(
 	const shouldQueue = policy.effect === "approval" || deviceAccess === "ask_owner" ||
 		(policy.effect === "check" && !canConfirm);
 	const holdForCheck = !shouldQueue && policy.effect === "check";
-	const policyExplanation = explainConnectorPolicy(policy, deviceAccess === "ask_owner");
+	const policyExplanation = explainConnectorPolicy(policy, principal, deviceAccess === "ask_owner");
 	const activation = args.activation
 		? {
 				kind: args.activation.kind,

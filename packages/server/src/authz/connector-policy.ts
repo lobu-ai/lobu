@@ -1,7 +1,7 @@
 import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
-import type { ActingPrincipal, EntityApprovalPolicy } from "./entity-policy";
+import type { ActingPrincipal, EntityApprovalPolicy, EntityPolicyPrincipalKind } from "./entity-policy";
 import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
 export const CONNECTOR_POLICY_CATEGORIES = [
@@ -59,7 +59,19 @@ export interface ConnectorPolicyResult {
 		| "default_auto"
 		| "unresolved_principal"
 		| "parent_approval"
-		| "unavailable_operation";
+		| "unavailable_operation"
+		/** The caller's allowed actions list, not a workspace rule, decided it. */
+		| "allowlist";
+}
+
+/**
+ * Who a policy decision was made for: the run's stored policy principal and
+ * its name when decided. A person's id is null, as on the run.
+ */
+export interface ConnectorPolicyPrincipal {
+	kind: EntityPolicyPrincipalKind;
+	id: string | null;
+	label: string | null;
 }
 
 /**
@@ -70,15 +82,23 @@ export interface ConnectorPolicyResult {
 export interface ConnectorPolicyExplanation {
 	reason: ConnectorPolicyResult["reason"] | "device_owner";
 	rules: ConnectorPolicyRuleRef[];
+	principal: ConnectorPolicyPrincipal;
+}
+
+/** A refusal by the caller's own allowed actions list, named as such rather than as a workspace rule. */
+export function allowlistRefusal(operationKey: string): string {
+	return `'${operationKey}' isn't on this caller's allowed actions list.`;
 }
 
 export function explainConnectorPolicy(
 	policy: ConnectorPolicyResult,
+	principal: ConnectorPolicyPrincipal,
 	deviceOwner = false,
 ): ConnectorPolicyExplanation {
 	return {
 		reason: deviceOwner && runsWithoutHold(policy.effect) ? "device_owner" : policy.reason,
 		rules: policy.rules.map((rule) => ({ ...rule })),
+		principal: { ...principal },
 	};
 }
 
@@ -171,15 +191,26 @@ export function evaluateConnectorPolicy(args: {
 	operation: PolicyOperation;
 	actor: ActingPrincipal;
 	policies: readonly EntityApprovalPolicy[];
-	/** Every allowlist bound to the caller; each one must name the operation. */
+	/** Every allowlist bound to the caller; each one must name the write. */
 	allowlists?: readonly (readonly AllowedAction[])[];
+	/**
+	 * A person acting in the web app (`isPersonInWebApp`), recorded on the run
+	 * at admission. Rules stop agents, apps and Automations, never a person.
+	 */
+	person?: boolean;
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
 	}
-	const allowedEffect = allowedConnectorEffect(args.allowlists ?? [], args.connectionId, args.operation.operation_key);
+	if (args.person && args.actor.kind === "user") {
+		return { effect: "auto", ruleIds: [], rules: [], reason: "default_auto" };
+	}
+	// An allowlist limits what a caller may change; reads stay open unless a rule blocks them.
+	const allowedEffect = args.operation.kind === "read"
+		? "auto"
+		: allowedConnectorEffect(args.allowlists ?? [], args.connectionId, args.operation.operation_key);
 	if (allowedEffect === "deny") {
-		return { effect: "deny", ruleIds: [], rules: [], reason: "guardrail" };
+		return { effect: "deny", ruleIds: [], rules: [], reason: "allowlist" };
 	}
 	const key = qualifiedOperationKey(
 		args.operation.connector_key,
@@ -247,7 +278,7 @@ export function evaluateConnectorPolicy(args: {
 		? "approval"
 		: allowedEffect;
 	if (writeEffectRank(allowlistEffect) > writeEffectRank(effect)) {
-		return { effect: allowlistEffect, ruleIds: [], rules: [], reason: "guardrail" };
+		return { effect: allowlistEffect, ruleIds: [], rules: [], reason: "allowlist" };
 	}
 	const ordered = [...contributors].sort(
 		(a, b) => Number(a.kind === "grant") - Number(b.kind === "grant") || a.id - b.id,

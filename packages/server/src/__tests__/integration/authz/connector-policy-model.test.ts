@@ -7,7 +7,7 @@ import {
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
 } from "../../../authz/entity-policy";
-import { connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../authz/connector-policy";
+import { connectorPolicyNoteSuffix, evaluateConnectorPolicy, explainConnectorPolicy } from "../../../authz/connector-policy";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
@@ -296,8 +296,9 @@ describe("org connector policy scopes", () => {
 		// A device owner's hold over an Auto grant is not explained by that grant's note.
 		const allowed = await decide();
 		expect(allowed).toMatchObject({ effect: "auto", rules: [{ id: exact.id, note: "Safe to run unattended" }] });
-		expect(explainConnectorPolicy(allowed, true).reason).toBe("device_owner");
-		expect(connectorPolicyNoteSuffix(explainConnectorPolicy(allowed, true))).toBe("");
+		const asked = { kind: "user", id: null, label: null } as const;
+		expect(explainConnectorPolicy(allowed, asked, true)).toMatchObject({ reason: "device_owner", principal: asked });
+		expect(connectorPolicyNoteSuffix(explainConnectorPolicy(allowed, asked, true))).toBe("");
 		// A grant and a guardrail can share one scope.
 		const hold = await save({ connectorKey: operation.connector_key, kind: "guardrail", note: "Review fixture writes", effects: { execute: "approval" } });
 		const sameScopeGrant = await save({ connectorKey: operation.connector_key, effects: { execute: "auto" } });
@@ -318,6 +319,11 @@ describe("org connector policy scopes", () => {
 		expect((await decide(agent)).effect).toBe("deny");
 		expect((await decide({ kind: "automation", id: "automation:123", ownerAgentId: agent.id, ownerResolved: true })).effect).toBe("deny");
 		expect((await decide()).effect).toBe("approval");
+		// A person in the web app is never held or blocked by a rule; an agent
+		// carrying the same flag still is.
+		expect(await resolveConnectorPolicy({ organizationId: orgId, connectionId, operation, actor: human, person: true }))
+			.toEqual({ effect: "auto", ruleIds: [], rules: [], reason: "default_auto" });
+		expect((await resolveConnectorPolicy({ organizationId: orgId, connectionId, operation, actor: agent, person: true })).effect).toBe("deny");
 
 		// Writes reject a guardrail that would allow, or one outside connector actions.
 		await expect(save({ kind: "guardrail", effects: { execute: "auto" } })).rejects.toThrow(/only log, check, require approval or block/);
@@ -350,6 +356,16 @@ describe("org connector policy scopes", () => {
 
 		await expect(save({ connectionId, effects: { execute: "log" } })).rejects.toThrow(/guardrail modes/);
 		await expect(save({ connectionId, effects: { execute: "check" } })).rejects.toThrow(/guardrail modes/);
+	});
+
+	it("an allowed actions list binds a caller's writes only and is named as the reason", async () => {
+		const policies = await listEntityApprovalPolicies(orgId, "connector_action");
+		const evaluate = (op: typeof operation | { connector_key: string; operation_key: string; kind: "read" }, allowlists: Parameters<typeof evaluateConnectorPolicy>[0]["allowlists"]) =>
+			evaluateConnectorPolicy({ organizationId: orgId, connectionId, operation: op, actor: agent, policies, allowlists });
+		expect(evaluate(operation, [[]])).toEqual({ effect: "deny", ruleIds: [], rules: [], reason: "allowlist" });
+		expect(evaluate({ ...operation, operation_key: "read", kind: "read" }, [[]]).effect).toBe("auto");
+		const listed = { action: "connector.execute", connection_id: connectionId, operation_key: operation.operation_key, effect: "approval" } as const;
+		expect(evaluate(operation, [[listed]])).toEqual({ effect: "approval", ruleIds: [], rules: [], reason: "allowlist" });
 	});
 
 	it("scopes never cross tenants, including direct database writes", async () => {
