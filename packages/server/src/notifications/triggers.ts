@@ -713,3 +713,73 @@ export async function notifyInvitationReceived(params: {
 		resourceUrl: acceptPath,
 	});
 }
+
+/** A user grant a device action waited for; the worker names it on its failed completion. */
+export interface DeviceGrantRequest {
+	kind: "site_access";
+	/** The http(s) origin the browser needs access to. */
+	subject: string;
+}
+
+/** Read a worker-reported `action_output.device_grant`; anything malformed is ignored. */
+export function readDeviceGrant(actionOutput: unknown): DeviceGrantRequest | null {
+	if (!actionOutput || typeof actionOutput !== "object") return null;
+	const grant = (actionOutput as { device_grant?: unknown }).device_grant;
+	if (!grant || typeof grant !== "object") return null;
+	const { kind, subject } = grant as { kind?: unknown; subject?: unknown };
+	if (kind !== "site_access" || typeof subject !== "string") return null;
+	try {
+		const url = new URL(subject);
+		if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== subject) return null;
+	} catch {
+		return null;
+	}
+	return { kind, subject };
+}
+
+const DEVICE_GRANT_WINDOW_MS = 60 * 60_000;
+
+/**
+ * One reminder per device, grant and hour: an agent retrying the same blocked
+ * site must not flood the owner's inbox, yet a later session still asks again.
+ */
+export function deviceGrantNotificationKey(
+	deviceWorkerId: string,
+	grant: DeviceGrantRequest,
+	now = Date.now(),
+): string {
+	const window = Math.floor(now / DEVICE_GRANT_WINDOW_MS);
+	return `device_grant:${deviceWorkerId}:${grant.kind}:${grant.subject}:${window}`;
+}
+
+/**
+ * The device's owner is the only person who can make the grant, so they, not
+ * the run's requester or the org admins, hear about it. The browser shows its
+ * own notification too; this one reaches the owner away from that browser.
+ */
+export async function notifyDeviceGrantNeeded(params: {
+	orgId: string;
+	runId: number;
+	grant: DeviceGrantRequest;
+}): Promise<void> {
+	const sql = getDb();
+	const [device] = await sql`
+		SELECT dw.id, dw.user_id
+		FROM runs r
+		JOIN connections con ON con.id = r.connection_id
+		JOIN device_workers dw ON dw.id = con.device_worker_id
+		JOIN "member" m ON m."organizationId" = r.organization_id AND m."userId" = dw.user_id
+		WHERE r.id = ${params.runId} AND r.organization_id = ${params.orgId}
+	`;
+	if (!device?.user_id) return;
+	const host = new URL(params.grant.subject).host;
+	await sendNotification(params.orgId, [device.user_id], {
+		type: "generic",
+		title: `Allow Lobu on ${host}`,
+		body: `An agent tried to open ${host} in your browser, but Lobu doesn't have access to that site yet. Click the Lobu notification in Chrome, or allow the site in the Lobu side panel, then ask the agent to try again.`,
+		ownerUserId: device.user_id,
+		resourceType: "run",
+		resourceId: String(params.runId),
+		idempotencyKey: deviceGrantNotificationKey(String(device.id), params.grant),
+	});
+}
