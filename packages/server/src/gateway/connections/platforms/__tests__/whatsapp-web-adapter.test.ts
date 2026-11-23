@@ -514,6 +514,7 @@ describe("WhatsApp Web gateway delivery", () => {
     let statusWrites = 0;
     const manager = Object.assign(Object.create(ChatInstanceManager.prototype), {
       instances: new Map(),
+      ensuring: new Map(),
       resolveStored: async () => ({ id: "101", platform: "whatsapp.web", status: "active" }),
       hydrateFromRow: async () => { throw failure; },
       writeConnectionStatus: async () => { statusWrites++; },
