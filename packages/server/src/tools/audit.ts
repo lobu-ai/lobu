@@ -157,10 +157,11 @@ function errorPayload(
 }
 
 /**
- * Error shape for GENERIC audit entries: the class name (and `code` when the
- * error carries one) only. Handler-supplied message text can echo user values
- * in shapes no pattern enumerates, so it never reaches the append-only ledger
- * — the caller already received the full error on the live response.
+ * Error shape for a THROWN error on a generic audit entry: the class name (and
+ * `code` when the error carries one) only. A thrown message can come from
+ * argument validation, which echoes caller-controlled keys in shapes no
+ * pattern enumerates, so it never reaches the append-only ledger — the caller
+ * already received the full error on the live response.
  */
 function errorNameOnly(error: unknown, fallbackName: string): Record<string, unknown> | null {
   if (!error) return null;
@@ -174,14 +175,21 @@ function errorNameOnly(error: unknown, fallbackName: string): Record<string, unk
 }
 
 /**
- * Retain query_sdk's returned script error for diagnosis, like run_sdk and
- * query_sql. Pre-handler throws keep the generic name-only policy: validation
- * messages can echo arbitrary caller-controlled argument keys.
+ * Retain a failure the handler RETURNED for diagnosis, like run_sdk and
+ * query_sql: name, code, and the credential-redacted, capped message. Thrown
+ * errors keep the name-only policy: argument-validation throws can echo
+ * arbitrary caller-controlled argument keys.
  */
 function errorWithRedactedMessage(error: unknown, fallbackName: string): Record<string, unknown> | null {
   const named = errorNameOnly(error, fallbackName);
   const payload = errorPayload(error, fallbackName);
   return named && payload ? { ...named, message: payload.message } : null;
+}
+
+/** A returned failure carries its text as `error`, or as `message` beside a failed status. */
+function softFailureError(result: Record<string, unknown>): Record<string, unknown> {
+  const source = result.error ?? (typeof result.message === 'string' ? result.message : null);
+  return errorWithRedactedMessage(source, 'ToolError') ?? { name: 'ToolError' };
 }
 
 function manageAutomationsIdentity(args: Record<string, unknown>): {
@@ -238,7 +246,7 @@ function buildManageAutomationsInvocationPayload(
     result.status === 'error' ||
     result.status === 'timeout' ||
     deleteAllFailed;
-  const softError = reportedFailure ? errorNameOnly(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
+  const softError = reportedFailure ? softFailureError(result) : null;
   const thrownError = errorNameOnly(params.error, 'Error');
   return {
     tool_name: params.toolName,
@@ -343,8 +351,7 @@ function buildPayload(params: ToolInvocationAuditParams): Record<string, unknown
     result.status === 'failed' ||
     result.status === 'error' ||
     result.status === 'timeout';
-  const auditError = params.toolName === 'query_sdk' ? errorWithRedactedMessage : errorNameOnly;
-  const softError = reportedFailure ? auditError(result.error, 'ToolError') ?? { name: 'ToolError' } : null;
+  const softError = reportedFailure ? softFailureError(result) : null;
   const thrownError = errorNameOnly(params.error, 'Error');
   return {
     tool_name: params.toolName,

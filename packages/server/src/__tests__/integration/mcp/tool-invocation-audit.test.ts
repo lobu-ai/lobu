@@ -670,7 +670,7 @@ describe('tool invocation audit coverage', () => {
       await recordToolInvocationAudit({
         toolName,
         args: { probe: true },
-        result: { status, message: `soft ${status} outcome` },
+        result: { status, message: `soft ${status} outcome; key=sk-live-0123456789abcdef` },
         durationMs: 5,
         ctx: {
           organizationId: orgId,
@@ -686,8 +686,11 @@ describe('tool invocation audit coverage', () => {
       const row = await latestAuditRow(orgId, toolName);
       expect(row).not.toBeNull();
       expect(row!.payload_data.success).toBe(false);
-      // Name only — handler-supplied error text never reaches the ledger.
-      expect(row!.payload_data.error).toEqual({ name: 'ToolError' });
+      // A returned failure keeps its message, credential-redacted, for diagnosis.
+      expect(row!.payload_data.error).toEqual({
+        name: 'ToolError',
+        message: `soft ${status} outcome; key=[redacted]`,
+      });
     }
   );
 
@@ -922,8 +925,10 @@ describe('tool invocation audit coverage', () => {
     const row = await latestAuditRow(orgId, 'manage_classifiers');
     expect(row).not.toBeNull();
     expect(row!.payload_data.success).toBe(false);
-    expect(row!.payload_data.error).toMatchObject({ name: expect.any(String) });
-    expect(row!.payload_data.error).not.toHaveProperty('message');
+    expect(row!.payload_data.error).toEqual({
+      name: 'ToolError',
+      message: 'Classifier not found: 999999',
+    });
   });
 
   it('records workspace discovery without choosing an organization', async () => {
