@@ -704,14 +704,21 @@ the shorthand is used. There is no shorthand for a workspace-source trigger yet
 
 ## Notification routing
 
-An Automation may set `delivery_target` to one active chat channel already bound
-to its agent: `{ connection_id, channel_id }`. Notifications emitted by that
+An Automation may set `delivery_target` to one active chat channel bound in its
+workspace: `{ connection_id, channel_id }`. An Automation with a managed agent
+may target only a channel bound to that agent. An Automation with no managed
+agent and no device worker is processed by an external client, so it may target
+any active channel binding in the workspace. Notifications emitted by that
 Automation then go only to that channel. The server resolves the stored binding
 from the Automation ID on the run; worker-supplied notification arguments cannot
-override it.
+override it. An external client sending `notifications.send` with
+`automation_source` routes to the target only while it holds that run's
+unexpired window lease from `claim_next_window`; without the lease the
+declaration is ignored and the send routes as an ordinary notification.
 
 The target is strict. If the channel is unlinked, archived, moved to another
-agent, or its connection becomes inactive, the send fails closed and does not
+agent (for an agent-owned Automation), or its connection becomes inactive, the
+send fails closed and does not
 fall back to other linked channels. When the durable notification already
 exists, the delivery error is recorded on it. A null target preserves the legacy
 default of delivering to all linked channels. This setting routes notifications;

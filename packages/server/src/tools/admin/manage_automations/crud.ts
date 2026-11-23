@@ -275,7 +275,10 @@ export async function handleCreate(
     ? await assertAutomationDeliveryTarget(
         sql,
         organizationId,
-        args.managed_agent_id ?? null,
+        {
+          agentId: args.managed_agent_id ?? null,
+          deviceWorkerId: args.device_worker_id ?? null,
+        },
         args.delivery_target
       )
     : null;
@@ -669,23 +672,28 @@ export async function handleUpdate(
     );
   }
 
+  const deliveryOwner = {
+    agentId: effectiveDefaults.agentId ?? null,
+    deviceWorkerId: effectiveDefaults.deviceWorkerId ?? null,
+  };
   let normalizedDeliveryTarget = args.delivery_target ?? null;
   if (args.delivery_target) {
     normalizedDeliveryTarget = await assertAutomationDeliveryTarget(
       sql,
       currentRow.organization_id,
-      effectiveDefaults.agentId ?? null,
+      deliveryOwner,
       args.delivery_target
     );
   } else if (
-    args.managed_agent_id !== undefined &&
+    (args.managed_agent_id !== undefined || args.device_worker_id !== undefined) &&
     args.delivery_target === undefined &&
     currentRow.delivery_target
   ) {
+    // A reassignment changes which bindings the kept target may address.
     await assertAutomationDeliveryTarget(
       sql,
       currentRow.organization_id,
-      effectiveDefaults.agentId ?? null,
+      deliveryOwner,
       currentRow.delivery_target
     );
   }

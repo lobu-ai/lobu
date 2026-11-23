@@ -9,11 +9,13 @@
 
 import { Actions, Button, Card } from "chat";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { encodeExternalAutomationClaimOwner } from "../../../automations/external-claim-owner";
 import {
 	createNotificationForUsers,
 	resolveBotDeliveryTargets,
 	resolveNotificationDeliveryPlan,
 } from "../../../notifications/service";
+import { getNextNumericId } from "../../../tools/admin/helpers/db-helpers";
 import { notify } from "../../../tools/admin/notify";
 import type { ToolContext } from "../../../tools/registry";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
@@ -513,6 +515,135 @@ describe("resolveBotDeliveryTargets", () => {
 				automationCtx,
 			),
 		).rejects.toThrow(/delivery channel is no longer available/);
+	});
+
+	it("routes an external client's notify to an agent-less Automation's target only while it holds the window lease", async () => {
+		const org = await createTestOrganization();
+		const agent = await createTestAgent({
+			organizationId: org.id,
+			agentId: "campaign-linker",
+		});
+		await seedSlackConnection({
+			organizationId: org.id,
+			agentId: agent.agentId,
+			connectionId: "slackinst-campaign",
+			metadata: { teamId: "T_CAMPAIGN" },
+		});
+		for (const channelId of ["slack:C_CAMPAIGN", "slack:C_GENERAL"]) {
+			await seedBinding({
+				organizationId: org.id,
+				agentId: agent.agentId,
+				connectionId: "slackinst-campaign",
+				channelId,
+				teamId: "T_CAMPAIGN",
+			});
+		}
+		const sql = getTestDb();
+		const [connection] = await sql<{ id: number }>`
+			SELECT id FROM connections
+			WHERE organization_id = ${org.id}
+			  AND slug = 'slackinst-campaign'
+		`;
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		// An Automation with no managed agent: an external MCP client claims its
+		// windows and reports through notify.
+		const automationId = await getNextNumericId(sql, "automations");
+		await sql`
+			INSERT INTO automations (
+				id, automation_group_id, organization_id, managed_agent_id, created_by,
+				name, slug, delivery_target
+			) VALUES (
+				${automationId}, ${automationId}, ${org.id}, NULL, ${user.id},
+				'Campaign watch', 'campaign-watch',
+				${sql.json({ connection_id: Number(connection.id), channel_id: "slack:C_CAMPAIGN" })}
+			)
+		`;
+		const [window] = await sql<{ id: number }>`
+			INSERT INTO runs (organization_id, run_type, automation_id, status)
+			VALUES (${org.id}, 'automation', ${automationId}, 'running')
+			RETURNING id
+		`;
+		const ctx = {
+			organizationId: org.id,
+			userId: user.id,
+			agentId: null,
+			clientId: null,
+			memberRole: "owner",
+			isAuthenticated: true,
+			tokenType: "oauth",
+			scopedToOrg: false,
+			allowCrossOrg: true,
+			scopes: ["mcp:admin"],
+			sourceContext: null,
+		} as ToolContext;
+		const source = { automation_id: automationId, run_id: Number(window.id) };
+		const lease = (claimedBy: string, seconds: number) => sql`
+			UPDATE runs
+			SET claimed_by = ${claimedBy},
+			    expires_at = now() + make_interval(secs => ${seconds})
+			WHERE id = ${source.run_id}
+		`;
+		const send = async (title: string, declared?: typeof source) => {
+			const result = (await notify(
+				{ action: "send", title, ...(declared ? { automation_source: declared } : {}) },
+				{} as never,
+				ctx,
+			)) as { event_id: number };
+			const [event] = await sql<{
+				automation_id: number | null;
+				run_id: number | null;
+				metadata: { delivery_request: { strictAutomationTarget: boolean; targets: Array<{ channelKey: string }> } };
+			}>`SELECT automation_id, run_id, metadata FROM events WHERE id = ${result.event_id}`;
+			return {
+				automationId: event.automation_id == null ? null : Number(event.automation_id),
+				runId: event.run_id == null ? null : Number(event.run_id),
+				strict: event.metadata.delivery_request.strictAutomationTarget,
+				channels: event.metadata.delivery_request.targets
+					.map((target) => target.channelKey)
+					.sort(),
+			};
+		};
+		const orgWide = {
+			automationId: null,
+			runId: null,
+			strict: false,
+			channels: ["slack:C_CAMPAIGN", "slack:C_GENERAL"],
+		};
+		const ownLease = encodeExternalAutomationClaimOwner(ctx);
+
+		// Without a verified lease the declaration neither routes nor attributes.
+		expect(await send("No source")).toEqual(orgWide);
+		await lease(encodeExternalAutomationClaimOwner({ userId: "someone-else" }), 300);
+		expect(await send("Someone else's claim", source)).toEqual(orgWide);
+		await lease(ownLease, -1);
+		expect(await send("Expired lease", source)).toEqual(orgWide);
+		await lease(ownLease, 300);
+		expect(
+			await send("Another Automation's run", { ...source, automation_id: automationId + 1 }),
+		).toEqual(orgWide);
+
+		// The lease holder is running the Automation: its configured target routes.
+		expect(await send("Worth a reply", source)).toEqual({
+			automationId,
+			runId: source.run_id,
+			strict: true,
+			channels: ["slack:C_CAMPAIGN"],
+		});
+
+		// Revoking the binding re-authorizes at send time and fails closed.
+		const [campaignBinding] = await sql<{ automation_id: number }>`
+			SELECT automation_id FROM automation_message_subscriptions
+			WHERE organization_id = ${org.id}
+			  AND channel_id = 'slack:C_CAMPAIGN'
+		`;
+		await sql`UPDATE automations SET status = 'archived' WHERE id = ${campaignBinding.automation_id}`;
+		expect(
+			await resolveNotificationDeliveryPlan({ organizationId: org.id, automationId }),
+		).toEqual({ strictAutomationTarget: true, targets: [] });
+		await expect(send("After unlink", source)).rejects.toThrow(
+			/delivery channel is no longer available/,
+		);
 	});
 
   // --- Hosted-preview cross-org delivery (the proactive-notification bug) ---

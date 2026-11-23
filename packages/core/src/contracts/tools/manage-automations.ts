@@ -442,7 +442,7 @@ export const AutomationDeliveryTargetSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "Strict destination for notifications emitted by this Automation. The channel must already be bound to the Automation's agent. Null clears the destination.",
+      "Strict destination for notifications emitted by this Automation. The channel must be an active binding in this workspace; when the Automation has a managed agent it must be bound to that agent. Null clears the destination.",
   }
 );
 export type AutomationDeliveryTarget = Static<

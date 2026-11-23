@@ -17,24 +17,34 @@ interface ConfiguredAutomationDeliveryTarget {
   target: ResolvedAutomationDeliveryTarget | null;
 }
 
+/** The executor assignment that decides which bindings an Automation may address. */
+interface AutomationDeliveryOwner {
+  agentId: string | null;
+  deviceWorkerId: string | null;
+}
+
 /**
  * Resolve a public Automation delivery target through the canonical bound-channel
  * resolver. A numeric connection id alone is never authority: the target must
- * be an active channel binding owned by the same organization and agent as the
- * Automation. Hosted-preview bindings retain the same workspace guard as normal
- * inbound/proactive routing.
+ * be an active channel binding owned by the same organization as the
+ * Automation. An agent-owned Automation may address only its agent's bindings.
+ * An Automation with no managed agent and no device worker is processed by an
+ * external client that has no bindings of its own, so it may address any active
+ * binding in its organization. A device-pinned Automation without an agent has
+ * no delivery target. Hosted-preview bindings retain the same workspace guard
+ * as normal inbound/proactive routing.
  */
 async function resolveAutomationDeliveryTarget(
   sql: DbClient,
   organizationId: string,
-  agentId: string | null,
+  owner: AutomationDeliveryOwner,
   target: AutomationDeliveryTarget
 ): Promise<ResolvedAutomationDeliveryTarget | null> {
-  if (!agentId) return null;
+  if (!owner.agentId && owner.deviceWorkerId) return null;
 
   const rows = await resolveBoundChannelRows(sql, {
     organizationId,
-    agentId,
+    agentId: owner.agentId,
     connectionDbId: target.connection_id,
   });
   const row = rows.find((candidate) => {
@@ -62,18 +72,18 @@ async function resolveAutomationDeliveryTarget(
 export async function assertAutomationDeliveryTarget(
   sql: DbClient,
   organizationId: string,
-  agentId: string | null,
+  owner: AutomationDeliveryOwner,
   target: AutomationDeliveryTarget
 ): Promise<AutomationDeliveryTarget> {
   const resolved = await resolveAutomationDeliveryTarget(
     sql,
     organizationId,
-    agentId,
+    owner,
     target
   );
   if (!resolved) {
     throw new ToolUserError(
-      'Automation delivery target must be an active chat channel already bound to the same agent. Link the private channel first, then select it as the delivery channel.',
+      'Automation delivery target must be an active chat channel bound in this workspace, and bound to the same agent when the Automation has one. Link the private channel first, then select it as the delivery channel.',
       422
     );
   }
@@ -95,9 +105,10 @@ export async function loadConfiguredAutomationDeliveryTarget(
 ): Promise<ConfiguredAutomationDeliveryTarget> {
   const rows = await sql<{
     managed_agent_id: string | null;
+    device_worker_id: string | null;
     delivery_target: AutomationDeliveryTarget | null;
   }>`
-    SELECT managed_agent_id, delivery_target
+    SELECT managed_agent_id, device_worker_id, delivery_target
     FROM automations
     WHERE id = ${automationId}
       AND organization_id = ${organizationId}
@@ -110,7 +121,7 @@ export async function loadConfiguredAutomationDeliveryTarget(
     target: await resolveAutomationDeliveryTarget(
       sql,
       organizationId,
-      row.managed_agent_id,
+      { agentId: row.managed_agent_id, deviceWorkerId: row.device_worker_id },
       row.delivery_target
     ),
   };

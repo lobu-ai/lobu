@@ -25,6 +25,7 @@ import { validateSaveContentSemanticType } from '../../utils/event-kind-validati
 import logger from '../../utils/logger';
 import { buildResourcePermalink } from '../../utils/url-builder';
 import { trackAutomationReaction } from '../../utils/automation-reactions';
+import { leasedAutomationId } from '../../automations/automation-source';
 import { loadConfiguredAutomationDeliveryTarget } from '../../automations/delivery-target';
 import { normalizePageActivationUrl } from '../../runs/page-activation';
 import type { ToolContext } from '../registry';
@@ -116,7 +117,10 @@ const SendAction = Type.Object({
         automation_id: Type.Number({ description: 'Automation that triggered this notification' }),
         run_id: Type.Number({ description: 'Automation run that triggered this notification' }),
       },
-      { description: 'Attribution source when notification is triggered by an Automation reaction' }
+      {
+        description:
+          'The Automation run this notification reports on. Honored only while the caller holds that run\'s unexpired window lease (claim_next_window): the notification is then attributed to the Automation and routed to its delivery_target. Otherwise ignored.',
+      }
     )
   ),
 });
@@ -292,11 +296,14 @@ async function handleSend(
     body = body ? `${body}\n\n${dataStr}` : dataStr;
   }
 
-  // Provenance for the notification row itself. Read from the SERVER-set acting
-  // context (the reaction executor stamps it), never from `args.automation_source`
-  // — that is caller input, and `automation_id` decides what an Automation's own
-  // window excludes, so a chosen id would let one Automation blind another.
-  // `automation_source` is caller input and never supplies trusted provenance.
+  // Provenance and routing for the notification row itself. Read from the
+  // SERVER-set acting context (the reaction executor stamps it) first. A
+  // caller-declared `automation_source` counts only while this caller holds that
+  // run's unexpired window lease, i.e. it is the external client running the
+  // Automation right now; then its configured delivery target routes the send.
+  // An unleased declaration is ignored: `automation_id` decides routing and what
+  // an Automation's own window excludes, so a chosen id would let a caller post
+  // to another Automation's channel or blind it.
   //
   // The version comes from the RUN, not from `automations.current_version_id`.
   // current_version_id is the version that is current *now*, at send time — a
@@ -307,8 +314,15 @@ async function handleSend(
   // calls carry `actingRunId = null`), this stays NULL rather than guessing.
   // Same source the backfill trusts, and the same choice entity-field-approval
   // already makes.
-  const actingAutomationId = ctx.actingAutomationId ?? null;
-  const actingRunId = ctx.actingRunId ?? null;
+  const leasedSourceAutomationId =
+    ctx.actingAutomationId == null
+      ? await leasedAutomationId(sql, ctx, args.automation_source)
+      : null;
+  const actingAutomationId = ctx.actingAutomationId ?? leasedSourceAutomationId;
+  const actingRunId =
+    leasedSourceAutomationId !== null && args.automation_source
+      ? args.automation_source.run_id
+      : (ctx.actingRunId ?? null);
   // A repeat performs no new delivery, so resolve it before rejecting a route
   // that may have become stale after the original notification was created.
   const priorNotificationId =

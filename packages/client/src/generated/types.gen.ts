@@ -5928,7 +5928,7 @@ export type NotifyData = {
           [key: string]: unknown;
         };
         /**
-         * Attribution source when notification is triggered by an Automation reaction
+         * The Automation run this notification reports on. Honored only while the caller holds that run's unexpired window lease (claim_next_window): the notification is then attributed to the Automation and routed to its delivery_target. Otherwise ignored.
          */
         automation_source?: {
           /**
