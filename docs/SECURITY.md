@@ -111,7 +111,7 @@ Implications, by design:
   group conversation) asks the owner: an operation queues for approval even under an Auto policy,
   and the device owner can decide it. A live feed read, which has no queued run to approve,
   is refused with that reason.
-  A `public_visitor` or `reply_only` turn, and any anonymous reader of a public workspace, is refused. An explicit Block always refuses an operation first.
+  A `public_visitor` or `reply_only` turn, and any anonymous reader of a public workspace, is refused. A Block rule that applies to the caller refuses an operation first.
 - **Page-visit drafts follow current placement.** A Chrome device sees and activates drafts in its
   owner's personal workspace, its current home, and workspaces where it is pinned, never through a
   connection a Devices-page move invalidated.
@@ -130,7 +130,11 @@ Skills are executable, security-sensitive input:
 - Use curated skill lists by default.
 - Packages come from the agent's `nixPackages` (a skill cannot declare any). Review that list: each binary on the allowlist is a capability, treat them as such.
 - Network policy is declared on the agent (`network.allowed` / `network.denied` → `settings.networkConfig`), not on skills; gateway egress controls apply on top.
-- Connector actions follow organization Auto, Ask, or Block rules in Settings → Policies. Guardrails and tool restrictions still apply when a policy selects Auto.
+- Connector actions follow the workspace rules in Settings → Policies. A rule runs an action automatically, only logs it, has the agent confirm it follows the rule's note (Check), asks a person first, or blocks it. With no matching rule an action runs.
+- Rules apply to agents, connected apps (OAuth apps, tokens, local CLIs) and Automations. They never stop a person acting in the web app, not even Block. An agent's reply sent through a chat connection is not that person, so it keeps the rules.
+- A narrower Auto rule can carve an exception out of a broader workspace Ask first rule. Settings → Policies saves Log, Check and Block as guardrails, which only tighten, as do rules for one agent, app or Automation. A caller's own "Always allow" lifts Ask first for that caller. An agent's also covers the Automations it owns, except where an Automation has its own Ask rule. It never lifts Block, Check, Log, an allowed-actions list or a device owner's hold. A declared `automation_source` makes that Automation the caller only while the calling session holds the run's window lease, so naming an Automation never borrows its "Always allow".
+- An allowed-actions list on an agent or token limits which writes it may make. Reads stay open unless a rule blocks them.
+- Guardrails and tool restrictions still apply when an action runs automatically.
 
 ## What changed from earlier docs
 
