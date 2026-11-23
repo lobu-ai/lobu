@@ -17,15 +17,12 @@ describe("Postgres query preexecution validation", () => {
 	});
 
 	test.each([
-		["SELECT 1 LIMIT 1", /top-level LIMIT/],
 		["SELECT1LIMIT1", /single read-only SELECT/],
 		["", /query is empty/],
 		["DELETE FROM example", /single read-only SELECT/],
 		["SELECT $1", /bind parameters/],
 		["SELECT :name", /bind parameters/],
 		["SELECT 1; SELECT 2", /single statement/],
-		["SELECT 1 OFFSET 1", /top-level LIMIT\/OFFSET/],
-		["SELECT $$literal LIMIT$$ LIMIT 1", /top-level LIMIT/],
 		["SELECT 'it''s literal'; SELECT 2", /single statement/],
 		["SELECT 1 /* outer /* inner */ $1 */ + $1", /bind parameters/],
 	])("rejects %j with status 400 before opening a socket", async (query, message) => {
@@ -44,6 +41,8 @@ describe("Postgres query preexecution validation", () => {
 
 	test.each([
 		"SELECT * FROM (SELECT 1 LIMIT 1) q",
+		"SELECT 1 LIMIT 1",
+		"SELECT 1 ORDER BY 1 LIMIT 1 OFFSET 1",
 		"SELECT 'tool_invocation:query_sdk' AS value",
 		"SELECT '$1; :name LIMIT 1' AS value",
 		"SELECT $$text; :name $1 LIMIT 1$$ AS value",
@@ -52,7 +51,7 @@ describe("Postgres query preexecution validation", () => {
 		"/* outer /* nested */ :name; $1 LIMIT */ SELECT 1",
 		"-- :name; $1 LIMIT\nSELECT 1",
 		String.raw`SELECT E'escaped\\\'; :name $1 LIMIT' AS value`,
-	])("allows an inner LIMIT, literals and comments in %j without connecting", async (query) => {
+	])("allows a LIMIT, literals and comments in %j without connecting", async (query) => {
 		// The existing TLS guard stops execution after SQL validation, before pool creation.
 		const result = new PostgresConnector().query({
 			query,

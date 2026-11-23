@@ -270,15 +270,16 @@ function queryValidationError(message: string) {
  *  - one statement (no embedded `;`), no bind params (the connector binds its own);
  *  - it reads (`SELECT`, or `WITH … SELECT`, or a parenthesized select) — not a
  *    leading `SET`/`CALL`/`DO`/DDL that a read-only tx would still happily run;
- *  - no TOP-level LIMIT/OFFSET — the connector wraps + paginates on the outside,
- *    so a top-level LIMIT would (sync) stall the keyset cursor and (live) cap the
- *    universe the OFFSET pages over. An inner LIMIT inside a subquery is fine.
+ *  - for a stored feed query, no TOP-level LIMIT/OFFSET: sync wraps it in a
+ *    keyset cursor, and a capped base would return the same rows forever. A live
+ *    query() may cap itself — the wrap makes its LIMIT an inner one, so the caller's
+ *    LIMIT bounds the population that the outer page and count run over.
  *
  * Deliberately no AST parser: a Postgres-grammar parser lags real Postgres and
  * would false-reject valid SQL (FTS `@@`, jsonpath, `GROUPING SETS`, …) while
  * adding nothing the read-only transaction doesn't already guarantee.
  */
-function validateReadOnlySelect(raw: string): string {
+function validateReadOnlySelect(raw: string, { allowTopLevelLimit = false } = {}): string {
   const stripped = raw.trim().replace(/;\s*$/, '');
   if (!stripped) throw queryValidationError('query is empty');
   const executable = executableSql(stripped);
@@ -293,9 +294,9 @@ function validateReadOnlySelect(raw: string): string {
   if (!/^(select|with)\b/i.test(head)) {
     throw queryValidationError('query must be a single read-only SELECT (or WITH … SELECT).');
   }
-  if (hasTopLevelLimitOrOffset(executable)) {
+  if (!allowTopLevelLimit && hasTopLevelLimitOrOffset(executable)) {
     throw queryValidationError(
-      'query must not include a top-level LIMIT/OFFSET — the connector adds pagination automatically (an inner LIMIT inside a subquery is fine).',
+      'a feed query must not include a top-level LIMIT/OFFSET — sync adds keyset pagination automatically (an inner LIMIT inside a subquery is fine).',
     );
   }
   return stripped;
@@ -545,9 +546,9 @@ export default class PostgresConnector extends ConnectorRuntime {
   }
 
   /**
-   * Connection-level governed SQL read. An inner ORDER BY/LIMIT inside a subquery is fine — it's
-   * wrapped and paginated on the outside; a TOP-level LIMIT is rejected by
-   * validateReadOnlySelect because the outer OFFSET would page over a capped set.
+   * Connection-level governed SQL read. The query is wrapped and paginated on the
+   * outside, so its own ORDER BY/LIMIT/OFFSET — top-level or inner — defines the
+   * population that the page, filters and total count run over.
    */
   async query(ctx: QueryContext): Promise<QueryResult> {
     const connectionString = (ctx.config as Record<string, unknown>).DATABASE_URL as
@@ -556,7 +557,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     if (!connectionString) {
       throw new Error('DATABASE_URL is required');
     }
-    const baseSql = validateReadOnlySelect(ctx.query);
+    const baseSql = validateReadOnlySelect(ctx.query, { allowTopLevelLimit: true });
     const limit =
       ctx.limit !== undefined ? Math.min(Math.max(Math.trunc(ctx.limit), 1), 5000) : 1000;
     const offset = ctx.offset !== undefined ? Math.max(Math.trunc(ctx.offset), 0) : 0;
@@ -567,7 +568,7 @@ export default class PostgresConnector extends ConnectorRuntime {
     }
     // Real total over the whole (un-paginated) result, so the aggregator reports
     // an accurate total_count / has_more — parity with the internal query_sql
-    // path. baseSql has no top-level LIMIT (rejected above), so this is exact.
+    // path. A LIMIT in baseSql caps this count along with the rows.
     const countSql = `SELECT count(*)::int AS n FROM (\n${baseSql}\n) q`;
 
     const sql = openGuardedPool(connectionString, ctx.config as Record<string, unknown>);

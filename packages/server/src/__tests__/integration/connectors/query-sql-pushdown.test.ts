@@ -162,13 +162,25 @@ describe('query_sql connection pushdown', () => {
     expect(p2.has_more).toBe(false);
   }, 60_000);
 
-  it('rejects a top-level LIMIT in the pushed-down SQL (the connector paginates)', async () => {
+  it('accepts a top-level LIMIT as the population the connector pages and counts', async () => {
+    const res = await querySql(
+      { sql: 'SELECT id, name FROM qsp_ext ORDER BY id LIMIT 2', connection: 'qsp-ext-db', limit: 1, offset: 1 },
+      {},
+      ctx
+    );
+    expect(res.error).toBeUndefined();
+    expect(res.rows.map((r) => r.name)).toEqual(['b']);
+    expect(res.total_count).toBe(2);
+    expect(res.has_more).toBe(false);
+  }, 60_000);
+
+  it('rejects a write-shaped query before it reaches the source', async () => {
     // A pushdown failure is a hard tool error, never a success-shaped empty
     // table an agent could read as "no data" (#2042).
     await expect(
-      querySql({ sql: 'SELECT id, name FROM qsp_ext LIMIT 1', connection: 'qsp-ext-db' }, {}, ctx)
+      querySql({ sql: 'DELETE FROM qsp_ext', connection: 'qsp-ext-db' }, {}, ctx)
     ).rejects.toMatchObject({
-      message: expect.stringMatching(/top-level LIMIT/i),
+      message: expect.stringMatching(/single read-only SELECT/i),
       code: 'VALIDATION',
       httpStatus: 400,
       retryable: false,
@@ -230,7 +242,10 @@ describe('query_sql connection pushdown', () => {
       code: 'NOT_FOUND',
     });
     await expect(owner.query('SELECT 1', { connection: 'nope' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    await expect(owner.query('SELECT id FROM qsp_ext LIMIT 1', { connection: 'qsp-ext-db' })).rejects.toMatchObject({
+    expect(
+      await owner.query('SELECT name FROM qsp_ext WHERE amount < 99 ORDER BY name DESC LIMIT 1', { connection: 'qsp-ext-db' })
+    ).toEqual([{ name: 'c' }]);
+    await expect(owner.query('SELECT 1; SELECT 2', { connection: 'qsp-ext-db' })).rejects.toMatchObject({
       message: expect.stringMatching(/did not run against the source/),
       code: 'VALIDATION',
     });
