@@ -21,6 +21,12 @@ type SDKManifest = {
 	 * "Cannot read properties of undefined".
 	 */
 	allNamespaces: string[];
+	/**
+	 * Methods of a VISIBLE namespace that this mode or tier filters out, so the
+	 * guest can name the right tool instead of the opaque "x is not a function".
+	 */
+	hiddenByNamespace: Record<string, string[]>;
+	mode: SDKMode;
 };
 
 /** Every namespace present in METHOD_METADATA, mode-independent. */
@@ -47,14 +53,23 @@ function buildSDKManifest(
 	}
 
 	const byNamespace: Record<string, string[]> = {};
+	const hiddenByNamespace: Record<string, string[]> = {};
 	for (const [path, meta] of Object.entries(METHOD_METADATA)) {
 		const dot = path.indexOf(".");
 		if (dot === -1) continue;
-		if (!sdkMethodVisible(meta.access, callerMax, mode)) continue;
 		const ns = path.slice(0, dot);
-		(byNamespace[ns] ??= []).push(path.slice(dot + 1));
+		const target = sdkMethodVisible(meta.access, callerMax, mode)
+			? byNamespace
+			: hiddenByNamespace;
+		(target[ns] ??= []).push(path.slice(dot + 1));
 	}
-	return { topLevel, byNamespace, allNamespaces: allKnownNamespaces() };
+	return {
+		topLevel,
+		byNamespace,
+		allNamespaces: allKnownNamespaces(),
+		hiddenByNamespace,
+		mode,
+	};
 }
 
 export function enumerateSDKManifest(
