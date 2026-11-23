@@ -115,6 +115,27 @@ describe("manage_feeds cross-org entity_ids", () => {
 		expect(rows.length).toBe(0);
 	});
 
+	it.each([
+		["get", "{ feed_id: FEED }"],
+		["update", '{ feed_id: FEED, display_name: "Renamed" }'],
+		["delete", "{ feed_id: FEED }"],
+		["trigger", "{ feed_id: FEED }"],
+		["recollect", "{ feed_id: FEED }"],
+	])("fails feeds.%s on a missing feed as a typed NOT_FOUND", async (method, input) => {
+		const result = await getTool("run_sdk")!.handler(
+			{
+				script: `const FEED = 2147480000;\nexport default async (_ctx, client) => client.feeds.${method}(${input});`,
+			},
+			{} as Env,
+			ownerToolContext(ownerOrgId, ownerUserId),
+		);
+
+		expect(result).toMatchObject({
+			success: false,
+			error: { name: "ClientSdkActionError", code: "NOT_FOUND", retryable: false },
+		});
+	});
+
 	it("rejects create_feed when an entity_id belongs to another org", async () => {
 		const error = await owner.feeds
 			.create({

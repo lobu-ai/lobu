@@ -1048,8 +1048,9 @@ async function handleUpdateFeed(
       ),
     };
   });
+  // Return the transaction's own failure: a rebuilt object drops its typed error_code.
   if ('error' in txResult && txResult.error !== undefined) {
-    return { error: txResult.error };
+    return txResult;
   }
   const { updated, operations, authProfileId, declaredSecretKeys } = txResult;
   if (authProfileId) {
@@ -1263,7 +1264,7 @@ async function handleRecollectFeed(
     return { feed: updated[0] as Record<string, unknown> };
   });
   if ('error' in result) {
-    return { error: result.error };
+    return result;
   }
 
 
