@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { loadConfiguredAutomationDeliveryTarget } from "../../../automations/delivery-target";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
@@ -145,7 +146,7 @@ describe("manage_automations delivery_target", () => {
 				TEST_ENV,
 				ownerCtx,
 			),
-		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
+		).rejects.toThrow(/must be an active chat channel/);
 
 		await expect(
 			executeTool(
@@ -158,7 +159,7 @@ describe("manage_automations delivery_target", () => {
 				TEST_ENV,
 				ownerCtx,
 			),
-		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
+		).rejects.toThrow(/must be an active chat channel/);
 		const [afterRejectedMove] = await sql<{
 			managed_agent_id: string;
 			delivery_target: Record<string, unknown>;
@@ -288,7 +289,7 @@ describe("manage_automations delivery_target", () => {
 				TEST_ENV,
 				ownerCtx,
 			),
-		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
+		).rejects.toThrow(/must be an active chat channel/);
 
 		// An inactive connection is listed as such and rejected as a target.
 		await sql`
@@ -310,6 +311,148 @@ describe("manage_automations delivery_target", () => {
 				TEST_ENV,
 				ownerCtx,
 			),
-		).rejects.toThrow(/must be an active chat channel already bound to the same agent/);
+		).rejects.toThrow(/must be an active chat channel/);
+	});
+
+	it("lets an agent-less Automation target any active binding in its own workspace", async () => {
+		const sql = getTestDb();
+		const createAgentless = (slug: string, target: { connection_id: number; channel_id: string }) =>
+			executeTool(
+				"manage_automations",
+				{
+					action: "create",
+					slug,
+					name: slug,
+					prompt: "Post actionable findings to the campaign channel.",
+					triggers: [],
+					delivery_target: target,
+				},
+				TEST_ENV,
+				ownerCtx,
+			) as Promise<{ automation_id: string }>;
+
+		// No managed agent: an external client processes it, so a channel another
+		// agent linked in this workspace is a valid destination.
+		const created = await createAgentless("agentless-delivery", {
+			connection_id: connectionId,
+			channel_id: "slack:C_TASKS",
+		});
+		const [stored] = await sql<{
+			managed_agent_id: string | null;
+			delivery_target: Record<string, unknown>;
+		}>`
+			SELECT managed_agent_id, delivery_target FROM automations WHERE id = ${created.automation_id}
+		`;
+		expect(stored).toEqual({
+			managed_agent_id: null,
+			delivery_target: { connection_id: connectionId, channel_id: "slack:C_TASKS" },
+		});
+		expect(
+			await loadConfiguredAutomationDeliveryTarget(
+				sql,
+				organizationId,
+				Number(created.automation_id),
+			),
+		).toEqual({
+			configured: true,
+			target: {
+				connectionId: "slackinst-delivery",
+				channelId: "slack:C_TASKS",
+				teamId: "T_DELIVERY",
+			},
+		});
+
+		// A channel nobody bound is still rejected.
+		await expect(
+			createAgentless("agentless-unbound", {
+				connection_id: connectionId,
+				channel_id: "slack:C_NOWHERE",
+			}),
+		).rejects.toThrow(/must be an active chat channel/);
+
+		// Another workspace's binding is never addressable.
+		const foreignOrg = await createTestOrganization({ name: "Foreign delivery org" });
+		const foreignOwner = await createTestUser({ email: "foreign-delivery-owner@test.com" });
+		await addUserToOrganization(foreignOwner.id, foreignOrg.id, "owner");
+		const foreignAgent = await createTestAgent({
+			organizationId: foreignOrg.id,
+			agentId: "foreign-delivery-agent",
+			ownerUserId: foreignOwner.id,
+		});
+		await insertChatConnectionRow({
+			id: "slackinst-foreign-delivery",
+			organizationId: foreignOrg.id,
+			agentId: null,
+			platform: "slack",
+			metadata: { teamId: "T_FOREIGN" },
+		});
+		const [foreignConnection] = await sql<{ id: number }>`
+			SELECT id FROM connections
+			WHERE organization_id = ${foreignOrg.id}
+			  AND slug = 'slackinst-foreign-delivery'
+		`;
+		await createTestAutomationSubscription({
+			organizationId: foreignOrg.id,
+			agentId: foreignAgent.agentId,
+			connectionId: Number(foreignConnection.id),
+			platform: "slack",
+			channelId: "slack:C_FOREIGN",
+			teamId: "T_FOREIGN",
+			configuredBy: foreignOwner.id,
+		});
+		await expect(
+			createAgentless("agentless-foreign", {
+				connection_id: Number(foreignConnection.id),
+				channel_id: "slack:C_FOREIGN",
+			}),
+		).rejects.toThrow(/must be an active chat channel/);
+
+		// A binding whose connection is inactive is rejected.
+		await insertChatConnectionRow({
+			id: "slackinst-paused-delivery",
+			organizationId,
+			agentId: null,
+			platform: "slack",
+			status: "paused",
+			metadata: { teamId: "T_PAUSED" },
+		});
+		const [pausedConnection] = await sql<{ id: number }>`
+			SELECT id FROM connections
+			WHERE organization_id = ${organizationId}
+			  AND slug = 'slackinst-paused-delivery'
+		`;
+		await createTestAutomationSubscription({
+			organizationId,
+			agentId,
+			connectionId: Number(pausedConnection.id),
+			platform: "slack",
+			channelId: "slack:C_PAUSED",
+			teamId: "T_PAUSED",
+			configuredBy: ownerUserId,
+		});
+		await expect(
+			createAgentless("agentless-paused", {
+				connection_id: Number(pausedConnection.id),
+				channel_id: "slack:C_PAUSED",
+			}),
+		).rejects.toThrow(/must be an active chat channel/);
+
+		// Assigning an agent re-applies the same-agent rule to the kept target.
+		await expect(
+			executeTool(
+				"manage_automations",
+				{
+					action: "update",
+					automation_id: created.automation_id,
+					managed_agent_id: otherAgentId,
+				},
+				TEST_ENV,
+				ownerCtx,
+			),
+		).rejects.toThrow(/must be an active chat channel/);
+		const [afterRejectedAssign] = await sql<{ managed_agent_id: string | null }>`
+			SELECT managed_agent_id FROM automations WHERE id = ${created.automation_id}
+		`;
+		expect(afterRejectedAssign.managed_agent_id).toBeNull();
 	});
 });
