@@ -375,6 +375,7 @@ interface ManagedInstance {
 
 export class ChatInstanceManager {
   private instances = new Map<string, ManagedInstance>();
+  private ensuring = new Map<string, Promise<boolean>>();
   private services!: CoreServices;
   private publicGatewayUrl = "";
   private slackCoordinator!: SlackConnectionCoordinator;
@@ -1723,10 +1724,16 @@ export class ChatInstanceManager {
   private async stopInstance(id: string): Promise<void> {
     const instance = this.instances.get(id);
     if (instance) {
-      instance.interactionCleanup?.();
-      await instance.cleanup?.();
+      // Unregister before awaiting shutdown so a start that lands meanwhile
+      // is never deleted without its own cleanup.
       this.instances.delete(id);
+      await this.teardownInstance(instance);
     }
+  }
+
+  private async teardownInstance(instance: ManagedInstance): Promise<void> {
+    instance.interactionCleanup?.();
+    await instance.cleanup?.();
   }
 
   private async startInstance(connection: PlatformConnection): Promise<void> {
@@ -1940,6 +1947,10 @@ export class ChatInstanceManager {
         // non-critical
       }
 
+      // Replace, never orphan: an overlapping start for this id (restart or
+      // update racing a request-path hydration) may have registered first.
+      // Its interaction bridge would otherwise keep rendering every card.
+      const replaced = this.instances.get(connection.id);
       this.instances.set(connection.id, {
         connection,
         chat,
@@ -1960,6 +1971,7 @@ export class ChatInstanceManager {
       );
       this.instances.get(connection.id)!.interactionCleanup =
         interactionCleanup;
+      if (replaced) await this.teardownInstance(replaced);
 
       // Register slash commands with the platform (e.g. Telegram menu)
       this.registerPlatformCommands(connection).catch((err) => {
@@ -2121,7 +2133,20 @@ export class ChatInstanceManager {
    * webhook-transport connection with no boot warm-start and no cross-pod
    * restart fan-out.
    */
-  private async ensureConnectionRunning(id: string): Promise<boolean> {
+  private ensureConnectionRunning(id: string): Promise<boolean> {
+    // Single-flight per connection: concurrent requests (a Slack @mention
+    // delivers `message` and `app_mention` together) share one hydration
+    // instead of each starting an instance.
+    const inFlight = this.ensuring.get(id);
+    if (inFlight) return inFlight;
+    const run = this.ensureConnectionRunningOnce(id).finally(() => {
+      this.ensuring.delete(id);
+    });
+    this.ensuring.set(id, run);
+    return run;
+  }
+
+  private async ensureConnectionRunningOnce(id: string): Promise<boolean> {
     const stored = await this.resolveStored(id);
     if (!stored || stored.status === "stopped") {
       if (this.instances.has(id)) {

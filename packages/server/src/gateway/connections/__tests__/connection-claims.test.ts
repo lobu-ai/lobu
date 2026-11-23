@@ -367,6 +367,67 @@ describe("row-versioned lazy hydration (webhook transports)", () => {
     expect(b.instances.has("conn-rv")).toBe(false);
     void a;
   });
+
+  test("overlapping hydrations of one connection leave exactly one interaction bridge", async () => {
+    const { InteractionService } = await import("../../interactions.js");
+    const { manager, connectionStore } = await buildReplica();
+    await seedSlack(connectionStore, "org-hf", "agent-hf", "conn-hf");
+
+    // Real hydrate → startInstance → registerInteractionBridge path; only the
+    // network-facing adapter and the state store are stubbed. Adapter startup
+    // (Slack's auth.test) holds until a second start reaches it, so two starts
+    // overlap the way a Slack @mention's `message` and `app_mention` webhooks
+    // do; the timeout keeps a lone start moving.
+    delete manager.hydrateFromRow;
+    let waiting: Array<() => void> = [];
+    const overlap = () =>
+      new Promise<void>((resolve) => {
+        waiting.push(resolve);
+        if (waiting.length === 2) {
+          for (const release of waiting.splice(0)) release();
+          return;
+        }
+        setTimeout(() => {
+          waiting = waiting.filter((release) => release !== resolve);
+          resolve();
+        }, 250);
+      });
+    const interactions = new InteractionService();
+    manager.services.getInteractionService = () => interactions;
+    manager.services.getArtifactStore = () => undefined;
+    manager.resolveConfigForRuntime = async (_id: string, config: unknown) => config;
+    manager.ensurePlatformWebhookSecret = async () => {};
+    manager.createStateAdapter = async () => ({
+      connect: async () => {},
+      disconnect: async () => {},
+    });
+    manager.createAdapter = async () => {
+      await overlap();
+      return { name: "slack", initialize: async () => {} };
+    };
+    const bridges = () => interactions.listenerCount("suggestion:created");
+
+    // Two concurrent requests on a cold memo.
+    expect(
+      await Promise.all([
+        manager.warmConnection("conn-hf"),
+        manager.warmConnection("conn-hf"),
+      ]),
+    ).toEqual([true, true]);
+    expect(bridges()).toBe(1);
+
+    // A restart racing a request-path hydration replaces, never orphans.
+    await manager.stopInstance("conn-hf");
+    expect(bridges()).toBe(0);
+    await Promise.all([
+      manager.restartConnection("conn-hf"),
+      manager.warmConnection("conn-hf"),
+    ]);
+    expect(bridges()).toBe(1);
+
+    await manager.stopInstance("conn-hf");
+    expect(bridges()).toBe(0);
+  });
 });
 
 describe("updateConnection config rejection (parity with addConnection)", () => {
