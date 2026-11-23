@@ -56,6 +56,7 @@ import { isCloudMode } from "../../../../utils/cloud-mode";
 import { findBundledConnectorFile } from "../../../../utils/connector-catalog";
 import { resolveConnectorCodeForKey } from "../../../../utils/ensure-connector-installed";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../helpers/connection-helpers";
 import { resolveExecutionAuth } from "../../../../utils/execution-context";
 import {
 	deleteMaterializedArtifacts,
@@ -896,7 +897,7 @@ export async function handleExecute(
 	);
 	if (visibleRows.length === 0) {
 		return withFailureCode({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		}, "NOT_FOUND");
 	}
 	const resolved = await getOperationForConnection(

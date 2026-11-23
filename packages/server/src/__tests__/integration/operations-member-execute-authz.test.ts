@@ -31,6 +31,7 @@ import {
 	createTestUser,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../tools/admin/helpers/connection-helpers";
 
 const MEMBER_CONNECTOR = "demo.member.execute";
 
@@ -137,7 +138,7 @@ describe("manage_operations.execute member authorization", () => {
 				memberCtx,
 			);
 			expect(res).toMatchObject({
-				error: "Connection not found or not visible.",
+				error: OPERATION_TARGET_NOT_FOUND_ERROR,
 			});
 		});
 

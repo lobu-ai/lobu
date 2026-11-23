@@ -29,6 +29,7 @@ import { AUDIT_SEMANTIC_TYPE, MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import { canSeeMemberEmail, canSeeMemberList, redactMemberEmail, resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import { type AuthzScope, authzScopeFromToolContext } from '../authz/scope';
 import { compileConnectionRowVisibility } from '../authz/connection-visibility';
+import { hasNoVisibleConnections } from '../utils/connections';
 import { getDb, pgBigintArray, pgTextArray } from '../db/client';
 import type { EntityResolutionRule } from '@lobu/core/contracts/tools/manage-entity-schema';
 import { assessIdentityGroups, normalizedResolutionRuleKeys, readEntityResolutionRules, type ResolutionIdentity } from '../entity-resolution/policy';
@@ -723,11 +724,32 @@ function entityIdNotFoundSuggestion(entityId: number): string {
   );
 }
 
+/**
+ * First-run guidance for a caller that can see no connection at all: a fresh
+ * workspace answers every search empty, and the useful next step is a source,
+ * not a broader query. Connecting is write-tier, so a read-only caller is told
+ * who can do it instead of being handed a call that would deny.
+ */
+function firstSourceSuggestion(isFederated: boolean, callerMax?: ToolAccessLevel): string {
+  const where = isFederated ? 'in any workspace granted to this connection' : 'in this workspace';
+  const lead = `No sources are connected yet ${where}, so search can only find what was saved here directly.`;
+  if (callerMax === 'read') {
+    return `${lead} Connecting a source needs write access, which this caller does not have; ask a workspace member to connect one.`;
+  }
+  const target = isFederated ? ' in the workspace you select with `client.org(workspace)`' : '';
+  return (
+    `${lead} To bring data in, find a connector with \`search_sdk\` (for example "gmail") or \`client.catalog.listCatalog({ kinds: ["connectors"] })\`, ` +
+    `then call \`run_sdk\` → \`client.connections.connect({ connector_key })\`${target}. ` +
+    'When it returns `status: "setup_required"` or `"pending_auth"`, show the user the returned setup or connect URL and follow `next_action`; never invent a URL.'
+  );
+}
+
 function buildEmptySearchSuggestion(
   query: string | null,
   args: SearchArgs,
   coverage?: SearchCoverage,
-  callerMax?: ToolAccessLevel
+  callerMax?: ToolAccessLevel,
+  noVisibleConnections = false
 ): string {
   if (args.entity_id) return entityIdNotFoundSuggestion(args.entity_id);
 
@@ -737,7 +759,10 @@ function buildEmptySearchSuggestion(
     ? 'in the currently accessible workspaces granted to this connection'
     : 'in saved workspace memory';
 
-  const lines: string[] = [`No matches found${queryLabel} ${scopeLabel}.`];
+  const lines: string[] = noVisibleConnections
+    ? [firstSourceSuggestion(isFederated, callerMax), '']
+    : [];
+  lines.push(`No matches found${queryLabel} ${scopeLabel}.`);
 
   lines.push('');
   lines.push('**Additional steps to read relevant data:**');
@@ -1173,7 +1198,9 @@ export function mergeFederatedSearchResults(
   /** Resolution inputs for the top match, its name tie, and sameKeyRecords. */
   resolutionInputs: ReadonlyMap<number, ResolutionInput> = new Map(),
   /** Records elsewhere sharing a declared key with the top match (findSameKeyRecords). */
-  sameKeyRecords: readonly ResolutionRecord[] = []
+  sameKeyRecords: readonly ResolutionRecord[] = [],
+  /** No granted workspace holds a connection the caller can see (hasNoVisibleConnections). */
+  noVisibleConnections = false
 ): UnifiedSearchResult {
   const fulfilled = fulfilledShards(settled);
   if (fulfilled.length === 0) {
@@ -1324,7 +1351,7 @@ export function mergeFederatedSearchResults(
                 ? 'Search returned partial results; one or more granted workspaces was temporarily unavailable.'
                 : PARTIAL_RECALL_SUGGESTION
             : matches.length === 0 && !hasAnyRecall
-              ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax)
+              ? buildEmptySearchSuggestion(args.query ?? null, args, coverage, callerMax, noVisibleConnections)
               : selectedResult?.suggestion,
         ]
           .filter((line): line is string => Boolean(line))
@@ -2181,13 +2208,22 @@ async function searchImpl(
   const keyedInputs = await loadResolutionInputs(
     sameKeyRecords.map((record) => record.id).filter((id) => !resolutionInputs.has(id))
   );
+  // Probe only when every shard came back empty; any hit makes the
+  // first-source guidance moot.
+  const noVisibleConnections =
+    !fulfilledShards(settled).some(hasSearchHits) &&
+    (await hasNoVisibleConnections(
+      authzScopeFromToolContext({ ...ctx, organizationId: targets[0].id }),
+      targets.map((target) => target.id)
+    ));
   return mergeFederatedSearchResults(
     args,
     targets,
     settled,
     guidanceAccessTier(ctx, highestGrantedRole(targets)),
     new Map([...resolutionInputs, ...keyedInputs]),
-    sameKeyRecords
+    sameKeyRecords,
+    noVisibleConnections
   );
 }
 
@@ -2482,9 +2518,18 @@ async function searchWorkspaceImpl(
     logger.info(`[search] No matches found for "${query}" in existing database`);
   }
 
+  // A federated shard's suggestion is replaced by the merge, which runs its
+  // own probe across every granted workspace.
   const suggestionText = hasRecallHits
     ? 'No matching entities found, but related memory content was recalled below.'
-    : buildEmptySearchSuggestion(query, args, recall.coverage, guidanceAccessTier(ctx));
+    : buildEmptySearchSuggestion(
+        query,
+        args,
+        recall.coverage,
+        guidanceAccessTier(ctx),
+        execution.coverageScope !== 'all_granted' &&
+          (await hasNoVisibleConnections(connectionScope, [ctx.organizationId]))
+      );
 
   const result = withRecall(
     emptyResult({

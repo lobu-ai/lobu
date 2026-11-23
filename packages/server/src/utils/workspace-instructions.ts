@@ -87,6 +87,9 @@ export function directMcpInstructions(
     '',
     "Lobu provides access to persistent workspace memory. Use Lobu's tools only when they are relevant to the user's request.",
     '',
+    '### Empty workspace',
+    '- If a read shows the workspace has no saved memories and no connections, offer the user one first step: save one preference they state, or connect one source (for example Gmail). Offer it once, and save or connect only after the user agrees.',
+    '',
     '### Read tools',
     '- `search_memory` searches saved workspace memory.',
     "- `search_memory` does not search live source-backed records. When its `coverage.source_entity_types` lists entity types, look a named record up with `client.entities.list({ entity_type, search: <the record's name, not the whole question>, limit: 5 })` through `query_sdk` in that workspace (`client.org(workspace_slug)`), then verify the candidates. Local matches or an empty result do not show what the live source contains.",
@@ -113,9 +116,6 @@ export function directMcpInstructions(
     '- Use `kinds: ["automation_due"]` for due work and owned unfinished claims; read unfiltered activity for notifications. Follow each returned `next_action`. Take the task from `context.instructions` on the claim (the prompt and skills of the version the run is pinned to), never from a cached copy; only the first page of a window carries it. Process bounded source pages, and always call `automations.completeWindow`, including quiet windows with empty output. A claim with `status: "completed"` had nothing new and was already booked as a no-op: do not call completeWindow. A 409 means work changed or another client claimed it. Refresh activity in both cases.',
     '- The Automation schedule and timezone own cadence. Polling only discovers work: it does not acknowledge notifications, renew leases, or send messages. Refresh claims with `claimNextWindow` before their lease expires. Keep the same authenticated agent/client identity when resuming.',
     '- MCP does not wake a sleeping client. Arrange wakeups in your own scheduler; use bounded calls, not a sleep loop inside `run_sdk`. A paired device daemon token only serves its existing worker poll and is not permission to use workspace MCP tools.',
-    '',
-    '### Empty workspace',
-    '- If a read shows the workspace has no saved memories and no connections, offer the user one first step: save one preference they state, or connect one source (for example Gmail). Offer it once, and save or connect only after the user agrees.',
   ].join('\n');
 }
 

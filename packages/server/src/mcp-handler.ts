@@ -90,6 +90,7 @@ import { resolvePublicOrigin } from './utils/public-origin';
 import { ToolUserError } from './utils/errors';
 import { buildWorkspaceInstructions, directMcpInstructions } from './utils/workspace-instructions';
 import { listLiveGrantedMemberWorkspaces } from './auth/oauth/workspace-grants';
+import { hasNoVisibleConnections } from './utils/connections';
 import logger from './utils/logger';
 import { getClientIP } from './utils/rate-limiter';
 import { organizationIdLiveSql } from './workspace/deletion-state';
@@ -1058,6 +1059,13 @@ async function resolveMembershipRole(
   return rows.length > 0 ? ((rows[0].role as string) ?? null) : null;
 }
 
+// Session-level first-run guidance. It leads the instructions because some
+// hosts read only the first few thousand characters.
+const FIRST_RUN_INSTRUCTIONS = [
+  '## Lobu first run',
+  '- No workspace this connection can reach has a connected source yet. When the user asks what Lobu can do, or asks about data a source would hold, offer once to connect one (for example Gmail): find it with `search_sdk`, call `client.connections.connect({ connector_key })` through `run_sdk` after the user agrees, then show the returned setup or connect URL and follow its `next_action`. Unless it is code-only, a scheduled Automation runs by itself only with a managed agent or a paired device; without one its windows wait for a connected MCP client to claim them through `operations.listActivity`, so do not create one expecting it to fire on its own.',
+].join('\n');
+
 async function buildSessionInstructions(authCtx: AuthContext): Promise<string | undefined> {
   // Only verified worker-originated requests carry sourceContext. A client may
   // request an agent binding in initialize metadata, but that must not grant it
@@ -1069,24 +1077,38 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   const base = authCtx.organizationId
     ? ((await buildWorkspaceInstructions(authCtx.organizationId, { audience })) ?? '')
     : directMcpInstructions();
-  if (
-    authCtx.tokenType !== 'oauth' ||
-    !authCtx.userId ||
-    authCtx.grantedOrganizationIds === null
-  ) {
-    return base || undefined;
-  }
-  const grantedOrganizationIds =
-    authCtx.agentId || authCtx.actingAutomationId
-      ? authCtx.organizationId
+  const workspaces =
+    authCtx.tokenType === 'oauth' && authCtx.userId && authCtx.grantedOrganizationIds !== null
+      ? await listLiveGrantedMemberWorkspaces({
+          userId: authCtx.userId,
+          grantedOrganizationIds:
+            authCtx.agentId || authCtx.actingAutomationId
+              ? authCtx.organizationId
+                ? [authCtx.organizationId]
+                : []
+              : authCtx.grantedOrganizationIds,
+        })
+      : [];
+  const reachableOrganizationIds =
+    workspaces.length > 0
+      ? workspaces.map((workspace) => workspace.id)
+      : authCtx.organizationId
         ? [authCtx.organizationId]
-        : []
-      : authCtx.grantedOrganizationIds;
-  const workspaces = await listLiveGrantedMemberWorkspaces({
-    userId: authCtx.userId,
-    grantedOrganizationIds,
-  });
-  if (workspaces.length === 0) return base || undefined;
+        : [];
+  const [firstOrganizationId] = reachableOrganizationIds;
+  const firstRun =
+    audience === 'direct-mcp' &&
+    authCtx.userId &&
+    firstOrganizationId &&
+    (await hasNoVisibleConnections(
+      { organizationId: firstOrganizationId, principal: authCtx.userId },
+      reachableOrganizationIds
+    ))
+      ? FIRST_RUN_INSTRUCTIONS
+      : null;
+  if (workspaces.length === 0) {
+    return [firstRun, base].filter(Boolean).join('\n\n') || undefined;
+  }
   const labels = workspaces.map((workspace) => {
     const qualifiers = [
       workspace.personal ? 'personal' : null,
@@ -1100,7 +1122,7 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
     (authCtx.directSearchFederation
       ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace). Pass org_slug to save_memory and query_sql, and organization to get_approval. Never infer a target from entity IDs or a previous call.'
       : 'This connection operates in its explicitly bound workspace.');
-  return [base, grantLine].filter(Boolean).join('\n\n');
+  return [firstRun, base, grantLine].filter(Boolean).join('\n\n');
 }
 
 /** Agent/Automation policy is workspace-bound; it must never inherit a user's
