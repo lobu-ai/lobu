@@ -16,8 +16,10 @@ import {
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
+  addUserToOrganization,
   createTestConnection,
   createTestConnectorDefinition,
+  createTestUser,
   seedOwnerContext,
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -567,6 +569,33 @@ describe('manifest-backed device pin admission', () => {
       status: 'failed',
       action_output: { device_grant: { kind: 'site_access', subject: 'https://sub.example.test' } },
     });
+
+    // The connection moves to another person's device while an action is in
+    // flight. The device that ran it is the one missing the grant, so its
+    // owner hears about it, not the new pin's.
+    const otherOwner = await createTestUser({ email: `grant-rebind-${randomUUID()}@test.example.com` });
+    await addUserToOrganization(otherOwner.id, fixture.org.id, 'member');
+    const otherDevice = await seedDevice(otherOwner.id, fixture.org.id, fixture.selected);
+    const rebound = await queueOperation(fixture);
+    expect((await pollDevice(fixture.device, fixture.selected)).run_id).toBe(rebound.runId);
+    await getTestDb()`UPDATE connections SET device_worker_id = ${otherDevice.id} WHERE id = ${fixture.connection.id}`;
+    const completion = await post('/api/workers/complete-action', {
+      body: {
+        run_id: rebound.runId,
+        worker_id: fixture.device.workerId,
+        status: 'failed',
+        error_code: 'PRECONDITION_FAILED',
+        action_output: { device_grant: { kind: 'site_access', subject: 'https://rebound.example.test' } },
+      },
+    });
+    expect(completion.status).toBe(200);
+    expect((await grantNotifications()).filter((n) => n.title === 'Allow Lobu on rebound.example.test')).toEqual([
+      {
+        user_id: fixture.user.id,
+        title: 'Allow Lobu on rebound.example.test',
+        key: expect.stringContaining(`device_grant:${fixture.device.id}:site_access:https://rebound.example.test:`),
+      },
+    ]);
   });
 
   it('admits a compatible operation only to the exact pinned device', async () => {

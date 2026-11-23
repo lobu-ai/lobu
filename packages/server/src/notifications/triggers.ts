@@ -766,8 +766,9 @@ export async function notifyDeviceGrantNeeded(params: {
 	const [device] = await sql`
 		SELECT dw.id, dw.user_id
 		FROM runs r
-		JOIN connections con ON con.id = r.connection_id
-		JOIN device_workers dw ON dw.id = con.device_worker_id
+		-- The device that claimed the run is the one missing the grant; the
+		-- connection's pin can move to another device while it runs.
+		JOIN device_workers dw ON dw.id = r.executed_by_device_worker_id
 		JOIN "member" m ON m."organizationId" = r.organization_id AND m."userId" = dw.user_id
 		WHERE r.id = ${params.runId} AND r.organization_id = ${params.orgId}
 	`;
