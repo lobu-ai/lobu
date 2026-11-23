@@ -9,7 +9,6 @@ import {
 import {
 	runtimeConnectionIdToSlug,
 	runtimeConnectionPredicate,
-	slugToRuntimeConnectionId,
 } from "../../lobu/stores/connections-projection.js";
 import { requireOrgId } from "../../lobu/stores/org-context.js";
 import { getNextNumericId } from "../../tools/admin/helpers/db-helpers.js";
@@ -47,44 +46,31 @@ export function setChatChannelLabelResolver(
 }
 
 /**
- * Best-effort, bounded label for a new chat link's name. No resolver on this
+ * Best-effort, bounded label for a new chat link's channel. No resolver on this
  * process, no adapter lookup, a DM, a provider error or a slow provider all
  * yield null, so the link is named after the channel id and never fails
- * because of its name.
+ * because of its name. Call it BEFORE opening a transaction: it makes a
+ * provider call, and a transaction held across it pins a pool connection.
  */
-async function resolveChannelLabel(
-	platform: string,
-	connectionId: number,
+export async function resolveChatChannelLabel(
+	runtimeConnectionId: string,
 	channelId: string,
 ): Promise<string | null> {
 	const resolver = channelLabelResolver;
 	if (!resolver) return null;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		// Never on a caller's transaction: a failed statement there would abort
-		// the link write even though this lookup swallows the error.
-		const [row] = await getDb()<{ slug: string; credential_mode: string | null }>`
-			SELECT slug, credential_mode
-			FROM connections
-			WHERE id = ${connectionId}
-			  AND connector_key = ${platform}
-			  AND deleted_at IS NULL
-			LIMIT 1
-		`;
-		if (!row) return null;
-		// A connector-transport row (credential_mode NULL) runs under its numeric id.
-		const runtimeId =
-			row.credential_mode == null
-				? String(connectionId)
-				: slugToRuntimeConnectionId(row.slug);
 		const timeout = new Promise<null>((resolve) => {
 			timer = setTimeout(() => resolve(null), CHANNEL_LABEL_TIMEOUT_MS);
 		});
-		const label = await Promise.race([resolver(runtimeId, channelId), timeout]);
+		const label = await Promise.race([
+			resolver(runtimeConnectionId, channelId),
+			timeout,
+		]);
 		return label?.trim() || null;
 	} catch (err) {
 		logger.debug(
-			{ platform, connectionId, channelId, error: String(err) },
+			{ runtimeConnectionId, channelId, error: String(err) },
 			"chat-link channel label lookup failed (using id)",
 		);
 		return null;
@@ -464,6 +450,7 @@ export class AutomationSubscriptionService {
 		`) as Array<{ id: number | string }>;
 		const numericId = rows[0] ? Number(rows[0].id) : NaN;
 		if (!Number.isInteger(numericId) || numericId < 1) return false;
+		const channelLabel = await resolveChatChannelLabel(connectionId, channelId);
 		// create-only: never overwrite an explicit link that a concurrent
 		// `/lobu link` may have committed — the check happens under the advisory
 		// lock inside createChatAutomation, so it is race-safe across replicas.
@@ -471,6 +458,7 @@ export class AutomationSubscriptionService {
 			organizationId,
 			connectionId: numericId,
 			createOnly: true,
+			channelLabel,
 		});
 		return true;
 	}
@@ -497,6 +485,12 @@ export class AutomationSubscriptionService {
 			 * replicas. Explicit link/relink flows omit it and keep relinking.
 			 */
 			createOnly?: boolean;
+			/**
+			 * Human label for the channel (e.g. `#general`), resolved by the caller
+			 * with resolveChatChannelLabel before any transaction opens. Names a
+			 * newly created link and its feed; a relink never renames either.
+			 */
+			channelLabel?: string | null;
 		},
 	): Promise<boolean> {
 		if (!Number.isInteger(options.connectionId) || options.connectionId < 1) {
@@ -514,14 +508,8 @@ export class AutomationSubscriptionService {
 			channelId,
 			teamId,
 		});
-		// Resolved before the write so no provider call runs under the link's
-		// advisory lock. Used only when this creates the link: a relink keeps
-		// whatever name the Automation has, which the user may have changed.
-		const label = await resolveChannelLabel(
-			platform,
-			options.connectionId,
-			channelId,
-		);
+		// A relink keeps whatever name the Automation has; the user may have changed it.
+		const label = options.channelLabel?.trim() || null;
 		const name = `Messages in ${label ?? channelId}`;
 
 		const write = async (tx: DbClient): Promise<boolean> => {
@@ -664,6 +652,8 @@ export class AutomationSubscriptionService {
 			connectionId: String(options.connectionId),
 			organizationId,
 			channelKey: `${platform}:${nativeChannelId(platform, channelId)}`,
+			// Only a newly created feed takes the label; an existing one keeps its name.
+			displayName: label,
 			sql,
 		});
 		logger.info(`Created chat Automation: ${platform}/${channelId} → ${agentId}`);

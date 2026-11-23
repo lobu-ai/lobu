@@ -16,6 +16,7 @@ import {
   linkChatIdentityInGraph,
 } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
+import { setChatChannelLabelResolver } from "../../gateway/channels/automation-subscription-service.js";
 import { registerBuiltInCommands } from "../../gateway/commands/built-in-commands.js";
 import type { Env } from "../../index";
 import { resolveChatUserIdentity } from "../../lobu/stores/chat-identity.js";
@@ -520,16 +521,30 @@ describe("Slack Preview claims + channel Automations", () => {
   });
 
   test("re-linking a channel rebinds it to the new agent (last link wins)", async () => {
-    await consumeSlack({
-      code: await createClaim(AGENT_ID),
-      teamId: TEAM_ID,
-      channelId: "Csame",
+    const lookups: Array<[string, string]> = [];
+    const labels = ["#same", "#renamed-upstream"];
+    setChatChannelLabelResolver(async (runtimeConnectionId, channelId) => {
+      lookups.push([runtimeConnectionId, channelId]);
+      // The claim transaction holds its row FOR UPDATE, so this throws (and the
+      // link falls back to the id name) if the provider lookup runs inside it.
+      await getDb()`SELECT id FROM oauth_states FOR UPDATE NOWAIT`;
+      return labels.shift() ?? null;
     });
-    const rebound = await consumeSlack({
-      code: await createClaim(OTHER_AGENT_ID),
-      teamId: TEAM_ID,
-      channelId: "Csame",
-    });
+    let rebound: Awaited<ReturnType<typeof consumeSlack>>;
+    try {
+      await consumeSlack({
+        code: await createClaim(AGENT_ID),
+        teamId: TEAM_ID,
+        channelId: "Csame",
+      });
+      rebound = await consumeSlack({
+        code: await createClaim(OTHER_AGENT_ID),
+        teamId: TEAM_ID,
+        channelId: "Csame",
+      });
+    } finally {
+      setChatChannelLabelResolver(null);
+    }
     expect(rebound).toMatchObject({ status: "bound", agentId: OTHER_AGENT_ID });
 
     const rows = await listTestAutomationSubscriptions({
@@ -539,6 +554,17 @@ describe("Slack Preview claims + channel Automations", () => {
     });
     expect(rows).toHaveLength(1);
     expect((rows[0] as { agent_id: string }).agent_id).toBe(OTHER_AGENT_ID);
+
+    // The first link is named after the channel; the relink keeps that name.
+    const [automation] = await getDb()<{ name: string }>`
+      SELECT name FROM automations
+      WHERE id = ${(rows[0] as { automation_id: number }).automation_id}
+    `;
+    expect(automation?.name).toBe("Messages in #same");
+    expect(lookups).toEqual([
+      [CLAIM_SLACK_CONNECTION, "slack:Csame"],
+      [CLAIM_SLACK_CONNECTION, "slack:Csame"],
+    ]);
   });
 
   test("expired or unknown code → not_found, nothing bound", async () => {
