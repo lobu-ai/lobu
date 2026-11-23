@@ -251,6 +251,18 @@ describe.skipIf(!WEB_AVAILABLE)('public page contract', () => {
     expect(sitemapXml).not.toContain('private-contract-org');
   });
 
+  it('sitemap omits public workspaces not named in LOBU_DISCOVERABLE_ORGS', async () => {
+    process.env.LOBU_DISCOVERABLE_ORGS = 'some-other-workspace';
+    try {
+      const sitemap = await get('/sitemap.xml', { env: { PUBLIC_GATEWAY_URL: publicGatewayUrl } });
+      const sitemapXml = await sitemap.text();
+      expect(sitemap.status).toBe(200);
+      expect(sitemapXml).not.toContain('public-contract-org');
+    } finally {
+      delete process.env.LOBU_DISCOVERABLE_ORGS;
+    }
+  });
+
   it('sitemap excludes $-prefixed system entity types and their entities', async () => {
     const sitemap = await get('/sitemap.xml', { env: { PUBLIC_GATEWAY_URL: publicGatewayUrl } });
     const sitemapXml = await sitemap.text();

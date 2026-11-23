@@ -38,6 +38,10 @@ import type {
   ResolvedOwner,
   WorkspaceProvider,
 } from './types';
+import {
+  listedPublicOrganizationSql,
+  listedPublicOrganizationsParam,
+} from './discoverable-workspaces';
 import { listManagedAuthConnectorOffers } from './managed-auth-discovery';
 import { organizationIdLiveSql, organizationLiveSql } from './deletion-state';
 import { getLiveOrganizationSlug } from './organization-slug';
@@ -850,19 +854,20 @@ export class MultiTenantProvider implements WorkspaceProvider {
     let organizations: OrgInfo[];
 
     if (!userId) {
-      const params: string[] = [];
+      const params: (string | null)[] = [listedPublicOrganizationsParam()];
       const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
       organizations = (await sql.unsafe(
         `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at,
                 false as is_member, false as is_personal, o.visibility
          FROM "organization" o
-         WHERE o.visibility = 'public' AND ${organizationLiveSql('o')} ${searchClause}
+         WHERE o.visibility = 'public' AND ${listedPublicOrganizationSql('o', '$1')}
+           AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params
       )) as unknown as OrgInfo[];
     } else {
-      const params: string[] = [userId];
+      const params: (string | null)[] = [userId, listedPublicOrganizationsParam()];
       const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
       organizations = (await sql.unsafe(
@@ -872,7 +877,8 @@ export class MultiTenantProvider implements WorkspaceProvider {
                 o.visibility
          FROM "organization" o
          LEFT JOIN "member" m ON o.id = m."organizationId" AND m."userId" = $1
-         WHERE (m."userId" IS NOT NULL OR o.visibility = 'public')
+         WHERE (m."userId" IS NOT NULL
+                OR (o.visibility = 'public' AND ${listedPublicOrganizationSql('o', '$2')}))
            AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params
