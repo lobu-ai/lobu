@@ -54,7 +54,7 @@ import { eventArtifactBinding } from "../gateway/files/artifact-store";
 import { emit } from "../events/emitter";
 import { parseJsonBody } from "../gateway/routes/shared/helpers";
 import type { Env } from "../index";
-import { notifyBrowserAuthExpired } from "../notifications/triggers";
+import { notifyBrowserAuthExpired, notifyDeviceGrantNeeded, readDeviceGrant } from "../notifications/triggers";
 import { supersedeActionEvent } from "../tools/admin/approval-events";
 import {
 	type AuthProfileKind,
@@ -2761,6 +2761,20 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 				errorCode,
 				parentRunId: finalized.parent_run_id,
 			});
+		}
+		// The action waited for a grant only the device's owner can make.
+		const deviceGrant = finalized.status === "failed" ? readDeviceGrant(actionOutput) : null;
+		if (deviceGrant) {
+			try {
+				await notifyDeviceGrantNeeded({
+					orgId: finalized.organization_id,
+					runId: finalized.id,
+					grant: deviceGrant,
+				});
+			} catch (error) {
+				// The run is already final; a lost reminder must not fail its completion.
+				logger.warn({ run_id: finalized.id, error: errorMessage(error) }, "[completeActionRun] device grant notification failed");
+			}
 		}
 
 		// The transaction committed; from here these artifacts are durable run output.
