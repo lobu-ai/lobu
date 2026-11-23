@@ -383,6 +383,17 @@ describe("weekly finances through the native lifecycle", () => {
     const notifications = await h.notifications();
     expect(notifications).toHaveLength(1);
     expect(notifications[0].title).toBe("Net worth updated");
+    // Personal finances reach the Automation's owner only: not the other admins,
+    // and not any chat channel bound to the workspace's agents.
+    const [delivery] =
+      await h.sql`SELECT e.metadata->'delivery_request'->'targets' AS targets,
+      to_jsonb(array_agg(t.user_id)) AS users
+      FROM events e JOIN notification_targets t ON t.event_id = e.id
+      WHERE e.id = ${notifications[0].id} GROUP BY e.id`;
+    expect(delivery).toEqual({
+      targets: [],
+      users: [h.workspace.users.owner.id],
+    });
     const quoteRuns =
       await h.sql`SELECT status, parent_run_id FROM runs WHERE automation_id = ${h.automationId} AND action_key = 'quote'`;
     expect(quoteRuns).toHaveLength(1);

@@ -458,6 +458,7 @@ describe("weekly net-worth script", () => {
       input: { symbols: Array<Record<string, unknown>> };
     }> = [];
     const saved: Array<Record<string, unknown>> = [];
+    const sent: Array<Record<string, unknown>> = [];
     const client = {
       query: async (sql: string) => {
         queries.push(sql);
@@ -470,6 +471,9 @@ describe("weekly net-worth script", () => {
         }
         if (sql.includes("net-worth-component/v1")) return [];
         if (sql.includes("net-worth-snapshot/v4")) return [];
+        if (sql.includes("FROM automations")) {
+          return [{ created_by: "user-owner" }];
+        }
         throw new Error(`Unexpected query: ${sql}`);
       },
       connections: {
@@ -517,14 +521,17 @@ describe("weekly net-worth script", () => {
         },
       },
       notifications: {
-        send: async () => ({ notified_count: 1, event_id: 502, url: null }),
+        send: async (input: Record<string, unknown>) => {
+          sent.push(input);
+          return { notified_count: 1, event_id: 502, url: null };
+        },
       },
       log: () => undefined,
     } as unknown as ReactionClient;
 
     await runNetWorthSnapshot(ctx, client);
 
-    expect(queries).toHaveLength(5);
+    expect(queries).toHaveLength(6);
     expect(queries[0]).toContain("JOIN connections");
     expect(queries[0]).toContain("connections.status = 'active'");
     // Row state is filtered after the write-time dedupe, never in SQL — a
@@ -557,6 +564,13 @@ describe("weekly net-worth script", () => {
         week: "2026-W33",
         net_worth_gbp: 1_400,
       },
+    });
+    // A personal digest goes to the Automation's owner only: explicit
+    // recipients keep it out of every chat channel bound to the workspace.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      title: "Net worth updated",
+      recipients: ["user-owner"],
     });
     // An action idempotency key binds to the parent run that first used it, so
     // a retry of this run must reuse its key while the next run in the same
