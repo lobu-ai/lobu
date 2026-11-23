@@ -663,12 +663,30 @@ export class MessageHandlerBridge {
     // An admitted message answers only through its admitted Automations: no
     // owner-agent fallback, unrouted commands, or unlinked notice.
     if (admitted && replyAutomations.length === 0) return;
-    const resolved = await resolveChatRoute({
-      plan: automationPlan,
-      platform,
-      channelId,
-      connection: this.connection,
-    });
+    // Linked channel but trigger filters rejected this message (e.g.
+    // mention_only on a non-mention). The planner is the authority for
+    // activation, so neither the connection's owning agent nor the "unlinked"
+    // notice may answer it; otherwise every ordinary message in a mention-only
+    // channel gets a reply.
+    const linkedButFiltered =
+      replyAutomations.length === 0 &&
+      backgroundAutomations.length === 0 &&
+      !!automationSubscriptionService &&
+      !!this.connection.organizationId &&
+      (await automationSubscriptionService.channelHasMessageSubscription(
+        this.connection.id,
+        channelId,
+        this.connection.organizationId,
+        { crossOrganization: isPreview, teamId }
+      ));
+    const resolved = linkedButFiltered
+      ? null
+      : await resolveChatRoute({
+          plan: automationPlan,
+          platform,
+          channelId,
+          connection: this.connection,
+        });
     if (!resolved) {
       // App-level commands still work when no Automation matches. Keep this
       // early path to commands whose complete implementation lives in the
@@ -682,20 +700,7 @@ export class MessageHandlerBridge {
         return;
       }
 
-      // Linked channel but trigger filters rejected this message (e.g.
-      // mention_only on a non-mention). The planner is the authority for
-      // activation; do not fall through to the "unlinked" notice or the notice
-      // would spam every ordinary message in a mention-only linked channel.
-      if (
-        automationSubscriptionService &&
-        this.connection.organizationId &&
-        (await automationSubscriptionService.channelHasMessageSubscription(
-          this.connection.id,
-          channelId,
-          this.connection.organizationId,
-          { crossOrganization: isPreview, teamId }
-        ))
-      ) {
+      if (linkedButFiltered) {
         logger.info(
           { platform, channelId, teamId, connectionId: this.connection.id },
           "Channel has Automation subscription(s) but none matched this message — dropping"
