@@ -401,8 +401,10 @@ returned to the caller when the rule holds or blocks an action.
 
 App and Automation collections hold guardrails. Their one grant is Always allow:
 an `auto` rule with a `principal_id`, one `connection_id` and one
-`operation_key`. It lifts Ask for that caller only, including workspace Ask
-rules, and never lifts Block, Check, Log or an allowed-actions list. A `local:`
+`operation_key`. It lifts Ask for that caller, including workspace Ask rules,
+and never lifts Block, Check, Log or an allowed-actions list. An agent's Always
+allow also lifts Ask for the Automations it owns, except an Ask rule set for that
+Automation. A `local:`
 app key cannot be allowed; add a workspace rule instead.
 
 Execute results carry `policy: { reason, rules, principal }`. `principal` names

@@ -827,7 +827,10 @@ Two things to know before relying on it:
 `save_content` and `manage_entity` resolve credit through
 `resolveAutomationAttribution`, which prefers that stamped pair. Without it, a
 declared `automation_source` is accepted only when the Automation belongs to the
-organization and owns the declared Automation run. Resolve attribution even
+organization and owns the declared Automation run. Connector rules are
+stricter: `manage_operations` execute treats the declared Automation as the
+caller only while the calling session holds that run's unexpired window lease
+from `claim_next_window`; otherwise the caller's own rules apply. Resolve attribution even
 when no source argument was supplied: reactions normally declare nothing, so
 gating on that argument omits their effect records and subject attribution.
 
