@@ -9,7 +9,8 @@ import { operationCardLabel, supersedeActionEvent } from '../tools/admin/approva
 import { connectorApprovalMetadata } from '../operations/operation-run-card';
 import { type ActionApprovalNotificationContext, notifyActionApprovalNeeded } from '../notifications/triggers';
 import { insertEvent } from '../utils/insert-event';
-import { type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
+import { allowlistRefusal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
+import { resolvePolicyPrincipal } from './policy-principal';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
@@ -22,6 +23,11 @@ export const CONNECTOR_PARENT_RUN_METADATA_KEY = 'connector_parent_run_id';
  * Automation, so every recheck still applies the token's own allowlist.
  */
 export const POLICY_PAT_PRINCIPAL_METADATA_KEY = 'policy_pat_principal_id';
+/**
+ * Only operation admission writes this: a person in the web app made the
+ * request (`isPersonInWebApp`), so every recheck keeps connector rules off it.
+ */
+export const POLICY_PERSON_METADATA_KEY = 'policy_person';
 
 /** The admitting PAT principal recorded on a run; legacy rows have none. */
 export function storedPolicyPatPrincipal(metadata: Record<string, unknown> | null | undefined): string | null {
@@ -74,7 +80,8 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   }
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql,
-    appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep });
+    appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep,
+    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true });
 }
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
@@ -191,7 +198,9 @@ export async function applyRunConnectorPolicyAtClaim(params: {
 
   const blocked = policy.effect === 'deny';
   const message = blocked
-    ? `Current policy blocks this operation${connectorPolicyNoteSuffix(policy) || '.'}`
+    ? policy.reason === 'allowlist' && run.action_key
+      ? allowlistRefusal(run.action_key)
+      : `Current policy blocks this operation${connectorPolicyNoteSuffix(policy) || '.'}`
     : `Current policy requires human approval before this operation can run${connectorPolicyNoteSuffix(policy) || '.'}`;
   const [changed] = await sql`
     UPDATE runs SET approval_status = ${blocked ? 'rejected' : 'pending'},
@@ -215,7 +224,8 @@ export async function applyRunConnectorPolicyAtClaim(params: {
   const status = blocked ? 'rejected' : 'pending_approval';
   const title = (operation: string) => `${operation} — ${blocked ? 'blocked by policy' : 'pending approval'}`;
   const metadata = {
-    policy: explainConnectorPolicy(policy),
+    policy: explainConnectorPolicy(policy, await resolvePolicyPrincipal(sql, organizationId,
+      { kind: run.policy_principal_kind, id: run.policy_principal_id })),
     ...(resolved ? connectorApprovalMetadata(connectionName, resolved.operation, run.action_input ?? {}) : {}),
   };
   let cardId = await supersedeActionEvent(runId, organizationId, status, title, message, metadata, null, sql);

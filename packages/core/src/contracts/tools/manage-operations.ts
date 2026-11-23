@@ -455,12 +455,31 @@ export const OperationPolicyExplanationSchema = Type.Object({
     Type.Literal("unresolved_principal"),
     Type.Literal("parent_approval"),
     Type.Literal("unavailable_operation"),
+    /** The caller's allowed actions list, not a workspace rule, decided it. */
+    Type.Literal("allowlist"),
   ]),
   rules: Type.Array(
     Type.Object({
       id: Type.Integer(),
       kind: Type.Union([Type.Literal("grant"), Type.Literal("guardrail")]),
       note: Type.Optional(Type.String()),
+    })
+  ),
+  /**
+   * The caller the decision was made for: `runs.policy_principal_kind/id`
+   * (null id for a person) and its name at decision time. Cards written
+   * before it was recorded have none.
+   */
+  principal: Type.Optional(
+    Type.Object({
+      kind: Type.Union([
+        Type.Literal("user"),
+        Type.Literal("agent"),
+        Type.Literal("automation"),
+        Type.Literal("app"),
+      ]),
+      id: Type.Union([Type.String(), Type.Null()]),
+      label: Type.Union([Type.String(), Type.Null()]),
     })
   ),
 });

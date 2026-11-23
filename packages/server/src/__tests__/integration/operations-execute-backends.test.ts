@@ -1,4 +1,7 @@
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
+import { resolveRunConnectorPolicy } from "../../authz/operation-run-policy";
+import { connectionOperationsExecutor } from "../../gateway/connections/platforms/connector-chat-platform";
+import type { PlatformConnection } from "../../gateway/connections/types";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
 import { fileInputSchema } from "@lobu/connector-sdk";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
@@ -1104,10 +1107,24 @@ describe("operations.execute backend lifecycle", () => {
 				action: "execute", connection_id: localConnectionId, operation_key: "echo",
 				input: { value: "guardrail-blocked" },
 			}, {} as Env, ctx);
+			const requester = { kind: "user", id: null, label: null };
 			expect(blocked).toEqual({
 				error: `Policy blocks 'echo' for this principal: ${note}`,
-				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] },
+				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }], principal: requester },
 			});
+			// A person in the web app is not stopped by a rule, and the run records
+			// it so every later recheck agrees.
+			const personRun = await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "echo", input: { value: "person" },
+			}, {} as Env, { ...ctx, tokenType: "session" } as ToolContext) as { status: string; run_id: number };
+			expect(personRun.status).toBe("completed");
+			const [personRow] = await sql`SELECT run_metadata->'policy_person' AS person FROM runs WHERE id = ${personRun.run_id}`;
+			expect(personRow.person).toBe(true);
+			expect(await resolveRunConnectorPolicy({ organizationId: orgId, runId: personRun.run_id, sql })).toMatchObject({ effect: "auto" });
+			// A connection's chat send acts for its owner but has no web session, so the rule still applies.
+			const chatSend = connectionOperationsExecutor({ id: String(localConnectionId), organizationId: orgId, createdBy: userId } as PlatformConnection);
+			expect(await chatSend({ operationKey: "echo", input: { value: "chat-send" }, idempotencyKey: "operation-backend-test:chat-blocked" }))
+				.toMatchObject({ status: "failed", error: expect.stringContaining("Policy blocks 'echo'") });
 
 			await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", connectorKey: LOCAL, kind: "guardrail", note,
@@ -1117,7 +1134,7 @@ describe("operations.execute backend lifecycle", () => {
 				action: "execute", connection_id: localConnectionId, operation_key: "echo",
 				input: { value: "guardrail-held" }, idempotency_key: "operation-backend-test:guardrail-held",
 			}, {} as Env, ctx) as { status: string; run_id: number; message: string; policy: unknown };
-			const policy = { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] };
+			const policy = { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }], principal: requester };
 			expect(held).toMatchObject({ status: "pending_approval", policy });
 			expect(held.message).toContain(note);
 			const [card] = await sql`
@@ -1130,6 +1147,10 @@ describe("operations.execute backend lifecycle", () => {
 				input: { value: "guardrail-held" }, idempotency_key: "operation-backend-test:guardrail-held",
 			}, {} as Env, ctx);
 			expect(replay).toMatchObject({ status: "pending_approval", run_id: held.run_id, policy });
+			expect(await chatSend({ operationKey: "echo", input: { value: "chat-send" }, idempotencyKey: "operation-backend-test:chat-held" }))
+				.toMatchObject({ status: "pending_approval" });
+			// The person's completed run still reads as theirs under the stricter rule.
+			expect(await resolveRunConnectorPolicy({ organizationId: orgId, runId: personRun.run_id, sql })).toMatchObject({ effect: "auto" });
 
 			// The approver edits the input; the policy, guardrails included, is
 			// evaluated again before dispatch, and a guardrail that now blocks wins.
@@ -1142,7 +1163,7 @@ describe("operations.execute backend lifecycle", () => {
 			}, {} as Env, ctx);
 			expect(approved).toEqual({
 				error: `Policy now blocks 'echo' for the requesting principal: ${note}. The approval was cancelled.`,
-				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }] },
+				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }], principal: requester },
 			});
 			const [run] = await sql`SELECT status, approval_status FROM runs WHERE id = ${held.run_id}`;
 			expect(run).toMatchObject({ status: "cancelled", approval_status: "rejected" });

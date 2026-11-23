@@ -430,9 +430,10 @@ describe("caller action allowlists", () => {
       key, name: "Caller allowlist fixture", organization_id: org.id, auth_schema: { methods: [{ type: "none" }] },
     });
     const sql = getTestDb();
-    const actions = Object.fromEntries(["ask", "check", "log", "restricted", "outside"].map(name => [
-      name, { name, kind: "write" },
-    ]));
+    const actions = {
+      ...Object.fromEntries(["ask", "check", "log", "restricted", "outside"].map(name => [name, { name, kind: "write" }])),
+      lookup: { name: "lookup", kind: "read" },
+    };
     await sql`UPDATE connector_definitions SET supports_execute = true, actions_schema = ${sql.json(actions)}
       WHERE organization_id = ${org.id} AND key = ${key}`;
     await sql`UPDATE connector_versions SET compiled_code = ${`
@@ -469,12 +470,18 @@ describe("caller action allowlists", () => {
     const [ledger] = await sql`SELECT metadata FROM events WHERE run_id = ${logged.run_id}
       AND organization_id = ${org.id} AND semantic_type = 'operation' AND superseded_by IS NULL`;
     expect(ledger?.metadata).toMatchObject({ policy: { effect: "log" } });
-    for (const name of ["outside", "restricted"]) {
-      const response = await execute(name);
-      expect(await response.json(), name).toMatchObject({
-        error: expect.stringContaining(`Policy blocks '${name}'`),
-      });
-    }
+    // The token's own list refuses an unlisted write and says so; a workspace rule still refuses a listed one.
+    const caller = { kind: "app", id: `pat:${pat.id}`, label: "Test PAT" };
+    expect(await (await execute("outside")).json()).toMatchObject({
+      error: "'outside' isn't on this caller's allowed actions list.",
+      policy: { reason: "allowlist", rules: [], principal: caller },
+    });
+    expect(await (await execute("restricted")).json()).toMatchObject({
+      error: expect.stringContaining("Policy blocks 'restricted'"),
+      policy: { reason: "guardrail", principal: caller },
+    });
+    // The list limits what the token may change, so an unlisted read still runs.
+    expect(await (await execute("lookup")).json()).toMatchObject({ status: "completed", output: { fixture: true } });
     // Binding the PAT's MCP session to an unrestricted agent keeps the PAT's allowlist.
     const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
     const bound = { token: pat.token, orgSlug: org.slug, agentId: agent.agentId };
@@ -497,7 +504,7 @@ describe("caller action allowlists", () => {
       run_id: boundCheck.return_value.run_id, statement: "Inspected the inputs",
     })})`);
     expect(boundConfirm, JSON.stringify(boundConfirm)).toMatchObject({ success: false, error: { code: "PERMISSION" } });
-    expect(JSON.stringify(boundConfirm.error)).toContain("Policy now blocks");
+    expect(JSON.stringify(boundConfirm.error)).toContain("'check' isn't on this caller's allowed actions list.");
     const [boundRun] = await sql`SELECT approval_status, status FROM runs WHERE id = ${boundCheck.return_value.run_id}`;
     expect(boundRun).toMatchObject({ approval_status: "rejected", status: "cancelled" });
     expect(await boundExecute("log")).toMatchObject({ success: true });
@@ -505,7 +512,7 @@ describe("caller action allowlists", () => {
     const confirmation = await request("POST", operationPath, {
       action: "confirm", run_id: check.run_id, statement: "Inspected the inputs",
     }, pat.token);
-    expect(await confirmation.json()).toMatchObject({ error: expect.stringContaining("Policy now blocks") });
+    expect(await confirmation.json()).toMatchObject({ error: "'check' isn't on this caller's allowed actions list." });
   });
 });
 

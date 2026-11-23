@@ -10,6 +10,7 @@ import {
 	readGrantedScopesFromAuthData,
 	readRequestedScopesFromAuthData,
 } from "../../../../auth/oauth/scopes";
+import { isPersonInWebApp } from "../../../../auth/direct-user-context";
 import { resolveMaxAccessLevel, type ToolAccessLevel } from "../../../../auth/tool-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
@@ -757,8 +758,9 @@ export async function handleListAvailable(
 		listEntityApprovalPolicies(ctx.organizationId, "connector_action"),
 		loadCallerActionAllowlists(ctx.organizationId, actor, ctx.appPrincipalId),
 	]);
+	const person = isPersonInWebApp(ctx);
 	const policyFor = (operation: OperationDescriptor, connectionId: number | null) =>
-		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlists });
+		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlists, person });
 	const operationTargets = (operation: OperationDescriptor) =>
 		(targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
 			operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),

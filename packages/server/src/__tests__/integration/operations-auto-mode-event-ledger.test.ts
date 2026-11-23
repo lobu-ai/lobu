@@ -342,7 +342,7 @@ describe("operation ledger under Auto policy", () => {
 	});
 
 	it("a Check holds an agent's write until that agent confirms it, then records the statement", async () => {
-		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId });
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: userId, name: "Check fixture agent" });
 		const agentCtx: ToolContext = { ...ctx, agentId: agent.agentId };
 		const sql = getTestDb();
 		const checkConn = await createTestConnection({ organization_id: orgId, connector_key: CONNECTOR, created_by: userId, visibility: "private" });
@@ -359,7 +359,10 @@ describe("operation ledger under Auto policy", () => {
 		expect(await manageOperations({ action: "execute", connection_id: checkConn.id, operation_key: "echo", input: { value: "person" } }, {} as Env, ctx)).toMatchObject({ status: "completed" });
 
 		const held = await execute("checked");
-		expect(held).toMatchObject({ status: "pending_check", policy: { reason: "guardrail", rules: [{ note: "Only echo values the user asked for" }] } });
+		expect(held).toMatchObject({ status: "pending_check", policy: {
+			reason: "guardrail", rules: [{ note: "Only echo values the user asked for" }],
+			principal: { kind: "agent", id: agent.agentId, label: "Check fixture agent" },
+		} });
 		expect(await operationLedger(orgId, held.run_id)).toEqual([]);
 		// Neither the person nor another agent can confirm the agent's own judgment.
 		expect(await confirm(held.run_id, ctx)).toHaveProperty("error");

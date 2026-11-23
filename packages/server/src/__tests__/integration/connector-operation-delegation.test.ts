@@ -172,7 +172,9 @@ describe("connector delegation through the public operation lifecycle", () => {
     await upsertEntityApprovalPolicy(org.id, {
       resourceClass: "connector_action", connectorKey: "os.shell", effects: { execute: "auto" },
     });
-    expect(await executeConnectorOperation(params)).toMatchObject({ error: expect.stringContaining("Policy blocks") });
+    expect(await executeConnectorOperation(params)).toMatchObject({
+      error: `'${params.request.operation_key}' isn't on this caller's allowed actions list.`,
+    });
     expect(await sql`SELECT id FROM runs WHERE parent_run_id=${params.parentRunId}`).toHaveLength(0);
 
     const child = {
