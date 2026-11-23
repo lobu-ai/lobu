@@ -266,6 +266,46 @@ describe("sandbox runtime", () => {
     }
   });
 
+  it("names the tool that can run a method this mode or tier hides", async () => {
+    const source =
+      "export default async (_ctx, client) => client.entities.delete({ entity_id: 42 });";
+    const [readOnly, belowTier] = await Promise.all([
+      runScript({ source, sdk: stubSDK(), sdkMode: "read" }),
+      runScript({ source, sdk: stubSDK(), sdkMode: "full", maxAccessLevel: "read" }),
+    ]);
+    expect(readOnly.error).toMatchObject({
+      name: "ValidationError",
+      message: expect.stringMatching(
+        /^MethodNotAvailable: client\.entities\.delete .*read-only \(query_sdk\)\. Call it from run_sdk/,
+      ),
+      code: "VALIDATION",
+      retryable: false,
+    });
+    expect(belowTier.error).toMatchObject({
+      message:
+        "MethodNotAvailable: client.entities.delete is not available at this session's access tier. Use a method search_sdk lists for this session.",
+      code: "PERMISSION",
+      retryable: false,
+    });
+
+    const listing = await runScript({
+      source: [
+        "export default async (_ctx, client) => ({",
+        '  hasDelete: "delete" in client.entities,',
+        '  keysHaveDelete: Object.keys(client.entities).includes("delete"),',
+        "  typeofUnknown: typeof client.entities.noSuchMethod,",
+        "});",
+      ].join("\n"),
+      sdk: stubSDK(),
+      sdkMode: "read",
+    });
+    expect(listing.returnValue).toEqual({
+      hasDelete: false,
+      keysHaveDelete: false,
+      typeofUnknown: "undefined",
+    });
+  });
+
   it("keeps ctx's own keys, await, and JSON.stringify working", async () => {
     const result = await runScript({
       source: `export default async (ctx) => {
@@ -1153,7 +1193,7 @@ describe("sandbox runtime", () => {
     });
   });
 
-  it("read mode: notification mutations are absent while list is callable", async () => {
+  it("read mode: notification mutations fail guest-side while list is callable", async () => {
     const stubSdk = {
       notifications: {
         list: async () => ({ notifications: [], nextCursor: null }),
@@ -1182,7 +1222,7 @@ describe("sandbox runtime", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.message ?? "").toMatch(/not a function|undefined/i);
+      expect(result.error?.message ?? "").toMatch(/^MethodNotAvailable: .*run_sdk/);
       // The mutation must fail guest-side without dispatching to the host.
       expect(result.sdkCalls).toBe(0);
     }

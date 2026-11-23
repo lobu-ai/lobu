@@ -832,8 +832,8 @@ function isBareScriptBodyDiagnostic(
 function guestPreamble(
 	errorTokenReader: string,
 	referenceErrorCheck: string,
-	crossOrgDenialToken: string,
-	ctxMisuseToken: string,
+	permissionToken: string,
+	validationToken: string,
 ): string {
 	return `
 const { client, ctx, takeErrorToken: ${errorTokenReader}, isReferenceError: ${referenceErrorCheck} } = (() => {
@@ -852,8 +852,8 @@ const __trustedErrors = new WeakMap();
 const __rememberTrustedError = WeakMap.prototype.set.bind(__trustedErrors);
 const __readTrustedError = WeakMap.prototype.get.bind(__trustedErrors);
 const __forgetTrustedError = WeakMap.prototype.delete.bind(__trustedErrors);
-const __crossOrgDenialToken = ${JSON.stringify(crossOrgDenialToken)};
-const __ctxMisuseToken = ${JSON.stringify(ctxMisuseToken)};
+const __permissionToken = ${JSON.stringify(permissionToken)};
+const __validationToken = ${JSON.stringify(validationToken)};
 const __ctxMisuseMessage = ${JSON.stringify(CTX_IS_NOT_CLIENT_MESSAGE)};
 const __manifest = __parseJson(__sdk_manifest_json);
 const __namespaceMethods = __manifest.byNamespace;
@@ -898,12 +898,31 @@ function __dispatchCall(path, orgPath) {
   };
 }
 
+// A method the SDK has but this mode or tier filters out. Calling it throws a
+// structured error naming the tool that can run it; in and ownKeys still list
+// only callable methods.
+function __hiddenMethodThunk(path) {
+  return () => {
+    const readOnly = __manifest.mode === 'read';
+    const error = new Error(readOnly
+      ? 'MethodNotAvailable: client.' + path + ' writes or runs an external action, and this SDK mode is read-only (query_sdk). Call it from run_sdk instead; run_sdk with dry_run: true previews a write.'
+      : 'MethodNotAvailable: client.' + path + ' is not available at this session\\'s access tier. Use a method search_sdk lists for this session.');
+    error.name = readOnly ? 'ValidationError' : 'AccessDeniedError';
+    __rememberTrustedError(error, readOnly ? __validationToken : __permissionToken);
+    throw error;
+  };
+}
+
 function __makeNamespaceProxy(ns, orgPath) {
   const methods = new Set(__namespaceMethods[ns] || []);
+  const hidden = new Set(__manifest.hiddenByNamespace[ns] || []);
   return new Proxy({}, {
-    get: (_, k) => __isReservedKey(k) || !methods.has(String(k))
-      ? undefined
-      : __dispatchCall(ns + '.' + String(k), orgPath),
+    get: (_, k) => {
+      if (__isReservedKey(k)) return undefined;
+      const method = String(k);
+      if (methods.has(method)) return __dispatchCall(ns + '.' + method, orgPath);
+      return hidden.has(method) ? __hiddenMethodThunk(ns + '.' + method) : undefined;
+    },
     has: (_, k) => typeof k === 'string' && methods.has(k),
     ownKeys: () => Array.from(methods),
     getOwnPropertyDescriptor: (_, k) => typeof k === 'string' && methods.has(k)
@@ -947,7 +966,7 @@ function __makeClient(orgPath) {
         : () => {
           const error = new Error('CrossOrgAccessDenied: cross-org access is not available on this connection. If the same identity already has access to the target workspace, invoke there directly via /mcp/{slug} (CLI: --context <context> --org <slug>) and use client directly. For cross-org calls, use the unscoped /mcp endpoint with an OAuth session authorized for the target workspace.');
           error.name = 'CrossOrgAccessDenied';
-          __rememberTrustedError(error, __crossOrgDenialToken);
+          __rememberTrustedError(error, __permissionToken);
           throw error;
         };
       if (__topLevelKeys.has(k)) return __dispatchCall(k, orgPath);
@@ -973,7 +992,7 @@ function __makeCtx(values) {
       if (k === 'org' || __topLevelKeys.has(k) || __namespaceKeys.has(k) || __hiddenNamespaceKeys.has(k)) {
         const error = new Error(__ctxMisuseMessage);
         error.name = 'ValidationError';
-        __rememberTrustedError(error, __ctxMisuseToken);
+        __rememberTrustedError(error, __validationToken);
         throw error;
       }
       return undefined;
