@@ -8,6 +8,8 @@
  * response ceiling matches the existing sandbox script-output ceiling.
  */
 export const CONTENT_TEXT_HEAD_CHARS = 4_000;
+/** Recall previews select a passage within this source-character budget. */
+export const CONTENT_RECALL_SNIPPET_CHARS = 500;
 export const CONTENT_JSON_MAX_BYTES = 16 * 1024;
 export const QUERY_SQL_RESULT_MAX_BYTES = 1_048_576;
 /** Whole Automation envelope, matching the script-output cap and below the SDK bridge cap. */
