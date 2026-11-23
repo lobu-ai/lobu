@@ -54,12 +54,12 @@ describe("buildClientSDK filter", () => {
 });
 
 describe("guest-side proxy traps", () => {
-  it("absent methods report typeof === 'undefined' and `in` false", async () => {
+  it("hidden methods report `in` false; unknown methods read as undefined", async () => {
     const result = await runOrSkip({
       source: [
         "export default async (_ctx, client) => ({",
         '  hasDelete: "delete" in client.entities,',
-        "  typeofDelete: typeof client.entities.delete,",
+        "  typeofUnknown: typeof client.entities.noSuchMethod,",
         "  typeofList: typeof client.entities.list,",
         "});",
       ].join("\n"),
@@ -68,7 +68,7 @@ describe("guest-side proxy traps", () => {
     });
     expectReturnValue(result, {
       hasDelete: false,
-      typeofDelete: "undefined",
+      typeofUnknown: "undefined",
       typeofList: "function",
     });
   });
@@ -107,7 +107,7 @@ describe("guest-side proxy traps", () => {
     expectReturnValue(result, [{ id: 1, name: "Acme" }]);
   });
 
-  it("calling an absent method surfaces as TypeError", async () => {
+  it("calling a hidden write method names run_sdk", async () => {
     const result = await runOrSkip({
       source:
         "export default async (_ctx, client) => client.entities.delete({ entity_id: 42 });",
@@ -116,7 +116,7 @@ describe("guest-side proxy traps", () => {
     });
     if (!result) return;
     expect(result.success).toBe(false);
-    expect(result.error?.message ?? "").toMatch(/not a function|undefined/i);
+    expect(result.error?.message ?? "").toMatch(/^MethodNotAvailable: .*run_sdk/);
   });
 
   it("dry-run skips write methods and returns a side-effect preview", async () => {
