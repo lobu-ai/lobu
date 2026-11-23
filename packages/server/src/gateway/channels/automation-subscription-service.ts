@@ -53,7 +53,6 @@ export function setChatChannelLabelResolver(
  * because of its name.
  */
 async function resolveChannelLabel(
-	sql: DbClient,
 	platform: string,
 	connectionId: number,
 	channelId: string,
@@ -62,7 +61,9 @@ async function resolveChannelLabel(
 	if (!resolver) return null;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const [row] = await sql<{ slug: string; credential_mode: string | null }>`
+		// Never on a caller's transaction: a failed statement there would abort
+		// the link write even though this lookup swallows the error.
+		const [row] = await getDb()<{ slug: string; credential_mode: string | null }>`
 			SELECT slug, credential_mode
 			FROM connections
 			WHERE id = ${connectionId}
@@ -517,7 +518,6 @@ export class AutomationSubscriptionService {
 		// advisory lock. Used only when this creates the link: a relink keeps
 		// whatever name the Automation has, which the user may have changed.
 		const label = await resolveChannelLabel(
-			sql,
 			platform,
 			options.connectionId,
 			channelId,
