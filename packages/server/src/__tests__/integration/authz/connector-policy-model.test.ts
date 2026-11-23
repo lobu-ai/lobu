@@ -385,6 +385,13 @@ describe("org connector policy scopes", () => {
 		for (const caller of [otherAgent, otherApp, human]) {
 			expect(await decide(caller), String(caller.id)).toMatchObject({ effect: "approval", ruleIds: [askAll.id, askHere.id] });
 		}
+		// "Ask next time" on an Automation outranks its agent's Always allow,
+		// which still lifts the workspace Asks for the agent and the Automation.
+		const askOwned = await save({ principalKind: "automation", principalId: ownedAutomation.id, connectionId, operationKey, kind: "guardrail", effects: { execute: "approval" } });
+		expect(await decide(ownedAutomation)).toMatchObject({ effect: "approval", ruleIds: [askOwned.id] });
+		expect((await decide(agent)).effect).toBe("auto");
+		await save({ principalKind: "automation", principalId: ownedAutomation.id, connectionId, operationKey, effects: { execute: "auto" } });
+		expect((await decide(ownedAutomation)).effect).toBe("auto");
 
 		const log = await save({ connectionId, kind: "guardrail", effects: { execute: "log" } });
 		expect(await decide(app)).toMatchObject({ effect: "log", ruleIds: [log.id], reason: "guardrail" });

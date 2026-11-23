@@ -7,6 +7,7 @@ import { getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
+import { leasedAutomationId } from "../../../../automations/automation-source";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
@@ -973,11 +974,13 @@ export async function handleExecute(
 		}, "VALIDATION");
 	}
 
+	// A declared Automation is whose rules apply only while this caller holds
+	// its run's window lease; otherwise the caller stays itself.
 	const actor = delegation?.actor ?? await resolveActingPrincipal(sql, {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
-		explicitAutomationId: args.automation_source?.automation_id ?? null,
+		explicitAutomationId: await leasedAutomationId(sql, ctx, args.automation_source),
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 		appId: ctx.appPrincipalId ?? null,
 	});
