@@ -1199,12 +1199,29 @@ function snapshotDigest(snapshot: FinancialSnapshot): string {
   return lines.join("\n");
 }
 
+// The digest is personal: it goes to whoever owns this Automation and never to
+// every chat channel bound to the workspace's agents. An explicit recipient list
+// is targeted delivery (inbox and owner DM only).
+async function ownerRecipients(
+  ctx: FinanceContext,
+  client: ReactionClient
+): Promise<string[]> {
+  const rows = (await client.query(
+    `SELECT created_by FROM automations WHERE id = ${Number(ctx.automation.id)}`
+  )) as Array<{ created_by: string | null }>;
+  const owner = rows[0]?.created_by;
+  if (!owner)
+    throw new Error("Net worth Automation has no owner to deliver to");
+  return [owner];
+}
+
 async function notifyNeedsAttention(
   ctx: FinanceContext,
   client: ReactionClient,
   reason: string
 ): Promise<void> {
   await client.notifications.send({
+    recipients: await ownerRecipients(ctx, client),
     title: "Net worth needs attention",
     body: reason,
     idempotency_key: `${IDEMPOTENCY_PREFIX}:needs-attention:week:${isoWeekInTimeZone(ctx.window.window_end, "Europe/London")}`,
@@ -1464,6 +1481,7 @@ export default async function runNetWorthSnapshot(
     body = snapshotDigest(saved.snapshot);
   }
   await client.notifications.send({
+    recipients: await ownerRecipients(ctx, client),
     title: "Net worth updated",
     body: body.slice(0, 1_000),
     idempotency_key: `${IDEMPOTENCY_PREFIX}:notification:week:${week}`,
