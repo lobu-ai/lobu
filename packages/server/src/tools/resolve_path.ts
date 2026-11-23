@@ -10,7 +10,7 @@
 import { recordKey, recordKeyColumn } from '@lobu/core/contracts/entity-reference';
 import { type Static, Type } from '@sinclair/typebox';
 import { findUngrantedMemberWorkspace, formatUngrantedMemberMessage, resolveGrantedWorkspaceTarget } from '../auth/oauth/workspace-grants';
-import { getDb } from '../db/client';
+import { getDb, pgTextArray } from '../db/client';
 import type { Env } from '../index';
 import { feedLinkedToBusinessEntitySql } from '../authz/channel-about';
 import { publicBrowseContext } from '../authz/public-browse-context';
@@ -1113,7 +1113,12 @@ async function fetchWorkspaceCounts(
           SELECT ot.user_id
           FROM oauth_tokens ot
           WHERE ot.client_id = oc.id
-            AND ot.organization_id = ${organizationId}
+            -- A bare /mcp grant names the workspace only in
+            -- granted_organization_ids; match the Agents page's predicate.
+            AND (
+              ot.organization_id = ${organizationId}
+              OR ot.granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
+            )
             AND ot.revoked_at IS NULL
             AND ot.expires_at > NOW()
           ORDER BY ot.created_at DESC, ot.id DESC

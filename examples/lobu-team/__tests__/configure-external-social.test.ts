@@ -138,7 +138,9 @@ test("reaction reports missing evidence rather than silently delivering unverifi
   );
   expect(result.evidence_verified).toBe(false);
   expect(send.mock.calls[0][0].body).not.toContain("unsupported claim");
-  expect(send.mock.calls[0][0].title).toBe("Social research needs evidence");
+  expect(send.mock.calls[0][0].title).toBe(
+    "Check today's social suggestions before using them"
+  );
 });
 
 test("reaction rejects a mismatched run identity as a permanent failure", async () => {
@@ -163,30 +165,14 @@ test("reaction rejects a mismatched run identity as a permanent failure", async 
   expect((failure as Error).message).toBe("Briefing ownership/run mismatch");
 });
 
-test("a verified briefing is delivered within the notification limit without splitting an emoji", async () => {
-  const send = mock(async (_input: Record<string, unknown>) => ({
-    event_id: 101,
-  }));
+function verifiedRun(coverage: Record<string, unknown>[]): SocialData {
   const data: SocialData = {
     findings: [],
     briefings: [
       {
         title: "Briefing",
-        // Summary (21 units) plus two newlines puts the emoji across the 980 cut.
-        content: `${"x".repeat(956)}😀`,
-        metadata: {
-          workflow: policy.workflow,
-          run_id: 20,
-          coverage: [
-            {
-              platform: "x",
-              posts_read: 1,
-              recent_posts_read: 1,
-              status: "read",
-              read_receipts: [{ workspace: policy.workspace, run_id: 20 }],
-            },
-          ],
-        },
+        content: "stats-only briefing body must not be posted",
+        metadata: { workflow: policy.workflow, run_id: 20, coverage },
       },
     ],
   };
@@ -196,19 +182,86 @@ test("a verified briefing is delivered within the notification limit without spl
     issues: [],
     attested: socialEvidenceShape(data),
   };
+  return data;
+}
+
+test("a verified run with every source read sends nothing", async () => {
+  const send = mock(async (_input: Record<string, unknown>) => ({
+    event_id: 101,
+  }));
   const result = await deliverExternalSocial(
-    { automation: { id: 10 }, window: { run_id: 20 }, extracted_data: data },
+    {
+      automation: { id: 10 },
+      window: { run_id: 20 },
+      extracted_data: verifiedRun([
+        {
+          platform: "x",
+          posts_read: 1,
+          recent_posts_read: 1,
+          status: "read",
+          read_receipts: [{ workspace: policy.workspace, run_id: 20 }],
+        },
+      ]),
+    },
     {
       query: async () => [{ created_by: "synthetic-owner" }],
       notifications: { send },
     },
     policy
   );
-  expect(result.evidence_verified).toBe(true);
-  const body = send.mock.calls[0][0].body as string;
-  expect(body.startsWith("x: 1 text posts, read\n\n")).toBe(true);
-  expect(body).toHaveLength(979);
-  expect(body.endsWith("x")).toBe(true);
+  expect(result).toEqual({
+    evidence_verified: true,
+    verified_findings: 0,
+    notification_id: null,
+  });
+  expect(send).not.toHaveBeenCalled();
+});
+
+test("a blocked source is reported in plain words without splitting an emoji in its detail", async () => {
+  const send = mock(async (_input: Record<string, unknown>) => ({
+    event_id: 102,
+  }));
+  const twoPlatforms = {
+    ...policy,
+    platforms: ["x", "linkedin"],
+    receipt_workspaces: { x: [policy.workspace], linkedin: [policy.workspace] },
+  };
+  const result = await deliverExternalSocial(
+    {
+      automation: { id: 10 },
+      window: { run_id: 20 },
+      extracted_data: verifiedRun([
+        {
+          platform: "x",
+          posts_read: 1,
+          recent_posts_read: 1,
+          status: "read",
+          read_receipts: [{ workspace: policy.workspace, run_id: 20 }],
+        },
+        {
+          platform: "linkedin",
+          posts_read: 0,
+          recent_posts_read: 0,
+          status: "blocked",
+          read_receipts: [],
+          // 12 + 187 units puts the emoji across the 200-unit detail cut.
+          detail: `Signed out. ${"y".repeat(187)}😀`,
+        },
+      ]),
+    },
+    {
+      query: async () => [{ created_by: "synthetic-owner" }],
+      notifications: { send },
+    },
+    twoPlatforms
+  );
+  expect(result.notification_id).toBe(102);
+  const sent = send.mock.calls[0][0];
+  expect(sent.title).toBe("Couldn't read LinkedIn today");
+  const body = sent.body as string;
+  expect(body).toContain("LinkedIn: Signed out.");
+  expect(body).not.toContain("stats-only briefing body");
+  expect(body).toContain(`${"y".repeat(187)}\nThe other sources were read`);
 });
 
 test("reaction refuses an invalid Automation identity before querying or notifying", async () => {

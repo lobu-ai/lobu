@@ -663,6 +663,22 @@ export class MessageHandlerBridge {
     // An admitted message answers only through its admitted Automations: no
     // owner-agent fallback, unrouted commands, or unlinked notice.
     if (admitted && replyAutomations.length === 0) return;
+    // Linked channel but trigger filters rejected this message (e.g.
+    // mention_only on a non-mention). The planner is the authority for
+    // activation: the connection's owning agent may still record the message,
+    // but it may not answer it, and neither may the "unlinked" notice;
+    // otherwise every ordinary message in a mention-only channel gets a reply.
+    const linkedButFiltered =
+      replyAutomations.length === 0 &&
+      backgroundAutomations.length === 0 &&
+      !!automationSubscriptionService &&
+      !!this.connection.organizationId &&
+      (await automationSubscriptionService.channelHasMessageSubscription(
+        this.connection.id,
+        channelId,
+        this.connection.organizationId,
+        { crossOrganization: isPreview, teamId }
+      ));
     const resolved = await resolveChatRoute({
       plan: automationPlan,
       platform,
@@ -682,20 +698,7 @@ export class MessageHandlerBridge {
         return;
       }
 
-      // Linked channel but trigger filters rejected this message (e.g.
-      // mention_only on a non-mention). The planner is the authority for
-      // activation; do not fall through to the "unlinked" notice or the notice
-      // would spam every ordinary message in a mention-only linked channel.
-      if (
-        automationSubscriptionService &&
-        this.connection.organizationId &&
-        (await automationSubscriptionService.channelHasMessageSubscription(
-          this.connection.id,
-          channelId,
-          this.connection.organizationId,
-          { crossOrganization: isPreview, teamId }
-        ))
-      ) {
+      if (linkedButFiltered) {
         logger.info(
           { platform, channelId, teamId, connectionId: this.connection.id },
           "Channel has Automation subscription(s) but none matched this message — dropping"
@@ -768,8 +771,11 @@ export class MessageHandlerBridge {
     // `bindableTeamId` rule the self-heal above uses, so a platform never gets
     // a non-workspace id written onto the link; an unknown team is filled later
     // by healSubscriptionTeam. Best-effort — a failure must never block the turn.
+    // A linked channel already has its route; materializing an unfiltered
+    // owner link beside it would make the owner answer every later message.
     if (
       resolved.source === "connection" &&
+      !linkedButFiltered &&
       isGroup &&
       !isPreview &&
       automationSubscriptionService &&
@@ -825,16 +831,26 @@ export class MessageHandlerBridge {
     // Applies equally to Automation-routed channels (post-migration chat links):
     // the pre-Automation path honored this flag, and exempting Automations silently
     // flipped record-only installs into full responders after the cutover.
+    const isEarlyCommand = isEarlyDispatchableChatCommand(
+      this.stripBotMention(typeof message.text === "string" ? message.text : "")
+    );
     if (
       source === "subscribed" &&
       message.isMention !== true &&
       connection.settings?.recordChannelMessages === true &&
-      !isEarlyDispatchableChatCommand(
-        this.stripBotMention(
-          typeof message.text === "string" ? message.text : ""
-        ),
-      )
+      !isEarlyCommand
     ) {
+      return;
+    }
+
+    // Filter-rejected in a linked channel: recorded above, but only an explicit
+    // interaction (a question answer or suggestion click) or an app command
+    // reaches the owner-agent fallback.
+    if (linkedButFiltered && source !== "interaction" && !isEarlyCommand) {
+      logger.info(
+        { platform, channelId, teamId, connectionId: this.connection.id },
+        "Channel has Automation subscription(s) but none matched this message — recorded without a turn"
+      );
       return;
     }
 
