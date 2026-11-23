@@ -237,3 +237,66 @@ The pinned answer is stale. Re-verify before quoting either side.
   to the approved state (and clears any simulated drift).
 - The context-layer seed is idempotent: it refuses to double-seed. To reseed,
   stop `lobu run`, delete `./.lobu-data`, and start over.
+
+## A complete definition-summary workflow
+
+The config also installs the **Current metric definition** Automation. It combines
+an arrival source, deterministic preparation, a pinned skill, and a keyed durable
+summary using existing Lobu contracts. It summarizes the current `churn_rate`
+definition; it does not calculate churn or replace the warehouse composition.
+
+| Stage | What happens |
+|---|---|
+| Sources | `definition_changes` reads definition versions arriving in the run's window, even when their business effective date is old. |
+| Preparation | `context-summary.reaction.ts` reads the currently authorized definition and freezes `sources.metric_snapshot` before analysis. Retries reuse the saved snapshot. Multiple current definitions or incomplete/oversized evidence fail visibly. |
+| Skill | `current-metric-definition` is enabled on `analyst` and copied into the Automation's version at apply time. Editing the agent library alone does not change the pinned version. |
+| Output | One `summary` event, keyed by `summary_kind` and `metric`. A successful later run supersedes the prior summary while preserving its history and exact evidence version IDs. |
+| Withdrawal | When the source is tombstoned, the next run emits the same key with `state: no_evidence` and no evidence IDs. An empty output array would leave the previous summary current. |
+
+The checked-in config deliberately leaves the provider and model unset;
+`lobu validate` reports that requirement. Structural validation and the fixtures
+below do not establish a live model connection. After starting and seeding the
+example, complete setup in its running workspace:
+
+1. Open **Connectors**, choose the model provider you want, and complete its
+   offered API-key or sign-in form. Reuse an already connected provider when one
+   is available.
+2. Open **Agents → analyst → Models** (the agent page's `#models` section),
+   choose **Add model**, select a model from that connected provider, and click
+   **Save changes**. The first model in the list is the default. The example
+   omits model settings, so re-applying it preserves this runtime choice.
+3. Run **Current metric definition** once and inspect the completed summary
+   before relying on its 09:00 UTC schedule. To trigger through the SDK, discover
+   its ID with `client.automations.list()` and call
+   `client.automations.trigger({ automation_id })`. Inspect the saved context
+   with `knowledge.read({ automation_id, run_id }).sources.metric_snapshot`
+   and the completed summary's evidence IDs.
+
+This recipe has no external delivery action.
+
+Correct a definition with `knowledge.save({ ..., supersedes_event_id: oldId })`.
+Removing support uses `knowledge.delete({ content_id: currentId })`, which writes
+a tombstone. The schedule explicitly sets `skip_if_unchanged: false`; native
+preparation also bypasses source-only skipping because it may read fresh context
+beyond the arrival source. Old summaries remain current until the next successful
+completion. A failed run preserves its previous result and reports the failure.
+
+Preparation captures current state when it executes. It does not promise that
+arbitrary SDK reads share the arrival-window boundary. Exact evidence IDs in
+metadata are explicit version references, not an automatic dependency graph;
+`context: true` would not make an arrival source a full-history snapshot.
+
+Run the lifecycle fixture from a built checkout:
+
+```sh
+cd packages/server
+bun run test -- run ../../examples/context-layer/evals/context-lifecycle.integration.ts
+```
+
+This fixture uses real isolated Postgres, SDK authorization, preparation in the
+script sandbox, and completion/persistence. It verifies correction, immutable
+snapshots, cross-workspace isolation, ambiguous evidence, and a scheduled
+empty-source withdrawal. Its completion data is scripted: it tests the workflow
+mechanics, not a live model's judgment or summary quality. Unlike the isolation
+fixture above, this one needs the test database setup; do not set
+`SKIP_TEST_DB_SETUP=1`.
