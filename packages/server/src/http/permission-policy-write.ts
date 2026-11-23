@@ -1,6 +1,12 @@
 import type { Context } from "hono";
 import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
-import { canonicalConnectorPolicyScope, CONNECTOR_POLICY_CATEGORIES, type ConnectorPolicyCategory } from "../authz/connector-policy";
+import {
+	canonicalConnectorPolicyScope,
+	CONNECTOR_POLICY_CATEGORIES,
+	type ConnectorPolicyCategory,
+	POLICY_AUDIENCES,
+	type PolicyAudience,
+} from "../authz/connector-policy";
 import {
 	deleteEntityApprovalPolicy,
 	type EntityApprovalPolicy,
@@ -9,6 +15,7 @@ import {
 	resolveActingPrincipal,
 	resolveConnectorPolicy,
 	upsertEntityApprovalPolicy,
+	validatePolicyKindAndNote,
 } from "../authz/entity-policy";
 import { appKeyProblem } from "../authz/policy-principal";
 import { isLegalActionEffect, isWriteEffect, type WriteAction } from "../authz/write-action-manifest";
@@ -40,6 +47,7 @@ export function serializeEntityApprovalPolicy(policy: EntityApprovalPolicy) {
 		effects: policy.effects,
 		kind: policy.kind,
 		note: policy.note,
+		...(policy.audience === null ? {} : { audience: policy.audience }),
 		approval_connection_id: policy.deliveryTarget.connectionId,
 		approval_channel_id: policy.deliveryTarget.channelId,
 		approval_team_id: policy.deliveryTarget.teamId,
@@ -175,6 +183,10 @@ export function parsePolicy(input: Record<string, unknown>, deleting: boolean): 
 	policy.operationCategory = category as ConnectorPolicyCategory | null;
 	if ((policy.connectionId !== null || category !== null) && resourceClass !== "connector_action")
 		throw new Error("connection_id and operation_category are only valid for resource_class 'connector_action'.");
+	const audience = optionalString(input.audience, "audience");
+	if (audience !== null && !POLICY_AUDIENCES.includes(audience as PolicyAudience))
+		throw new Error(`audience must be one of ${POLICY_AUDIENCES.join(", ")}.`);
+	policy.audience = audience as PolicyAudience | null;
 	if (policy.connectorKey && policy.connectionId)
 		throw new Error("Specify connector_key or connection_id, not both.");
 	if (policy.operationKey && policy.operationCategory)
@@ -255,6 +267,8 @@ export async function writePermissionPolicy(c: Context) {
 	let policy: EntityApprovalPolicyInput;
 	try {
 		policy = parsePolicy(input as Record<string, unknown>, deleting);
+		// This path writes grants only, so it refuses guardrail-only fields with a 400.
+		validatePolicyKindAndNote(policy);
 	} catch (error) {
 		return invalid(c, (error as Error).message);
 	}

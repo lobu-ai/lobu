@@ -8,7 +8,7 @@ import {
 } from "../../../../authz/connector-policy";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
 import { resolveActingPrincipal } from "../../../../authz/entity-policy";
-import { resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { classifyRunDestination, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from "../../../../config/intervals";
 import { getDb } from "../../../../db/client";
@@ -51,6 +51,8 @@ export async function handleConfirm(
 		appId: ctx.appPrincipalId ?? null,
 	});
 	const visibilityUserId = await resolveAutomationConnectionVisibilityUserId(ctx, sql);
+	// Ask who sees the destination before the transaction locks the run.
+	const destination = await classifyRunDestination(ctx.organizationId, args.run_id);
 
 	const decided = await sql.begin(async (tx) => {
 		// Take the connection lock first, as delete does. Otherwise delete
@@ -118,7 +120,7 @@ export async function handleConfirm(
 		if (deviceAccess === "refuse") return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 
 		const [policy, principal] = await Promise.all([
-			resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId: run.id, sql: tx }),
+			resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId: run.id, sql: tx, destination }),
 			resolvePolicyPrincipal(tx, ctx.organizationId, { kind: run.policy_principal_kind, id: run.policy_principal_id }),
 		]);
 		if (!policy || policy.effect === "deny") {

@@ -403,6 +403,42 @@ describe("org connector policy scopes", () => {
 		expect(await decide(app)).toMatchObject({ effect: "deny", ruleIds: [block.id] });
 	});
 
+	it("an audience guardrail applies only where the destination is at least that wide, and unknown counts as external", async () => {
+		const workspace = await save({ connectorKey: operation.connector_key, kind: "guardrail", audience: "workspace", note: "Ask before posting where the workspace sees it", effects: { execute: "approval" } });
+		const external = await save({ connectorKey: operation.connector_key, kind: "guardrail", audience: "external", effects: { execute: "deny" } });
+		const unscoped = await save({ connectorKey: operation.connector_key, kind: "guardrail", effects: { execute: "log" } });
+		// Audience is part of the identity: three guardrails on one scope, and a re-save updates in place.
+		expect(new Set([workspace.id, external.id, unscoped.id]).size).toBe(3);
+		expect((await save({ connectorKey: operation.connector_key, kind: "guardrail", audience: "workspace", effects: { execute: "check" } })).id).toBe(workspace.id);
+		await save({ connectorKey: operation.connector_key, kind: "guardrail", audience: "workspace", effects: { execute: "approval" } });
+		const listed = await listEntityApprovalPolicies(orgId, "connector_action");
+		expect(listed.find((policy) => policy.id === workspace.id)).toMatchObject({ audience: "workspace", kind: "guardrail" });
+		expect(listed.find((policy) => policy.id === unscoped.id)).toMatchObject({ audience: null });
+
+		const policies = listed;
+		const evaluate = (destinationAudience?: "private" | "workspace" | "external" | "unknown", actor = agent, person?: boolean) =>
+			evaluateConnectorPolicy({ organizationId: orgId, connectionId, operation, actor, policies, person, destinationAudience });
+		// A destination the connector cannot classify never matches an audience rule.
+		expect(evaluate(undefined)).toMatchObject({ effect: "log", ruleIds: [unscoped.id] });
+		expect(evaluate("private")).toMatchObject({ effect: "log", ruleIds: [unscoped.id] });
+		expect(evaluate("workspace")).toMatchObject({ effect: "approval", ruleIds: [workspace.id], rules: [{ id: workspace.id, note: "Ask before posting where the workspace sees it" }] });
+		expect(evaluate("external")).toMatchObject({ effect: "deny", ruleIds: [external.id] });
+		expect(evaluate("unknown")).toMatchObject({ effect: "deny", ruleIds: [external.id] });
+		// A person in the web app is never matched, whatever the audience.
+		expect(evaluate("external", human, true)).toEqual({ effect: "auto", ruleIds: [], rules: [], reason: "default_auto" });
+		// This fixture connector has no audience source, so the live decision never matches either audience rule.
+		expect(await resolveConnectorPolicy({ organizationId: orgId, connectionId, operation, actor: agent, input: { channel: "C1" }, destination: { live: true, seen: [] } }))
+			.toMatchObject({ effect: "log", ruleIds: [unscoped.id] });
+
+		// Only a guardrail narrows by audience, in the writer and in the database.
+		await expect(save({ connectorKey: operation.connector_key, audience: "workspace", effects: { execute: "approval" } })).rejects.toThrow("audience is only valid on a guardrail.");
+		await expect(getTestDb()`UPDATE write_approval_policies SET kind = 'grant' WHERE id = ${workspace.id}`).rejects.toMatchObject({ code: "23514" });
+		await expect(getTestDb()`UPDATE write_approval_policies SET audience = 'everyone' WHERE id = ${workspace.id}`).rejects.toMatchObject({ code: "23514" });
+		// Deleting one audience's guardrail keeps the others on the same scope.
+		expect(await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectorKey: operation.connector_key, kind: "guardrail", audience: "external" })).toBe(true);
+		expect((await listEntityApprovalPolicies(orgId, "connector_action")).map((policy) => policy.id).sort()).toEqual([workspace.id, unscoped.id].sort());
+	});
+
 	it("an allowed actions list binds a caller's writes only and is named as the reason", async () => {
 		const policies = await listEntityApprovalPolicies(orgId, "connector_action");
 		const evaluate = (op: typeof operation | { connector_key: string; operation_key: string; kind: "read" }, allowlists: Parameters<typeof evaluateConnectorPolicy>[0]["allowlists"]) =>

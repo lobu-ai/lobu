@@ -33,8 +33,11 @@ import {
 	type ConnectorPolicyKind,
 	type ConnectorPolicyScope,
 	canonicalConnectorPolicyScope,
+	destinationAudienceMatters,
 	evaluateConnectorPolicy,
+	type PolicyAudience,
 } from "./connector-policy";
+import { classifyDestination, type DestinationLookup } from "./destination-audience";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
@@ -116,6 +119,8 @@ export interface EntityApprovalPolicy extends Required<ConnectorPolicyScope> {
 	kind: ConnectorPolicyKind;
 	/** Human reason shown when this rule decides a held or blocked run. */
 	note: string | null;
+	/** Guardrails only: applies where at least this audience sees the write; null = every destination. */
+	audience: PolicyAudience | null;
 	deliveryTarget: EntityApprovalDeliveryTarget;
 }
 
@@ -147,6 +152,8 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	kind?: ConnectorPolicyKind;
 	/** Omitted keeps the stored note on update; null or blank clears it. */
 	note?: string | null;
+	/** Part of a guardrail's identity; only a guardrail may set it. */
+	audience?: PolicyAudience | null;
 	approvalConnectionId?: string | null;
 	approvalChannelId?: string | null;
 	approvalTeamId?: string | null;
@@ -186,6 +193,7 @@ type EntityApprovalPolicyRow = {
 	entity_id: number | null;
 	kind: string;
 	note: string | null;
+	audience: string | null;
 	approval_connection_id: string | null;
 	approval_channel_id: string | null;
 	approval_team_id: string | null;
@@ -233,13 +241,16 @@ function normalizePolicyNote(value: unknown): string | null | undefined {
 /**
  * Validate a rule's kind and note. Only connector action rules can be
  * guardrails, and a guardrail can only tighten, so it never stores `auto`.
+ * An audience narrows where a guardrail applies, so a grant cannot carry one.
  */
 export function validatePolicyKindAndNote(
-	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects">,
+	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects" | "audience">,
 ): { kind: ConnectorPolicyKind; note: string | null | undefined } {
 	const kind = normalizePolicyKind(input.kind);
 	if (kind === "guardrail" && input.resourceClass !== "connector_action")
 		throw new Error("Only connector action rules can be guardrails.");
+	if (input.audience != null && kind !== "guardrail")
+		throw new Error("audience is only valid on a guardrail.");
 	const execute = input.effects?.execute;
 	if (kind === "guardrail" && execute === "auto")
 		throw new Error("A guardrail can only log, check, require approval or block; use a grant to allow.");
@@ -288,6 +299,9 @@ function rowToPolicy(row: EntityApprovalPolicyRow): EntityApprovalPolicy {
 		// guardrail, which can only tighten a decision, never as a grant.
 		kind: row.kind === "grant" ? "grant" : "guardrail",
 		note: row.note ?? null,
+		// Fail closed: an audience this runtime does not recognise matches every
+		// destination the workspace sees, the wider of the two.
+		audience: row.audience == null ? null : row.audience === "external" ? "external" : "workspace",
 		deliveryTarget: {
 			connectionId: row.approval_connection_id || null,
 			channelId: row.approval_channel_id,
@@ -324,6 +338,7 @@ export function defaultEntityApprovalPolicy(
 		},
 		kind: "grant",
 		note: null,
+		audience: null,
 		deliveryTarget: {
 			connectionId: null,
 			channelId: null,
@@ -825,7 +840,7 @@ async function loadCandidatePolicies(args: {
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note,
+       kind, note, audience,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     FROM write_approval_policies
@@ -1121,7 +1136,7 @@ export async function listEntityApprovalPolicies(
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note,
+       kind, note, audience,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name,
        COALESCE((SELECT jsonb_object_agg(e.action, e.effect)
@@ -1253,6 +1268,7 @@ export async function upsertEntityApprovalPolicy(
 		resourceClass === "entity" ? input.fieldPath?.trim() || null : null;
 	const entityId = resourceClass === "entity" ? (input.entityId ?? null) : null;
 	const { kind, note } = validatePolicyKindAndNote({ ...input, resourceClass });
+	const audience = input.audience ?? null;
 	const effectSet = actionEffectSetForInput(resourceClass, input);
 	const approvalConnectionId = input.approvalConnectionId?.trim() || null;
 	const approvalChannelId = input.approvalChannelId?.trim() || null;
@@ -1305,9 +1321,10 @@ export async function upsertEntityApprovalPolicy(
         AND field_path IS NOT DISTINCT FROM ${fieldPath}
         AND entity_id IS NOT DISTINCT FROM ${entityId}
         AND kind = ${kind}
+        AND audience IS NOT DISTINCT FROM ${audience}
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note,
+       kind, note, audience,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1320,13 +1337,13 @@ export async function upsertEntityApprovalPolicy(
       INSERT INTO write_approval_policies (
         organization_id, resource_class, principal_kind, principal_id,
         operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-        kind, note,
+        kind, note, audience,
         approval_connection_id, approval_channel_id, approval_team_id,
         approval_channel_name, created_at, updated_at
       ) VALUES (
         ${organizationId}, ${resourceClass}, ${principalKind}, ${principalId},
         ${operationKey}, ${connectorKey}, ${connectionId}, ${operationCategory}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
-        ${kind}, ${note ?? null},
+        ${kind}, ${note ?? null}, ${audience},
         ${approvalConnectionId},
         ${approvalChannelId}, ${approvalTeamId}, ${approvalChannelName},
         now(), now()
@@ -1334,7 +1351,7 @@ export async function upsertEntityApprovalPolicy(
       ON CONFLICT DO NOTHING
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note,
+       kind, note, audience,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1366,9 +1383,11 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	fieldPath?: string | null;
 	entityId?: number | null;
 	kind?: ConnectorPolicyKind;
+	audience?: PolicyAudience | null;
 }, transaction?: DbClient): Promise<boolean> {
 	const resourceClass = normalizeResourceClass(args.resourceClass);
 	const kind = normalizePolicyKind(args.kind);
+	const audience = args.audience ?? null;
 	const principalKind = normalizePrincipalKind(args.principalKind);
 	const principalId = principalKind ? args.principalId?.trim() || null : null;
 	const operationKey =
@@ -1413,6 +1432,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
       AND field_path IS NOT DISTINCT FROM ${fieldPath}
       AND entity_id IS NOT DISTINCT FROM ${entityId}
       AND kind = ${kind}
+      AND audience IS NOT DISTINCT FROM ${audience}
     RETURNING id
   `;
 	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"
@@ -1422,7 +1442,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 
 /** Connector decisions share one evaluator across admission, discovery and inspection. */
 export async function resolveConnectorPolicy(
-	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlists"> & {
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "policies" | "allowlists" | "destinationAudience"> & {
 		sql?: DbClient;
 		/** The verified token's app principal; a PAT's allowlist applies even when an agent is bound. */
 		appPrincipalId?: string | null;
@@ -1431,13 +1451,24 @@ export async function resolveConnectorPolicy(
 		 * caller-named actions, so caller allowlists do not apply to them.
 		 */
 		skipCallerAllowlists?: boolean;
+		/** The write's input, whose `x-lobu-destination` value an audience rule reads. */
+		input?: Record<string, unknown> | null;
+		/** How the destination's audience may be read; absent = unknown. */
+		destination?: DestinationLookup;
 	},
 ) {
 	const [policies, allowlists] = await Promise.all([
 		listEntityApprovalPolicies(args.organizationId, "connector_action", args.sql),
 		args.skipCallerAllowlists ? [] : loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql),
 	]);
-	return evaluateConnectorPolicy({ ...args, policies, allowlists });
+	const evaluation = { ...args, policies, allowlists };
+	// Ask the connector only when an audience rule could change the result.
+	if (!destinationAudienceMatters(evaluation)) return evaluateConnectorPolicy(evaluation);
+	const destinationAudience = await classifyDestination({
+		organizationId: args.organizationId, connectionId: args.connectionId, operation: args.operation,
+		input: args.input, lookup: args.destination,
+	});
+	return evaluateConnectorPolicy({ ...evaluation, destinationAudience });
 }
 
 /** Reconstruct the original requester from a durable operation, never its reviewer. */

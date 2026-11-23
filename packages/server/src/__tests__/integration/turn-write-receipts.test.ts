@@ -10,8 +10,11 @@
 import { mintGatewayMcpToken, type MessagePayload } from '@lobu/core';
 import { TURN_INPUT_RUN_HEADER } from '@lobu/core/agent-tooling';
 import { Hono } from 'hono';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { upsertEntityApprovalPolicy } from '../../authz/entity-policy';
 import { mintTurnToken } from '../../gateway/orchestration/agent-turn-producer';
+import { buildAutomationRunConversationId } from '../../gateway/permissions/automation-run-intent';
+import { SecretStoreRegistry } from '../../gateway/secrets';
 import { resolveAddressableTargets, threadHandleForMessage } from '../../gateway/conversations/authorization';
 import { createAudioRoutes } from '../../gateway/routes/internal/audio';
 import { createConversationsRoutes } from '../../gateway/routes/internal/conversations';
@@ -21,6 +24,8 @@ import { createInteractionRoutes } from '../../gateway/routes/internal/interacti
 import { ImageGenerationService } from '../../gateway/services/image-generation-service';
 import { TranscriptionService } from '../../gateway/services/transcription-service';
 import { __setChatInstanceManagerForTests } from '../../lobu/gateway';
+import { orgContext } from '../../lobu/stores/org-context';
+import { PostgresSecretStore } from '../../lobu/stores/postgres-secret-store';
 import { pruneTurnWriteReceipts } from '../../tools/turn-write-idempotency';
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
 import * as entityHooks from '../../utils/entity-hooks';
@@ -541,6 +546,198 @@ describe('send_message: a reply in the asking conversation vs a post elsewhere',
     await rule('auto');
     const res = await call('/internal/conversations/send', (await turn('p3-preview-1')).token, { target: preview!.handle, text: 'borrowed' });
     expect(res.status, await res.clone().text()).toBe(403);
+    expect(posted).not.toHaveBeenCalled();
+  });
+});
+
+describe('send_message: an audience guardrail asks only where more people will see the post', () => {
+  // Only Slack's HTTP API is faked. The bot token resolves from the
+  // connection's stored secret.
+  type SlackChannel = { is_private?: boolean; is_ext_shared?: boolean; is_im?: boolean; is_mpim?: boolean } | 'error' | 'hang';
+  const BOT_TOKEN = 'xoxb-synthetic-audience';
+  const realFetch = globalThis.fetch;
+  const lookups: Array<{ channel: string; authorization: string | null }> = [];
+  /** A list answers one lookup per entry; a single answer repeats. */
+  let answers: Record<string, SlackChannel | SlackChannel[]> = {};
+  let releaseHang = () => {};
+  const sql = () => getTestDb();
+
+  async function slackApi(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url !== 'https://slack.com/api/conversations.info') return realFetch(input, init);
+    const channel = new URLSearchParams(String(init?.body ?? '')).get('channel') ?? '';
+    lookups.push({ channel, authorization: new Headers(init?.headers).get('authorization') });
+    const planned = answers[channel];
+    const answer = (Array.isArray(planned) ? planned.shift() : planned) ?? 'error';
+    if (answer === 'hang') {
+      return new Promise<Response>((_resolve, reject) => {
+        releaseHang = () => reject(new Error('released'));
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      });
+    }
+    if (answer === 'error') return Response.json({ ok: false, error: 'channel_not_found' });
+    return Response.json({ ok: true, channel: { id: channel, ...answer } });
+  }
+
+  async function guardrail(effect: 'approval' | 'deny', audience?: 'workspace' | 'external') {
+    await upsertEntityApprovalPolicy(org.id, { resourceClass: 'connector_action', connectorKey: 'slack', kind: 'guardrail', audience, effects: { execute: effect } });
+  }
+  async function send(messageId: string, to: string, text: string, token?: string) {
+    return call('/internal/conversations/send', token ?? (await turn(messageId)).token, { target: to, text });
+  }
+  const sendRuns = () => sql()<{ id: number; status: string; approval_status: string }>`
+    SELECT id, status, approval_status FROM runs WHERE organization_id = ${org.id} AND action_key = 'send_message' ORDER BY id
+  `;
+
+  beforeAll(async () => {
+    const postgresSecrets = new PostgresSecretStore();
+    const secretStore = new SecretStoreRegistry(postgresSecrets, { secret: postgresSecrets });
+    const botToken = await orgContext.run({ organizationId: org.id }, () => secretStore.put(`connections/${CONNECTION}/botToken`, BOT_TOKEN));
+    await sql()`
+      UPDATE connections SET config = config || ${sql().json({ platform: 'slack', botToken })}::jsonb
+      WHERE organization_id = ${org.id} AND slug = ${`agentconn-${CONNECTION}`}
+    `;
+    globalThis.fetch = slackApi as typeof fetch;
+  });
+
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  beforeEach(async () => {
+    lookups.length = 0;
+    answers = {};
+    await sql()`DELETE FROM write_approval_policies WHERE organization_id = ${org.id} AND connector_key = 'slack'`;
+  });
+
+  afterEach(() => releaseHang());
+
+  it('a workspace rule asks before a top-level post in the asking channel, and not where only a private conversation sees it', async () => {
+    await guardrail('approval', 'workspace');
+    answers.C_RECEIPTS = {};
+    const held = await send('aud-public-1', channelTarget, 'to the whole channel');
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody.code).toBe('PENDING_APPROVAL');
+    expect(posted).not.toHaveBeenCalled();
+    // Asked once, with the connection's own bot token.
+    expect(lookups).toEqual([{ channel: 'C_RECEIPTS', authorization: `Bearer ${BOT_TOKEN}` }]);
+
+    for (const [index, channel] of [{ is_private: true }, { is_im: true }, { is_mpim: true }].entries()) {
+      answers.C_RECEIPTS = channel;
+      const res = await send(`aud-private-${index}`, channelTarget, `members only ${index}`);
+      expect(res.status, await res.clone().text()).toBe(200);
+    }
+    expect(posted).toHaveBeenCalledTimes(3);
+  });
+
+  it('an external rule blocks a post Slack Connect can see, and a channel Slack will not describe counts as external', async () => {
+    await guardrail('deny', 'external');
+    answers.C_RECEIPTS = {};
+    const workspace = await send('aud-external-1', channelTarget, 'workspace only');
+    expect(workspace.status, await workspace.clone().text()).toBe(200);
+    expect(posted).toHaveBeenCalledTimes(1);
+
+    // Shared with another organization: external even though it is private.
+    answers.C_RECEIPTS = { is_ext_shared: true, is_private: true };
+    const shared = await send('aud-external-2', channelTarget, 'to the partner');
+    expect(shared.status, await shared.clone().text()).toBe(403);
+
+    answers.C_RECEIPTS = 'error';
+    const unreadable = await send('aud-external-3', channelTarget, 'to somewhere unknown');
+    expect(unreadable.status, await unreadable.clone().text()).toBe(403);
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it('Slack is not asked when no audience rule could change the answer', async () => {
+    answers.C_RECEIPTS = {};
+    expect((await send('aud-none-1', channelTarget, 'no rules')).status).toBe(200);
+    // A Block for every post already decides it.
+    await guardrail('deny');
+    await guardrail('approval', 'workspace');
+    expect((await send('aud-none-2', channelTarget, 'blocked anyway')).status).toBe(403);
+    expect(lookups).toHaveLength(0);
+    expect(posted).toHaveBeenCalledTimes(1);
+  });
+
+  it('a lookup that does not answer in time counts as external, so the rule asks', async () => {
+    await guardrail('approval', 'workspace');
+    answers.C_RECEIPTS = 'hang';
+    const started = Date.now();
+    const held = await send('aud-hang-1', channelTarget, 'while Slack is slow');
+    expect(held.status, await held.clone().text()).toBe(409);
+    expect(lookups).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(posted).not.toHaveBeenCalled();
+  });
+
+  it('a channel that becomes public between admission and the claim is held, not posted', async () => {
+    await guardrail('approval', 'workspace');
+    answers.C_RECEIPTS = [{ is_private: true }, {}];
+    const held = await send('aud-race-1', channelTarget, 'private, then not');
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody.code).toBe('PENDING_APPROVAL');
+    expect(lookups).toHaveLength(2);
+    expect(posted).not.toHaveBeenCalled();
+  });
+
+  it('an approver who redirects the post to a shared channel is stopped before it is sent', async () => {
+    await guardrail('approval', 'workspace');
+    await guardrail('deny', 'external');
+    answers = { C_RECEIPTS: {}, C_SHARED: { is_ext_shared: true } };
+    const held = await send('aud-edit-1', channelTarget, 'for the team');
+    const { run_id } = await held.json();
+    expect(held.status).toBe(409);
+
+    const approved = (await manageOperations(
+      { action: 'approve', run_id, input: { channel_id: 'C_SHARED', text: 'for the team' } },
+      {} as Env, ownerToolContext(org.id, owner.id),
+    )) as Record<string, unknown>;
+    expect(approved.error, JSON.stringify(approved)).toEqual(expect.any(String));
+    expect(posted).not.toHaveBeenCalled();
+    // Admission and the approve recheck read the stored channel; the claim reads the edited one.
+    expect(lookups.map((lookup) => lookup.channel)).toEqual(['C_RECEIPTS', 'C_RECEIPTS', 'C_SHARED']);
+    expect((await sendRuns()).find((run) => run.id === run_id)).toMatchObject({ status: 'cancelled', approval_status: 'rejected' });
+  });
+
+  it('a reply in the asking thread stays exempt: no lookup and no run', async () => {
+    await guardrail('deny', 'workspace');
+    answers.C_RECEIPTS = {};
+    const runsBefore = (await sendRuns()).length;
+    const res = await send('aud-reply-1', target, 'in the thread');
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.deliveredInBand).toBe(true);
+    expect(posted).toHaveBeenCalledTimes(1);
+    expect(lookups).toHaveLength(0);
+    expect(await sendRuns()).toHaveLength(runsBefore);
+  });
+
+  it("an Automation turn is never a reply, even into the thread it read", async () => {
+    await guardrail('approval', 'workspace');
+    answers.C_RECEIPTS = {};
+    const [automation] = await sql()<{ id: number }>`
+      SELECT id FROM automations WHERE organization_id = ${org.id} AND managed_agent_id = ${AGENT} ORDER BY id LIMIT 1
+    `;
+    const [automationRun] = await sql()<{ id: number }>`
+      INSERT INTO runs (organization_id, run_type, automation_id, status, approved_input, created_at)
+      VALUES (${org.id}, 'automation', ${automation!.id}, 'running', ${sql().json({ trigger_execution: 'turn' })}, NOW())
+      RETURNING id
+    `;
+    const payload = {
+      ...message('aud-automation-1'),
+      conversationId: buildAutomationRunConversationId(AGENT, Number(automation!.id), Number(automationRun!.id)),
+    } as MessagePayload;
+    const runId = await insertAgentTurnRun(payload);
+    const token = await mintTurnToken(payload, runId);
+    await sql()`UPDATE runs SET action_input = action_input || ${sql().json({ credential: token })}::jsonb WHERE id = ${runId}`;
+
+    const held = await send('aud-automation-1', target, 'into the source thread', token);
+    const heldBody = await held.json();
+    expect(held.status, JSON.stringify(heldBody)).toBe(409);
+    expect(heldBody.code).toBe('PENDING_APPROVAL');
+    expect(lookups).toHaveLength(1);
     expect(posted).not.toHaveBeenCalled();
   });
 });

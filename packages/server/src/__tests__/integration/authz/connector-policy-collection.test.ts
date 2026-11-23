@@ -127,6 +127,39 @@ describe("connector policy collection", () => {
     expect((await dropped.json()).rules).toEqual([grant]);
   });
 
+  it("scopes a guardrail by audience beside the unscoped one, and refuses audience on a grant or outside the known values", async () => {
+    const before = await snapshot();
+    const unscoped = { effect: "log", kind: "guardrail" };
+    const workspace = { effect: "approval", kind: "guardrail", audience: "workspace", note: "Ask before posting where the workspace sees it" };
+    const created = await request("PUT", path(), { revision: before.revision, rules: [unscoped, workspace] });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    expect(withoutIds(saved.rules)).toEqual(expect.arrayContaining([unscoped, workspace]));
+    expect(saved.rules).toHaveLength(2);
+    const stored = await listEntityApprovalPolicies(org.id, "connector_action");
+    expect(stored.find(p => p.audience === "workspace")).toMatchObject({ kind: "guardrail", effects: { execute: "approval" } });
+    // Echoing the collection is a no-op; audience is part of each rule's identity.
+    const echoed = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules].reverse() });
+    expect(await echoed.json()).toEqual(saved);
+    const duplicate = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules, { effect: "deny", kind: "guardrail", audience: "workspace" }] });
+    expect(await duplicate.json()).toEqual({ error: "invalid_request", message: "Duplicate policy scope." });
+
+    const onGrant = await request("PUT", path(), { revision: saved.revision, rules: [{ effect: "approval", audience: "workspace" }] });
+    expect(onGrant.status).toBe(400);
+    expect(await onGrant.json()).toEqual({ error: "invalid_request", message: "audience is only valid on a guardrail." });
+    for (const audience of ["everyone", "private", 3]) {
+      const invalid = await request("PUT", path(), { revision: saved.revision, rules: [{ effect: "deny", kind: "guardrail", audience }] });
+      expect(invalid.status, String(audience)).toBe(400);
+    }
+    expect(await snapshot()).toEqual(saved);
+
+    // Widening the audience is a different rule: the workspace one is replaced, the unscoped one stays.
+    const widened = await request("PUT", path(), { revision: saved.revision, rules: [saved.rules.find((rule: { audience?: string }) => !rule.audience), { effect: "deny", kind: "guardrail", audience: "external" }] });
+    expect(widened.status).toBe(200);
+    expect(withoutIds((await widened.json()).rules)).toEqual(expect.arrayContaining([unscoped, { effect: "deny", kind: "guardrail", audience: "external" }]));
+    expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.audience).sort()).toEqual(["external", null]);
+  });
+
   it("rejects a stale plan after another collection edit", async () => {
     const before = await snapshot();
     expect((await request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny" }] })).status).toBe(200);

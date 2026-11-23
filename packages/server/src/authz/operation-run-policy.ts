@@ -12,6 +12,7 @@ import { insertEvent } from '../utils/insert-event';
 import { allowlistRefusal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
 import { resolvePolicyPrincipal } from './policy-principal';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
+import type { DestinationLookup } from './destination-audience';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
 
@@ -70,7 +71,8 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
   return run ?? null;
 }
 
-async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun, implementationStep = false): Promise<ConnectorPolicyResult> {
+async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun, destination: DestinationLookup | undefined,
+  implementationStep = false): Promise<ConnectorPolicyResult> {
   if (run.run_type !== 'action' || run.connection_id == null || !run.action_key) return unavailable();
   const resolved = await getOperationForConnection(organizationId, Number(run.connection_id), run.action_key, sql);
   const mayVerify = resolved?.connection.status === 'pending_auth' && run.action_key === BROWSER_VERIFY_OPERATION
@@ -81,7 +83,7 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql,
     appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep,
-    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true });
+    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true, input: run.action_input, destination });
 }
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
@@ -132,6 +134,8 @@ export async function resolveRunConnectorPolicy(params: {
   organizationId: string;
   runId: number;
   sql?: DbClient;
+  /** Who sees the stored input's destination; `live` only outside any transaction. */
+  destination?: DestinationLookup;
 }): Promise<ConnectorPolicyResult | null> {
   const sql = params.sql ?? getDb();
   const run = await loadPolicyRun(sql, params.organizationId, params.runId);
@@ -148,7 +152,7 @@ export async function resolveRunConnectorPolicy(params: {
     && run.policy_principal_kind === null && run.parent_run_id === null) return null;
 
   const parentMarker = run.run_metadata?.[CONNECTOR_PARENT_RUN_METADATA_KEY];
-  if (parentMarker === undefined) return resolvePublicRunPolicy(sql, params.organizationId, run);
+  if (parentMarker === undefined) return resolvePublicRunPolicy(sql, params.organizationId, run, params.destination);
   if (!Number.isSafeInteger(parentMarker) || Number(parentMarker) !== Number(run.parent_run_id)
     || Number(parentMarker) >= Number(run.id) || Number(parentMarker) < 1) return unavailable();
   const parent = await loadPolicyRun(sql, params.organizationId, Number(parentMarker));
@@ -171,11 +175,22 @@ export async function resolveRunConnectorPolicy(params: {
 
   // The parent's own admission already applied the caller allowlist; its
   // implementation steps (e.g. Chrome navigate) are not caller-named actions.
-  const childPolicy = await resolvePublicRunPolicy(sql, params.organizationId, run, true);
+  const childPolicy = await resolvePublicRunPolicy(sql, params.organizationId, run, params.destination, true);
   if (childPolicy.effect === 'deny') return childPolicy;
   // The running parent already received authority for its implementation steps.
   // A new Ask does not interrupt each scroll; an explicit child Block still vetoes.
   return { effect: 'auto', ruleIds: childPolicy.ruleIds, rules: childPolicy.rules, reason: 'parent_approval' };
+}
+
+/**
+ * Ask the connector who sees a run's stored destination, before a transaction
+ * takes the run's lock. Only consulted when an audience rule could change the
+ * decision; pass the result to {@link applyRunConnectorPolicyAtClaim}.
+ */
+export async function classifyRunDestination(organizationId: string, runId: number): Promise<DestinationLookup> {
+  const destination: DestinationLookup = { live: true, seen: [] };
+  await resolveRunConnectorPolicy({ organizationId, runId, destination });
+  return { live: false, seen: destination.seen };
 }
 
 /** Run inside the caller's claim transaction, before any external execution. */
@@ -185,13 +200,16 @@ export async function applyRunConnectorPolicyAtClaim(params: {
   sql: DbClient;
   /** Inline runs were claimed on creation; only that same owner may park them. */
   claimedBy?: string;
+  /** From {@link classifyRunDestination}; never a live lookup inside the lock. */
+  destination?: DestinationLookup;
 }): Promise<boolean> {
   const { sql, organizationId, runId } = params;
   const run = await loadPolicyRun(sql, organizationId, runId, true);
   if (!run || (run.status !== 'pending' &&
     !(run.status === 'running' && params.claimedBy !== undefined && run.claimed_by === params.claimedBy))) return false;
   if (!['auto', 'approved'].includes(run.approval_status)) return false;
-  const policy = await resolveRunConnectorPolicy(params);
+  // The run's row is locked: replay what was classified before, never call out.
+  const policy = await resolveRunConnectorPolicy({ ...params, destination: { live: false, seen: params.destination?.seen ?? [] } });
   if (policy === null || runClearedHold(policy.effect, run)) return true;
   // An unconfirmed Check reaching a claim was admitted under a laxer policy.
   // Its requester is no longer in the loop, so it parks for a person.

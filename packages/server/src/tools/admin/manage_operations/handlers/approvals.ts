@@ -1316,10 +1316,12 @@ export async function handleApprove(
 
 	// Recheck the persisted requesting principal, not the human approver,
 	// guardrails included, before any (possibly edited) input is dispatched.
+	// No transaction is open yet, so the connector may be asked who sees it.
 	const policy = await resolveRunConnectorPolicy({
 		organizationId: ctx.organizationId,
 		runId: args.run_id,
 		sql,
+		destination: { live: true, seen: [] },
 	});
 	if (policy?.effect === "deny") {
 		const why = policy.reason === "allowlist"

@@ -34,6 +34,8 @@ export interface SlackWebApi {
    * place a binding can learn the channel's workspace (the install identity is
    * the enterprise `E…`, never a workspace), so the binding-team resolver reads
    * it here. Null when Slack omits it or the channel is unreadable.
+   * `isExtShared` (Slack Connect), `isIm` and `isMpim` let a policy tell who
+   * will see a post there.
    */
   conversationInfo(
     botToken: string,
@@ -41,6 +43,9 @@ export interface SlackWebApi {
   ): Promise<{
     name: string | null;
     isPrivate: boolean;
+    isExtShared: boolean;
+    isIm: boolean;
+    isMpim: boolean;
     contextTeamId: string | null;
   }>;
   /**
@@ -193,11 +198,21 @@ export function createSlackWebApi(): SlackWebApi {
         channel: channelId,
       });
       const ch = json.channel as
-        | { name?: string; is_private?: boolean; context_team_id?: string }
+        | {
+            name?: string;
+            is_private?: boolean;
+            is_ext_shared?: boolean;
+            is_im?: boolean;
+            is_mpim?: boolean;
+            context_team_id?: string;
+          }
         | undefined;
       return {
         name: typeof ch?.name === "string" ? ch.name : null,
         isPrivate: ch?.is_private === true,
+        isExtShared: ch?.is_ext_shared === true,
+        isIm: ch?.is_im === true,
+        isMpim: ch?.is_mpim === true,
         contextTeamId:
           typeof ch?.context_team_id === "string" && ch.context_team_id
             ? ch.context_team_id
