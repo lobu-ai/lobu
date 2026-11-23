@@ -6,6 +6,7 @@ import { CredentialService } from '../../../auth/credentials';
 import type { Env } from '../../../index';
 import { buildConnectionsNamespace } from '../../../sandbox/namespaces/connections';
 import { manageAuthProfiles } from '../../../tools/admin/manage_auth_profiles';
+import { CONNECTION_NOT_FOUND_ERROR } from '../../../tools/admin/helpers/connection-helpers';
 import { manageConnections } from '../../../tools/admin/manage_connections';
 // Through the registry, not tools/sdk_run: loading sdk_run first evaluates the
 // registry mid-cycle under the shared (isolate:false) module graph, leaving
@@ -229,7 +230,7 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
       await waitForBlockedQueries('connections', 1);
     } finally { release(); }
     await holder;
-    expect(await editing).toMatchObject({ error: 'Connection not found' });
+    expect(await editing).toMatchObject({ error: CONNECTION_NOT_FOUND_ERROR });
     expect(await sql`SELECT * FROM auth_profiles WHERE id = ${profile.id}`).toEqual([before]);
   });
 
@@ -1497,13 +1498,13 @@ describe('OAuth reconnect preserves the existing connection until consent', () =
     const s = await seed();
     await getTestDb()`UPDATE connections SET status = 'paused', deleted_at = NOW() WHERE id = ${s.connection.id}`;
     const raw = await manageConnections({ action: 'get', connection_id: s.connection.id }, {} as Env, s.ctx);
-    expect(JSON.parse(JSON.stringify(raw))).toEqual({ error: 'Connection not found' });
-    expect(JSON.stringify(raw)).toBe('{"error":"Connection not found"}');
+    expect(JSON.parse(JSON.stringify(raw))).toEqual({ error: CONNECTION_NOT_FOUND_ERROR });
+    expect(JSON.stringify(raw)).toBe(JSON.stringify({ error: CONNECTION_NOT_FOUND_ERROR }));
     const result = await getTool('query_sdk')!.handler({
       script: `export default async (_ctx, client) => client.connections.get(${s.connection.id});`,
     }, {} as Env, s.ctx);
     expect(result).toMatchObject({ success: false, error: {
-      name: 'ClientSdkActionError', message: 'Connection not found', code: 'NOT_FOUND', retryable: false,
+      name: 'ClientSdkActionError', message: CONNECTION_NOT_FOUND_ERROR, code: 'NOT_FOUND', retryable: false,
     } });
   });
 

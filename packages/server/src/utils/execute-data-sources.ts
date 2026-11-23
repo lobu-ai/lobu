@@ -355,7 +355,14 @@ function extractTableRefs(
 ): string[] {
   const res = parseSql(stripPlaceholders(query), Dialect.PostgreSQL);
   if (!res.success || !res.ast) {
-    throw new ToolUserError('Could not parse SQL query for table extraction', 400, 'VALIDATION');
+    // The parser's own error names the line, column and token, which is what a
+    // caller needs to fix the query; it only ever describes the caller's SQL.
+    const detail = res.error ? `: ${res.error}` : '';
+    throw new ToolUserError(
+      `Could not parse SQL query for table extraction${detail}. Send a single PostgreSQL SELECT or WITH statement.`,
+      400,
+      'VALIDATION'
+    );
   }
   // Reject multiple statements: org-scoping CTEs only wrap the FIRST statement,
   // so a trailing `; SELECT … FROM public.oauth_tokens` would run unscoped.

@@ -79,6 +79,7 @@ import {
   validateTimezone,
 } from '../../utils/cron';
 import { DEVICE_ONLINE_WINDOW_SECONDS } from '../../utils/device-liveness';
+import { withFailureCode } from '../../utils/errors';
 import { recordChangeEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
 import {
@@ -99,6 +100,7 @@ import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
 import { insertToolConfigChange } from './helpers/config-audit';
 import { assertEntityIdsInOrg, callerIsAdmin } from './helpers/db-helpers';
+import { CONNECTION_NOT_FOUND_ERROR } from './helpers/connection-helpers';
 import {
   type FeedDefinition,
   feedOperations,
@@ -567,7 +569,7 @@ async function handleReadFeed(
       AND f.deleted_at IS NULL
       ${visibilityFilter}
   `) as Array<Record<string, unknown>>;
-  if (rows.length === 0) return { error: 'Feed not found' };
+  if (rows.length === 0) return withFailureCode({ error: 'Feed not found' }, 'NOT_FOUND');
   const [feed] = await toPublicFeeds(organizationId, [rows[0]]);
 
   const runs = await sql`
@@ -653,7 +655,7 @@ async function handleCreateFeed(
   `;
 
   if (connRows.length === 0) {
-    return { error: 'Connection not found' };
+    return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, 'NOT_FOUND');
   }
 
   const conn = connRows[0] as {
@@ -922,7 +924,7 @@ async function handleUpdateFeed(
       FOR UPDATE OF f
     `;
     if (existing.length === 0) {
-      return { error: 'Feed not found' } as const;
+      return withFailureCode({ error: 'Feed not found' } as const, 'NOT_FOUND');
     }
     const before = await tx`SELECT ${tx.unsafe(publicFeedColumnList())} FROM feeds WHERE id = ${args.feed_id}`;
     const feedRow = existing[0] as Record<string, unknown>;
@@ -1105,7 +1107,7 @@ async function handleDeleteFeed(
   }, tx);
     return rows;
   });
-  if (deleted.length === 0) return { error: 'Feed not found or already deleted' };
+  if (deleted.length === 0) return withFailureCode({ error: 'Feed not found or already deleted' }, 'NOT_FOUND');
 
   // Record change event in knowledge for audit trail
   const feed = deleted[0];
@@ -1146,7 +1148,7 @@ async function handleTriggerFeed(
   `;
 
   if (feedRows.length === 0) {
-    return { error: 'Feed not found' };
+    return withFailureCode({ error: 'Feed not found' }, 'NOT_FOUND');
   }
 
   const feed = feedRows[0] as { status: string; connection_status: string };
@@ -1223,7 +1225,7 @@ async function handleRecollectFeed(
       FOR UPDATE OF f
     `;
     if (locked.length === 0) {
-      return { error: 'Feed not found' };
+      return withFailureCode({ error: 'Feed not found' }, 'NOT_FOUND');
     }
 
     const active = await tx`

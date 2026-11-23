@@ -9,7 +9,9 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
+import type { Env } from "../../index";
 import { ClientSdkActionError } from "../../sandbox/namespaces/action-call";
+import { getTool } from "../../tools/registry";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	createTestConnection,
@@ -17,12 +19,15 @@ import {
 	createTestEntity,
 	createTestOrganization,
 	createTestUser,
+	ownerToolContext,
 } from "../setup/test-fixtures";
 import { TestApiClient } from "../setup/test-mcp-client";
 
 describe("manage_feeds cross-org entity_ids", () => {
 	let owner: TestApiClient;
 	let ownerOrgId: string;
+	let ownerUserId: string;
+	let foreignConnectionId: number;
 	let connectionId: number;
 	let inOrgEntityId: number;
 	let foreignEntityId: number;
@@ -33,6 +38,7 @@ describe("manage_feeds cross-org entity_ids", () => {
 		const org = await createTestOrganization({ name: "Feed Owner Org" });
 		ownerOrgId = org.id;
 		const user = await createTestUser({ email: "feed-owner@test.com" });
+		ownerUserId = user.id;
 		owner = await TestApiClient.for({
 			organizationId: org.id,
 			userId: user.id,
@@ -69,6 +75,44 @@ describe("manage_feeds cross-org entity_ids", () => {
 			organization_id: foreignOrg.id,
 		});
 		foreignEntityId = Number(foreignEntity.id);
+		const foreignUser = await createTestUser({ email: "feed-foreign@test.com" });
+		await createTestConnectorDefinition({
+			key: "github",
+			name: "GitHub",
+			organization_id: foreignOrg.id,
+			feeds_schema: { default: {} },
+		});
+		const foreignConnection = await createTestConnection({
+			organization_id: foreignOrg.id,
+			connector_key: "github",
+			created_by: foreignUser.id,
+			createDefaultFeed: false,
+		});
+		foreignConnectionId = Number(foreignConnection.id);
+	});
+
+	it("fails create_feed on another org's connection as a typed NOT_FOUND", async () => {
+		const result = await getTool("run_sdk")!.handler(
+			{
+				script: `export default async (_ctx, client) => client.feeds.create({ connection_id: ${foreignConnectionId}, feed_key: "default" });`,
+			},
+			{} as Env,
+			ownerToolContext(ownerOrgId, ownerUserId),
+		);
+
+		expect(result).toMatchObject({
+			success: false,
+			error: {
+				name: "ClientSdkActionError",
+				code: "NOT_FOUND",
+				retryable: false,
+			},
+		});
+		const sql = getTestDb();
+		const rows = await sql`
+      SELECT id FROM feeds WHERE connection_id = ${foreignConnectionId}
+    `;
+		expect(rows.length).toBe(0);
 	});
 
 	it("rejects create_feed when an entity_id belongs to another org", async () => {

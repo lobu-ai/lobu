@@ -35,6 +35,8 @@ import {
   createExpiredAccessToken,
   createTestAccessToken,
   createTestAgent,
+  createTestConnection,
+  createTestConnectorDefinition,
   createTestDeviceCode,
   createTestEntity,
   createTestOAuthClient,
@@ -2054,20 +2056,26 @@ describe('MCP Authentication', () => {
       expect(result.error).toBeUndefined();
       expect(result.rows).toEqual([{ ok: 1 }]);
 
-      const init = await post('/mcp', {
-        body: {
-          jsonrpc: '2.0',
-          id: 'single-grant-init',
-          method: 'initialize',
-          params: {
-            protocolVersion: MCP_PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: { name: 'single-grant-test', version: '1.0' },
-          },
-        },
-        token,
-      });
-      const initBody = await init.json();
+      const initialize = async () =>
+        (
+          await post('/mcp', {
+            body: {
+              jsonrpc: '2.0',
+              id: 'single-grant-init',
+              method: 'initialize',
+              params: {
+                protocolVersion: MCP_PROTOCOL_VERSION,
+                capabilities: {},
+                clientInfo: { name: 'single-grant-test', version: '1.0' },
+              },
+            },
+            token,
+          })
+        ).json();
+      const initBody = await initialize();
+      // The granted workspace has no connection yet, so the session leads
+      // with first-source guidance; a visible connection removes it.
+      expect(initBody.result?.instructions).toContain('connections.connect');
       expect(initBody.result?.instructions).not.toContain('primary workspace');
       expect(initBody.result?.instructions).toContain('client.org(');
       expect(initBody.result?.instructions).toContain('operations.listActivity');
@@ -2082,6 +2090,21 @@ describe('MCP Authentication', () => {
       expect(attention.success).toBe(true);
       expect(attention.return_value.items).toEqual([]);
       expect(initBody.result?.instructions).not.toContain('### Saving (do this automatically)');
+
+      await createTestConnectorDefinition({
+        key: 'singleton-grant-connector',
+        name: 'Singleton Grant',
+        organization_id: singletonOrg.id,
+      });
+      await createTestConnection({
+        organization_id: singletonOrg.id,
+        connector_key: 'singleton-grant-connector',
+        visibility: 'org',
+        createDefaultFeed: false,
+      });
+      const connectedBody = await initialize();
+      expect(connectedBody.result?.instructions).toContain('operations.listActivity');
+      expect(connectedBody.result?.instructions).not.toContain('connections.connect');
     });
 
     it('uses the selected workspace role for cross-org SDK mutations on unscoped OAuth only', async () => {

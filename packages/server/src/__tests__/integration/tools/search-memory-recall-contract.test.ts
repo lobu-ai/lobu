@@ -607,6 +607,51 @@ describe('search_memory > recall contract', () => {
     expect(suggestion).toContain('client.feeds.readMany({ reads: [{ feed_id }] })');
   });
 
+  // The first-source lead keys on connections the CALLER can see: another
+  // member's private connection must neither suppress it nor reveal itself.
+  it('leads an empty result with source setup only while the caller sees no connection', async () => {
+    const emptyOrg = await createTestOrganization({ name: 'Recall First Source Org' });
+    const emptyUser = await createTestUser({ email: 'recall-first-source@example.com' });
+    const otherUser = await createTestUser({ email: 'recall-first-source-other@example.com' });
+    await addUserToOrganization(emptyUser.id, emptyOrg.id, 'owner');
+    await addUserToOrganization(otherUser.id, emptyOrg.id, 'member');
+    const emptyCtx = {
+      organizationId: emptyOrg.id,
+      userId: emptyUser.id,
+      tokenType: 'session',
+      memberRole: 'owner',
+    } as ToolContext;
+    const offersFirstSource = async () =>
+      ((await search({ query: 'zzzz-first-source-probe' }, env, emptyCtx)).suggestion ?? '').includes(
+        'connections.connect'
+      );
+
+    expect(await offersFirstSource()).toBe(true);
+
+    await createTestConnectorDefinition({
+      key: 'first-source-connector',
+      name: 'First Source',
+      organization_id: emptyOrg.id,
+    });
+    await createTestConnection({
+      organization_id: emptyOrg.id,
+      connector_key: 'first-source-connector',
+      created_by: otherUser.id,
+      visibility: 'private',
+      createDefaultFeed: false,
+    });
+    expect(await offersFirstSource()).toBe(true);
+
+    await createTestConnection({
+      organization_id: emptyOrg.id,
+      connector_key: 'first-source-connector',
+      created_by: otherUser.id,
+      visibility: 'org',
+      createDefaultFeed: false,
+    });
+    expect(await offersFirstSource()).toBe(false);
+  });
+
   // ── Tier-aware persist guidance ─────────────────────────────────────────
   // `entitySchema.createType` is admin-tier, `entities.create` is write, and
   // `run_sdk`/`save_memory` are write-tier. The guidance must name only what

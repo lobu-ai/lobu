@@ -22,7 +22,7 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-sta
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
-import { getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection } from '../../helpers/connection-helpers';
+import { CONNECTION_NOT_FOUND_ERROR, getOAuthMethods, issueOAuthReconnectLink, recoverPendingOAuthConnection } from '../../helpers/connection-helpers';
 import { withFailureCode } from '../../../../utils/errors';
 import { getScopedConnectorDefinition } from '../../../../catalog/connector-definitions';
 
@@ -59,7 +59,7 @@ export async function handleReauthenticate(
   `;
 
   if (rows.length === 0) {
-    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
+    return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, 'NOT_FOUND');
   }
 
   const row = rows[0] as {
@@ -212,7 +212,7 @@ export async function handleTest(
   `;
 
   if (rows.length === 0) {
-    return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
+    return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, 'NOT_FOUND');
   }
 
   const conn = rows[0] as any;

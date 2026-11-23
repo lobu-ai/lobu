@@ -7,8 +7,11 @@
  * in db/migrations/20260512131703_connections_slug.sql mirrors their semantics.
  */
 
-import { slugify } from '@lobu/core';
-import { type DbClient, getDb } from '../db/client';
+import { getErrorMessage, slugify } from '@lobu/core';
+import { compileConnectionRowVisibility } from '../authz/connection-visibility';
+import type { AuthzScope } from '../authz/scope';
+import { type DbClient, getDb, pgTextArray } from '../db/client';
+import logger from './logger';
 
 /**
  * Server-side slug format guard. Lowercase letters/digits/hyphens, 1–63 chars,
@@ -208,5 +211,33 @@ export async function insertConnectionWithSlug<T>(opts: {
         db: opts.db,
       });
     }
+  }
+}
+
+/**
+ * True when none of these workspaces holds a live connection the caller can
+ * see. `connections` is a bounded config table. Row visibility depends on the
+ * principal alone, so one predicate covers every workspace, and another
+ * member's private connection never counts. A failed probe answers false so
+ * callers keep their standard guidance.
+ */
+export async function hasNoVisibleConnections(
+  scope: AuthzScope,
+  organizationIds: readonly string[]
+): Promise<boolean> {
+  if (organizationIds.length === 0) return false;
+  try {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT 1 FROM connections c
+      WHERE c.organization_id = ANY(${pgTextArray([...organizationIds])}::text[])
+        AND c.deleted_at IS NULL
+        ${sql.unsafe(compileConnectionRowVisibility(scope, 'c'))}
+      LIMIT 1
+    `;
+    return rows.length === 0;
+  } catch (error) {
+    logger.warn(`[connections] connection presence probe failed: ${getErrorMessage(error)}`);
+    return false;
   }
 }

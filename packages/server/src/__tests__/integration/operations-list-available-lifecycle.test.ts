@@ -34,6 +34,7 @@ import {
 	ownerToolContext,
 	seedOwnerContext,
 } from "../setup/test-fixtures";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../tools/admin/helpers/connection-helpers";
 
 async function createOfflineDeviceWorker(
 	userId: string,
@@ -910,7 +911,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			ctxFor(org.id, owner.id),
 		);
 		expect(hidden).toEqual({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		});
 		// The visibility check is independent of secondary filters: a hidden id
 		// errors even when connector_key/entity_id are also supplied.
@@ -924,7 +925,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			ctxFor(org.id, owner.id),
 		);
 		expect(hiddenCompound).toEqual({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		});
 
 		const executed = await manageOperations(
@@ -938,7 +939,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			ctxFor(org.id, owner.id),
 		);
 		expect(executed).toEqual({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		});
 		const runRows = await getTestDb()`
 			SELECT id FROM runs WHERE connection_id = ${hiddenPrivate.id}
@@ -992,7 +993,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			TEST_ENV(),
 			ctxFor(org.id, owner.id),
 		).catch((err) => ({ error: String(err) }))) as { error?: string };
-		expect(ownerExec.error).toBe("Connection not found or not visible.");
+		expect(ownerExec.error).toBe(OPERATION_TARGET_NOT_FOUND_ERROR);
 
 		// Fail-closed: a plain member sees the row NOWHERE — list and
 		// operations agree for them too.
@@ -1023,7 +1024,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			ctxFor(org.id, member.id),
 		);
 		expect(memberExec).toEqual({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		});
 	});
 
@@ -1067,7 +1068,7 @@ describe("operations.listAvailable — capability discovery DTO", () => {
 			ctxFor(org.id, user.id),
 		);
 		expect(missing).toEqual({
-			error: "Connection not found or not visible.",
+			error: OPERATION_TARGET_NOT_FOUND_ERROR,
 		});
 
 		// A COMPOUND filter that excludes a visible connection is a normal empty
