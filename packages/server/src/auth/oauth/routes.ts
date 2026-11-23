@@ -49,6 +49,7 @@ import {
 } from './workspace-grants';
 import { getConfiguredPublicOrigin } from '../../utils/public-origin';
 import { resolveSession } from '../resolve-session';
+import { recordOAuthClient, recordOAuthConsentDecision } from '../span-attributes';
 import { organizationLiveSql } from '../../workspace/deletion-state';
 import { routeFailure } from '../../diagnostics';
 
@@ -873,6 +874,10 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
       400
     );
   }
+  // The signed intent names the client; the response status says whether the
+  // decision then went through.
+  recordOAuthClient(authorizationRequest.client_id);
+  recordOAuthConsentDecision(body.approved ? 'approve' : 'deny');
 
   const optionalParam = (value: unknown): string | undefined =>
     typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -951,6 +956,7 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
   if ('error' in clientResult) {
     return c.json(clientResult, 400);
   }
+  recordOAuthClient(clientResult.client_id, clientResult.client_name);
   if (
     body.client_name !== undefined &&
     body.client_name !== (clientResult.client_name || clientResult.client_id)
@@ -1288,6 +1294,7 @@ oauthRoutes.get('/oauth/device/info', requireAuth, async (c) => {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
   const client = await provider.clientsStore.getClient(deviceCode.client_id);
+  recordOAuthClient(deviceCode.client_id, client?.client_name);
   return c.json({
     client_name: client?.client_name ?? null,
     client_id: deviceCode.client_id,
@@ -1298,6 +1305,12 @@ oauthRoutes.get('/oauth/device/info', requireAuth, async (c) => {
     multi_workspace_grants_enabled: isMultiWorkspaceGrantIssuanceEnabled(c.env),
   });
 });
+
+/** Name the device code's client on the request span for the consent funnel. */
+async function recordDeviceCodeClient(provider: OAuthProvider, clientId: string): Promise<void> {
+  const client = await provider.clientsStore.getClient(clientId);
+  recordOAuthClient(clientId, client?.client_name);
+}
 
 /**
  * POST /oauth/device/approve
@@ -1340,11 +1353,13 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     return c.json(createOAuthError('invalid_request', 'user_code is required'), 400);
   }
 
+  recordOAuthConsentDecision(body.approved ? 'approve' : 'deny');
   if (!body.approved) {
-    const denied = await provider.denyDeviceCode(body.user_code, user.id);
-    if (!denied) {
+    const deniedClientId = await provider.denyDeviceCode(body.user_code, user.id);
+    if (!deniedClientId) {
       return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
     }
+    await recordDeviceCodeClient(provider, deniedClientId);
     return c.json({ status: 'denied' });
   }
 
@@ -1354,6 +1369,7 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
   if (!deviceCode) {
     return c.json(createOAuthError('invalid_grant', INVALID_DEVICE_CODE_MESSAGE), 400);
   }
+  await recordDeviceCodeClient(provider, deviceCode.client_id);
 
   const requestedScope = deviceCode.scope || DEFAULT_SCOPES_STRING;
   let approvedScope = requestedScope;

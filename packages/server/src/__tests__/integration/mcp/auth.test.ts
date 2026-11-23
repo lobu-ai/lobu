@@ -8,11 +8,25 @@
  */
 
 import { createHash } from 'node:crypto';
-import { MCP_PROTOCOL_VERSION } from '@lobu/core';
+import {
+  createSpan,
+  initTracing,
+  MCP_PROTOCOL_VERSION,
+  runInSpanContext,
+  shutdownTracing,
+  SpanKind,
+} from '@lobu/core';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createAuthorizationIntent } from '../../../auth/oauth/authorization-intent';
 import { formatUngrantedMemberMessage } from '../../../auth/oauth/workspace-grants';
 import { hashToken } from '../../../auth/oauth/utils';
+import {
+  AUTH_CLIENT_ID_ATTRIBUTE,
+  AUTH_CLIENT_NAME_ATTRIBUTE,
+  AUTH_CONSENT_DECISION_ATTRIBUTE,
+  AUTH_REJECT_REASON_ATTRIBUTE,
+} from '../../../auth/span-attributes';
 import { parsePgTextArray } from '../../../db/client';
 import { clearInMemoryMcpSessionsForTests } from '../../../mcp-handler';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
@@ -38,6 +52,30 @@ async function verifyDeviceCode(userCode: string, cookie: string): Promise<void>
     cookie,
   });
   expect(response.status).toBe(200);
+}
+
+/**
+ * Run a request under a stand-in for the HTTP server span (server-lifecycle.ts
+ * wraps the app in production; the test helpers call the app directly) and
+ * return the attributes the request left on it.
+ */
+async function requestSpanAttributes<T>(request: () => Promise<T>) {
+  const exporter = new InMemorySpanExporter();
+  await shutdownTracing();
+  initTracing({ serviceName: 'mcp-auth-span-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+  try {
+    const span = createSpan('HTTP request', undefined, SpanKind.SERVER);
+    let result: T;
+    try {
+      result = await runInSpanContext(span, request);
+    } finally {
+      span?.end();
+    }
+    const [finished] = exporter.getFinishedSpans().filter((s) => s.kind === SpanKind.SERVER);
+    return { result, attributes: finished?.attributes ?? {} };
+  } finally {
+    await shutdownTracing();
+  }
 }
 
 async function createAccountAccessToken(
@@ -151,16 +189,17 @@ describe('MCP Authentication', () => {
     });
 
     it('challenges unauthenticated requests on the unscoped /mcp endpoint with 401 + WWW-Authenticate', async () => {
-      const response = await post('/mcp', {
+      const { result: response, attributes } = await requestSpanAttributes(() => post('/mcp', {
         body: {
           jsonrpc: '2.0',
           id: 1,
           method: 'tools/list',
           params: {},
         },
-      });
+      }));
 
       expect(response.status).toBe(401);
+      expect(attributes[AUTH_REJECT_REASON_ATTRIBUTE]).toBe('missing_token');
       expect(response.headers.get('WWW-Authenticate')).toBe(
         'Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp", scope="mcp:read mcp:write profile:read"'
       );
@@ -422,7 +461,7 @@ describe('MCP Authentication', () => {
     });
 
     it('allows consent approval for a public org resource even when the user is not a member', async () => {
-      const response = await post('/oauth/authorize/consent', {
+      const { result: response, attributes } = await requestSpanAttributes(() => post('/oauth/authorize/consent', {
         body: {
           client_id: client.client_id,
           redirect_uri: client.redirect_uris[0],
@@ -448,13 +487,18 @@ describe('MCP Authentication', () => {
         },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
-      });
+      }));
 
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.redirect_url).toContain(client.redirect_uris[0]);
       expect(body.redirect_url).toContain('code=');
       expect(body.redirect_url).toContain('state=public-org-consent-test');
+      expect(attributes).toMatchObject({
+        [AUTH_CLIENT_ID_ATTRIBUTE]: client.client_id,
+        [AUTH_CLIENT_NAME_ATTRIBUTE]: 'Test Client',
+        [AUTH_CONSENT_DECISION_ATTRIBUTE]: 'approve',
+      });
     });
   });
 
@@ -563,7 +607,7 @@ describe('MCP Authentication', () => {
 
       await expect(mcpListTools({ token, orgSlug: org2.slug })).rejects.toThrow();
 
-      const response = await post(`/mcp/${org2.slug}`, {
+      const { result: response, attributes } = await requestSpanAttributes(() => post(`/mcp/${org2.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: 1,
@@ -575,11 +619,18 @@ describe('MCP Authentication', () => {
           },
         },
         token,
-      });
+      }));
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toBe(
         `Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/mcp/${org2.slug}", scope="mcp:read mcp:write profile:read", error="invalid_token"`
       );
+      // The reject returns before the request context names a user, so the
+      // span carries the token's user and client itself.
+      expect(attributes).toMatchObject({
+        [AUTH_REJECT_REASON_ATTRIBUTE]: 'resource_mismatch',
+        'user.id': user.id,
+        [AUTH_CLIENT_ID_ATTRIBUTE]: client.client_id,
+      });
     });
 
     it('enforces OAuth workspace grants on REST tools and rejects MCP audience replay', async () => {
@@ -841,7 +892,7 @@ describe('MCP Authentication', () => {
     });
 
     it('should reject invalid OAuth access token', async () => {
-      const response = await post('/mcp', {
+      const { result: response, attributes } = await requestSpanAttributes(() => post('/mcp', {
         body: {
           jsonrpc: '2.0',
           id: 1,
@@ -849,12 +900,14 @@ describe('MCP Authentication', () => {
           params: {},
         },
         token: 'invalid_token_that_does_not_exist',
-      });
+      }));
 
       expect(response.status).toBe(401);
 
       const body = await response.json();
       expect(body.error).toBe('invalid_token');
+      expect(attributes[AUTH_REJECT_REASON_ATTRIBUTE]).toBe('invalid_token');
+      expect(attributes['user.id']).toBeUndefined();
     });
 
     it('searches an explicit grant without borrowing a workspace target', async () => {
@@ -1758,7 +1811,7 @@ describe('MCP Authentication', () => {
       await addUserToOrganization(user.id, org2.id);
       const { token } = await createAccountAccessToken(user.id, org.id, client.client_id);
 
-      const response = await post(`/mcp/${org2.slug}`, {
+      const { result: response, attributes } = await requestSpanAttributes(() => post(`/mcp/${org2.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: 1,
@@ -1766,12 +1819,17 @@ describe('MCP Authentication', () => {
           params: {},
         },
         token,
-      });
+      }));
 
       expect(response.status).toBe(403);
       expect(await response.json()).toEqual({
         error: 'forbidden',
         error_description: formatUngrantedMemberMessage(org2.slug),
+      });
+      expect(attributes).toMatchObject({
+        [AUTH_REJECT_REASON_ATTRIBUTE]: 'workspace_not_granted',
+        'user.id': user.id,
+        [AUTH_CLIENT_ID_ATTRIBUTE]: client.client_id,
       });
     });
 
@@ -2494,7 +2552,7 @@ describe('MCP Authentication', () => {
       });
 
       await verifyDeviceCode(dc.userCode, sessionCookie);
-      const response = await post('/oauth/device/approve', {
+      const { result: response, attributes } = await requestSpanAttributes(() => post('/oauth/device/approve', {
         body: {
           user_code: dc.userCode,
           approved: true,
@@ -2504,11 +2562,16 @@ describe('MCP Authentication', () => {
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
         env: { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' },
-      });
+      }));
 
       const body = await response.json();
       expect(response.status).toBe(200);
       expect(body.status).toBe('approved');
+      expect(attributes).toMatchObject({
+        [AUTH_CLIENT_ID_ATTRIBUTE]: deviceClient.client_id,
+        [AUTH_CLIENT_NAME_ATTRIBUTE]: 'Test Client',
+        [AUTH_CONSENT_DECISION_ATTRIBUTE]: 'approve',
+      });
       const [approved] =
         await getTestDb()`SELECT organization_id FROM oauth_device_codes WHERE device_code = ${dc.deviceCode}`;
       expect(approved.organization_id).toBeNull();
