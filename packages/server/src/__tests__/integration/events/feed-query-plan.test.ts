@@ -274,13 +274,15 @@ describe('activity feed queries stay organization-bounded', () => {
     // Vary distances independently of organization/id order. Both organizations
     // share one ANN index, as in production. Over 600 nearer own rows are either
     // private or bookkeeping: filtering after the chunk cap loses visible hits.
+    // The second component stays in [0.25, 0.75], so no event id (ids depend
+    // on what ran earlier in this database) can round to an exact match.
     await sql`
       INSERT INTO event_embeddings (event_id, embedding_model, embedding)
       SELECT id, 'Xenova/bge-base-en-v1.5',
         (CASE WHEN organization_id = ${feedOrgId} AND
             (origin_id LIKE 'own-1%' OR origin_id LIKE 'own-2%')
           THEN '[1,0,0' || repeat(',0', 765) || ']'
-          ELSE '[1,' || (sin(id * 0.731) * 0.5 + 0.5)::text || ',' ||
+          ELSE '[1,' || (sin(id * 0.731) * 0.25 + 0.5)::text || ',' ||
             (cos(id * 0.137) * 0.5)::text || repeat(',0', 765) || ']'
           END)::vector
       FROM events

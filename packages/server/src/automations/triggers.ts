@@ -7,7 +7,7 @@ import {
 	type AutomationTrigger,
 	type AutomationWorkspaceEventTrigger,
 } from "@lobu/core/contracts/tools/manage-automations";
-import type { DbClient } from "../db/client";
+import { type DbClient, parsePgTextArray } from "../db/client";
 import { listCatalogEntries } from "../catalog/load";
 import { feedTriggerEligibilitySql } from "../connectors/feed-health-semantics";
 import { validateSchedule, validateTimezone } from "../utils/cron";
@@ -320,11 +320,51 @@ export function assertAutomationInstructions(
 	);
 }
 
-/** Validate connection-scoped triggers against the owning organization. */
+const CHAT_LINK_TAG = "system:chat-link";
+
+/**
+ * Stored event triggers of a chat-link Automation. Linking a channel from a
+ * chat connection owned by another organization is authorized by the link
+ * flow, so these are the only stored triggers whose foreign connection an
+ * update may keep. Every other Automation returns none.
+ */
+export function chatLinkStoredTriggers(
+	tags: string | string[] | null | undefined,
+	storedTriggers: AutomationTrigger[] | null | undefined
+): AutomationEventTrigger[] {
+	if (!parsePgTextArray(tags).includes(CHAT_LINK_TAG)) return [];
+	return (storedTriggers ?? []).filter(
+		(trigger): trigger is AutomationEventTrigger =>
+			trigger.kind === "event" && trigger.source !== "workspace"
+	);
+}
+
+/** A foreign connection may stay only on the exact channel it was linked for. */
+function keepsLinkedChannel(
+	trigger: AutomationEventTrigger,
+	linkedTriggers: readonly AutomationEventTrigger[]
+): boolean {
+	return linkedTriggers.some(
+		(linked) =>
+			linked.connection_id != null &&
+			String(linked.connection_id) === String(trigger.connection_id) &&
+			linked.connector_key === trigger.connector_key &&
+			isDeepStrictEqual(linked.match?.channel_id, trigger.match?.channel_id) &&
+			isDeepStrictEqual(linked.match?.team_id, trigger.match?.team_id)
+	);
+}
+
+/**
+ * Validate connection-scoped triggers against the owning organization.
+ * `linkedTriggers` (from `chatLinkStoredTriggers`) lets an update keep a
+ * chat-link's foreign connection on its linked channel; its events are then
+ * validated against the connection organization's catalog.
+ */
 export async function assertAutomationTriggerConnections(
 	sql: DbClient,
 	organizationId: string,
-	triggers: AutomationTrigger[]
+	triggers: AutomationTrigger[],
+	linkedTriggers: readonly AutomationEventTrigger[] = []
 ): Promise<void> {
 	const eventTriggers = triggers.filter(
 		(trigger): trigger is AutomationEventTrigger =>
@@ -332,12 +372,14 @@ export async function assertAutomationTriggerConnections(
 	);
 	const catalogs = new Map<string, ConnectorAutomationEventCatalog>();
 	for (const trigger of eventTriggers) {
+		let catalogOrganizationId = organizationId;
 		if (trigger.connection_id) {
+			const keepsLink = keepsLinkedChannel(trigger, linkedTriggers);
 			const rows = await sql`
-				SELECT connector_key
+				SELECT connector_key, organization_id
 				FROM connections
 				WHERE id = ${trigger.connection_id}
-				  AND organization_id = ${organizationId}
+				  AND ${keepsLink ? sql`TRUE` : sql`organization_id = ${organizationId}`}
 				  AND deleted_at IS NULL
 				LIMIT 1
 			`;
@@ -351,16 +393,18 @@ export async function assertAutomationTriggerConnections(
 					`Connection ${trigger.connection_id} is not a ${trigger.connector_key} connection.`
 				);
 			}
+			catalogOrganizationId = String(rows[0]?.organization_id);
 		}
 
-		let catalog = catalogs.get(trigger.connector_key);
+		const catalogKey = `${catalogOrganizationId}:${trigger.connector_key}`;
+		let catalog = catalogs.get(catalogKey);
 		if (!catalog) {
 			catalog = await getConnectorAutomationEventCatalog(
 				sql,
-				organizationId,
+				catalogOrganizationId,
 				trigger.connector_key
 			);
-			catalogs.set(trigger.connector_key, catalog);
+			catalogs.set(catalogKey, catalog);
 		}
 		// `catalog.events` ALWAYS carries the merged platform events, so the old
 		// `events.length === 0` test could never be true and this guard never

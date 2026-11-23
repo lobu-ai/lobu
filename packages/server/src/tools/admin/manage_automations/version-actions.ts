@@ -37,6 +37,7 @@ import {
   assertAutomationInstructions,
   assertAutomationOutputsUseWindowExecution,
   assertAutomationTriggerConnections,
+  chatLinkStoredTriggers,
   automationTriggersEqual,
   resolveAutomationTriggerWrite,
 } from '../../../automations/triggers';
@@ -76,7 +77,7 @@ export async function handleCreateVersion(
   const automationRows = await sql`
     SELECT i.id, i.version, i.current_version_id, i.automation_group_id, i.sources, i.organization_id,
            i.entity_ids, i.schedule, i.timezone, i.triggers, i.managed_agent_id,
-           i.device_worker_id::text AS device_worker_id, i.agent_kind,
+           i.device_worker_id::text AS device_worker_id, i.agent_kind, i.tags,
            i.reaction_script, i.execution_config, i.execution_config->'executor'->>'source' AS executor_source
     FROM automations i WHERE i.id = ${args.automation_id}
   `;
@@ -230,7 +231,8 @@ export async function handleCreateVersion(
     await assertAutomationTriggerConnections(
       sql,
       versionOrganizationId,
-      triggerWrite.triggers
+      triggerWrite.triggers,
+      chatLinkStoredTriggers(automationRows[0].tags as string | string[] | null, previousTriggers)
     );
   }
 
