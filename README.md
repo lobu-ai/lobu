@@ -223,7 +223,7 @@ Docs: [Memory](https://lobu.ai/getting-started/memory/) · [Connectors](https://
 
 A Lobu specialist has a stable role, instructions, memory, tools, and conversation history. It can be reached from web chat or Slack and called by external agents through `client.conversations.send`.
 
-Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.md`, and `USER.md`. Guardrails can inspect input, output, and tool calls. Connector actions follow organization Auto, Ask, or Block rules in Settings → Policies; guardrails still apply under Auto, and action results return to the shared event log.
+Specialists use role files for identity and instructions: `IDENTITY.md`, `SOUL.md`, and `USER.md`. Guardrails can inspect input, output, and tool calls. Connector actions follow the workspace rules in Settings → Policies. A rule runs an action automatically, only logs it, has the agent confirm it follows the rule (Check), asks a person first, or blocks it. Rules apply to agents, connected apps and Automations, never to a person acting in the web app. Guardrails still apply when an action runs automatically, and action results return to the shared event log.
 
 External agents do not ask users to write delegation code. They pass scripts like these to Lobu's `query_sdk` and `run_sdk` MCP tools:
 

@@ -379,9 +379,10 @@ ad-hoc SQL and warehouse pushdown; configured feed reads belong on
 Actions let connectors write back to external services (e.g. create a GitHub
 issue). Define them in the `actions` record passed to `defineConnector`. The
 record key becomes the action key. Declare what the operation does; the
-organization controls approval through Auto, Ask, or Block policies. An action
-with no matching policy runs automatically; add an Ask or Block rule, or a
-guardrail, to hold it. A destructive hint does not hold an action by itself:
+organization controls approval through its policies: run automatically, only
+log, Check (the agent confirms it follows the rule), Ask first, or Block. An
+action with no matching policy runs automatically; add a rule to hold it. A
+destructive hint does not hold an action by itself:
 
 ```typescript
 interface ConnectorActionSpec {

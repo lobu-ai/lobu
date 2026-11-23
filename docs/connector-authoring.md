@@ -206,9 +206,9 @@ deliver directly without running the connector again or scheduling imports.
 An authorized headless Automation may read its subscribed private feed; this
 does not grant it access to other private feeds. Browser reads retain the
 Automation principal for connector policy and scrub temporary operation payloads.
-Background observation requires Auto permission for reads on the source connector.
-Ask or Block policies revoke the subscription; a background listener cannot
-approve its own access.
+Background observation requires reads on the source connector to run without a
+hold (Auto or Log). A Check, Ask or Block result revokes the subscription; a
+background listener cannot confirm or approve its own access.
 
 Automations explicitly decide whether to save original content, persist a
 derived result, or only act. Observation references and Automation run records
@@ -346,10 +346,10 @@ in the server isolate: do not pin it to the device or import `child_process`.
 The existing device connection owns process execution and routing.
 
 The host reconstructs the original requester and applies the target connection's
-visibility and Auto/Ask/Block policy. This does not inherit the parent action's
+visibility and connector policy. This does not inherit the parent action's
 approval. The result is the normal operation receipt: check `status` and surface
-`pending_approval` with its `approval_url`, rather than reporting the effect as
-completed. `background: true` returns a durable `run_id`; use the public
+a held receipt (`pending_approval` with its `approval_url`, or `pending_check`)
+rather than reporting the effect as completed. `background: true` returns a durable `run_id`; use the public
 `operations.getRun` and `operations.cancel` methods to inspect or stop it.
 
 The required idempotency key is scoped to the parent run. Reusing it with the
@@ -362,16 +362,22 @@ This bridge supports action implementations and pinned native device manifests.
 Browser operations continue through `ctx.browser`, which additionally enforces
 declared origins, account binding and interactive page activation.
 
-The organization chooses Auto, Ask, or Block through its connector policies.
-Unmatched actions run automatically (Auto). To hold or block an action, add an
-Ask or Block rule, or a guardrail that no narrower Auto rule can override.
-Declaring an action as destructive does not hold it: holds come only from
+The organization chooses what happens through its connector policies. Auto runs
+the action. Log runs it and records the run. Check holds it at `pending_check`
+until the calling agent confirms it meets the rule's note with
+`operations.confirm`; a caller that cannot confirm gets Ask instead. Ask holds
+it at `pending_approval` for a person. Block refuses it. Unmatched actions run
+automatically (Auto). To hold or block an action, add a rule. Rules apply to
+agents, connected apps and Automations, never to a person acting in the web
+app. Declaring an action as destructive does not hold it: holds come only from
 policy. OpenAPI-imported POST operations remain writes, even for
 side-effect-free APIs such as classification.
 
 Manage organization connector rules as a collection at
-`/api/<workspace>/write-permissions/connector-actions`. `GET` returns only saved
-organization rules and an opaque `revision`; `PUT` accepts `{ revision, rules }`
+`/api/<workspace>/write-permissions/connector-actions`. Add
+`?principal_kind=app` or `?principal_kind=automation`, optionally with
+`&principal_id=<app key or automation:<id>>`, to manage the rules for connected
+apps or Automations instead. `GET` returns only saved rules and an opaque `revision`; `PUT` accepts `{ revision, rules }`
 and replaces that collection atomically. A stale revision returns HTTP 409.
 Unchanged saved rules can be retained or removed after their targets disappear;
 new rules and changed decisions require valid targets.
@@ -380,11 +386,28 @@ Agent restrictions and other policy classes retain their existing APIs and are
 preserved by collection replacements. An empty `rules` array removes
 organization connector rules, so every action runs Auto.
 
-Each rule has an `effect` (`auto`, `approval`, or `deny`) and optional scope:
+Each rule has an `effect`, an optional `kind` and `note`, and optional scope:
 `connector_key` or `connection_id`, plus `operation_category` or `operation_key`
 (`connector::action`). Omitted scope fields match all targets/actions. Categories
 are `read`, `write`, `destructive`, `non_destructive`, and `unknown`. Array order
 does not change precedence; duplicate scopes are rejected.
+
+A rule without `kind` is a grant with effect `auto`, `approval`, or `deny`. The
+narrowest matching grant wins, so a narrower `auto` grant can carve an exception
+out of a broader `approval`. A rule with `kind: "guardrail"` has effect `log`,
+`check`, `approval`, or `deny` and only tightens: the strictest matching
+guardrail applies on top of the grants. A `note` of up to 280 characters is
+returned to the caller when the rule holds or blocks an action.
+
+App and Automation collections hold guardrails. Their one grant is Always allow:
+an `auto` rule with a `principal_id`, one `connection_id` and one
+`operation_key`. It lifts Ask for that caller only, including workspace Ask
+rules, and never lifts Block, Check, Log or an allowed-actions list. A `local:`
+app key cannot be allowed; add a workspace rule instead.
+
+Execute results carry `policy: { reason, rules, principal }`. `principal` names
+who the decision was made for (`kind`, `id`, `label`). `reason: "allowlist"`
+means the caller's allowed-actions list, not a workspace rule, decided it.
 
 Collection access requires a human owner/admin web session or an organization-
 bound PAT with the explicit `policies:write` scope. Only an owner/admin web
