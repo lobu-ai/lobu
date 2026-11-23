@@ -399,6 +399,21 @@ out of a broader `approval`. A rule with `kind: "guardrail"` has effect `log`,
 guardrail applies on top of the grants. A `note` of up to 280 characters is
 returned to the caller when the rule holds or blocks an action.
 
+A guardrail can also carry an `audience`, `workspace` or `external`. It then
+applies only where the write lands at least that wide (private < workspace <
+external), for example "Ask before agents post where the whole workspace can
+see". `audience` is part of the rule's scope, so it sits beside a plain rule at
+the same scope; on a grant it returns HTTP 400. Audience comes from the
+connector: an action marks the input that names where it writes with
+`"x-lobu-destination": true` in its `inputSchema`, and a
+`DestinationAudienceSource` from `@lobu/connector-sdk` classifies that value as
+`private`, `workspace`, `external`, or `unknown`. The server asks only when an
+audience rule could change the decision, with a 3-second limit. An error, a
+timeout, or `unknown` counts as `external`, so the rule applies. An action
+without a marked input, or a connector without a source, never matches an
+audience rule. Sources are registered in the server next to the connector's
+other modules; Slack's `send_message` is the one shipped today.
+
 App and Automation collections hold guardrails. Their one grant is Always allow:
 an `auto` rule with a `principal_id`, one `connection_id` and one
 `operation_key`. It lifts Ask for that caller, including workspace Ask rules,

@@ -12,7 +12,8 @@ import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/a
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
-import { applyRunConnectorPolicyAtClaim, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { applyRunConnectorPolicyAtClaim, classifyRunDestination, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { hasClassifiableDestination } from "../../../../authz/destination-audience";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { isPersonInWebApp } from "../../../../auth/direct-user-context";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
@@ -450,8 +451,12 @@ export async function executeOperationInline(
 	abortSignal: AbortSignal | undefined,
 	options: InlineExecutionOptions,
 ): Promise<InlineExecutionResult> {
+	// Who sees the destination is asked before the claim transaction locks the run.
+	const destination = hasClassifiableDestination(operation)
+		? await classifyRunDestination(organizationId, runId)
+		: undefined;
 	const admitted = await getDb().begin((sql) => applyRunConnectorPolicyAtClaim({
-		organizationId, runId, sql, claimedBy: options.claimedBy,
+		organizationId, runId, sql, claimedBy: options.claimedBy, destination,
 	}));
 	if (!admitted) {
 		const [run] = await getDb()`SELECT approval_status FROM runs WHERE id = ${runId} AND organization_id = ${organizationId}`;
@@ -995,6 +1000,8 @@ export async function handleExecute(
 			actor,
 			appPrincipalId: ctx.appPrincipalId ?? null,
 			person,
+			input,
+			destination: { live: true, seen: [] },
 			sql,
 		}),
 		resolvePolicyPrincipal(sql, ctx.organizationId, actor),

@@ -166,6 +166,11 @@ export {
   ACL_RESOURCE_TYPE,
   ACL_RESOURCE_TYPE_SLUG,
 } from './acl-source.js';
+export type {
+  DestinationAudience,
+  DestinationAudienceConnection,
+  DestinationAudienceSource,
+} from './destination-audience.js';
 import {
   EVENT_RECALL_IDENTITY_NAMESPACES,
   getIdentityNamespaceDefinition,

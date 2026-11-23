@@ -1,3 +1,4 @@
+import type { DestinationAudience } from "@lobu/connector-sdk";
 import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
@@ -13,6 +14,21 @@ export const CONNECTOR_POLICY_CATEGORIES = [
 ] as const;
 export type ConnectorPolicyCategory =
 	(typeof CONNECTOR_POLICY_CATEGORIES)[number];
+
+/** A guardrail with an audience applies only where at least that audience sees the write. */
+export const POLICY_AUDIENCES = ["workspace", "external"] as const;
+export type PolicyAudience = (typeof POLICY_AUDIENCES)[number];
+
+// An audience that could not be read counts as the widest.
+const AUDIENCE_WIDTH = { private: 0, workspace: 1, external: 2, unknown: 2 } as const;
+
+function reachesAudience(
+	audience: PolicyAudience | null,
+	destination: DestinationAudience | undefined,
+): boolean {
+	if (audience === null) return true;
+	return destination !== undefined && AUDIENCE_WIDTH[destination] >= AUDIENCE_WIDTH[audience];
+}
 
 export interface ConnectorPolicyScope {
 	connectorKey?: string | null;
@@ -119,7 +135,7 @@ export function connectorPolicyNoteSuffix(
 
 type PolicyOperation = Pick<
 	AvailableOperation,
-	"connector_key" | "operation_key" | "kind" | "annotations"
+	"connector_key" | "operation_key" | "kind" | "annotations" | "input_schema"
 >;
 
 function matchesCategory(
@@ -198,6 +214,12 @@ export function evaluateConnectorPolicy(args: {
 	 * at admission. Rules stop agents, apps and Automations, never a person.
 	 */
 	person?: boolean;
+	/**
+	 * Who will see the write, read by the connector from the input marked
+	 * `x-lobu-destination`. Absent: nothing to classify, so a rule with an
+	 * audience never applies.
+	 */
+	destinationAudience?: DestinationAudience;
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
@@ -225,7 +247,8 @@ export function evaluateConnectorPolicy(args: {
 			(rule.connectorKey === null ||
 				rule.connectorKey === args.operation.connector_key) &&
 			(rule.operationKey === null || rule.operationKey === key) &&
-			matchesCategory(rule.operationCategory, args.operation),
+			matchesCategory(rule.operationCategory, args.operation) &&
+			reachesAudience(rule.audience, args.destinationAudience),
 	);
 	const grants = matches.filter((rule) => rule.kind === "grant");
 	const orgRules = grants.filter((rule) => rule.principalKind === null);
@@ -319,4 +342,18 @@ export function evaluateConnectorPolicy(args: {
 				? "matched_rule"
 				: "default_auto",
 	};
+}
+
+/**
+ * Whether reading the destination's audience could change this decision. The
+ * narrowest and the widest audience bound every other result, so when both
+ * decide alike the connector need not be asked.
+ */
+export function destinationAudienceMatters(
+	args: Omit<Parameters<typeof evaluateConnectorPolicy>[0], "destinationAudience">,
+): boolean {
+	const narrow = evaluateConnectorPolicy({ ...args, destinationAudience: "private" });
+	const wide = evaluateConnectorPolicy({ ...args, destinationAudience: "unknown" });
+	return narrow.effect !== wide.effect || narrow.reason !== wide.reason ||
+		narrow.ruleIds.join() !== wide.ruleIds.join();
 }

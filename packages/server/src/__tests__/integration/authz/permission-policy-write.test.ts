@@ -272,9 +272,14 @@ describe("permission policy HTTP writes", () => {
 			{ ...connectorPolicy, effects: { execute: "unknown" } },
 			{ ...connectorPolicy, entity_type_slug: "fixture" },
 			{ ...connectorPolicy, operation_key: " " },
+			{ ...connectorPolicy, audience: "everyone" },
 		]) {
 			expect((await request("PUT", body, { agent })).status).toBe(400);
 		}
+		// An agent restriction is a grant, and only a guardrail narrows by audience.
+		const audience = await request("PUT", { ...connectorPolicy, audience: "workspace" }, { agent });
+		expect(audience.status).toBe(400);
+		expect((await audience.json()).message).toBe("audience is only valid on a guardrail.");
 		expect((await request("PUT", null, { agent, raw: "{" })).status).toBe(400);
 		for (const scope of [
 			{ operation_key: " " },

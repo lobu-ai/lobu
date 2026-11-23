@@ -18,8 +18,8 @@ import { parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy,
 
 function scopeKey(policy: EntityApprovalPolicyInput) {
   const scope = canonicalConnectorPolicyScope(policy);
-  // A grant and a guardrail may share one scope; kind is part of the rule's identity.
-  return JSON.stringify([scope.connectorKey, scope.connectionId, policy.operationKey ?? null, scope.operationCategory, policy.kind ?? "grant"]);
+  // A grant and a guardrail may share one scope; kind and audience are part of the rule's identity.
+  return JSON.stringify([scope.connectorKey, scope.connectionId, policy.operationKey ?? null, scope.operationCategory, policy.kind ?? "grant", policy.audience ?? null]);
 }
 
 function serializeRule(policy: EntityApprovalPolicy) {
@@ -32,6 +32,7 @@ function serializeRule(policy: EntityApprovalPolicy) {
     effect: policy.effects.execute,
     ...(policy.kind === "grant" ? {} : { kind: policy.kind }),
     ...(policy.note === null ? {} : { note: policy.note }),
+    ...(policy.audience === null ? {} : { audience: policy.audience }),
   };
 }
 
@@ -155,8 +156,8 @@ export async function replaceConnectorPolicyCollection(c: Context) {
     const scopes = new Set<string>();
     policies = body.rules.map((rule: unknown) => {
       if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
-        Object.keys(rule).some(key => !["id", "connector_key", "connection_id", "operation_key", "operation_category", "effect", "kind", "note"].includes(key))) {
-        throw new Error("A rule accepts only id, connector_key, connection_id, operation_key, operation_category, effect, kind, and note.");
+        Object.keys(rule).some(key => !["id", "connector_key", "connection_id", "operation_key", "operation_category", "effect", "kind", "note", "audience"].includes(key))) {
+        throw new Error("A rule accepts only id, connector_key, connection_id, operation_key, operation_category, effect, kind, note, and audience.");
       }
       // `id` is read-only: clients echo it back, but scope and kind identify the rule.
       const { id, effect, kind, note, ...scope } = rule as Record<string, unknown>;
