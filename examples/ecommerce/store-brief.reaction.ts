@@ -115,14 +115,25 @@ async function readOrders(
 async function readHeads(
   client: ReactionClient,
   semanticType: string,
-  limit: number
+  limit: number,
+  since?: string
 ): Promise<StoredEvent[]> {
-  const page = (await client.knowledge.read({
-    semantic_type: semanticType,
-    sort_by: "date",
-    limit,
-  })) as { content: StoredEvent[] };
-  return page.content;
+  const out: StoredEvent[] = [];
+  for (;;) {
+    const page = (await client.knowledge.read({
+      semantic_type: semanticType,
+      sort_by: "date",
+      limit,
+      offset: out.length,
+      ...(since ? { since } : {}),
+    })) as { content: StoredEvent[]; page?: { has_more?: boolean } };
+    out.push(...page.content);
+    if (!page.page?.has_more) return out;
+    if (page.content.length === 0)
+      throw new Error(
+        `Incomplete ${semanticType} read made no progress; the brief would be partial`
+      );
+  }
 }
 
 const money = (n: number) => Math.round(n * 100) / 100;
@@ -159,8 +170,9 @@ export default async function storeBrief(
     totals.set(order.currency, t);
     for (const line of order.line_items) {
       // Some variants have no SKU; their line item name is the stable label.
-      const key = line.sku ?? `name:${line.name}`;
-      const u = units.get(key) ?? { sku: line.sku, name: line.name, units: 0 };
+      const sku = line.sku?.trim() ? line.sku : null;
+      const key = sku ?? `name:${line.name}`;
+      const u = units.get(key) ?? { sku, name: line.name, units: 0 };
       u.units += line.quantity;
       units.set(key, u);
     }
@@ -193,7 +205,14 @@ export default async function storeBrief(
   const attention = levels
     .map((e) => e.metadata)
     .filter((m) => NEEDS_ATTENTION.has(String(m.stock_state)));
-  const newAlerts = (await readHeads(client, "inventory.alert", 200))
+  const newAlerts = (
+    await readHeads(
+      client,
+      "inventory.alert",
+      200,
+      new Date(start).toISOString()
+    )
+  )
     .filter((e) => Date.parse(e.occurred_at) >= start)
     .filter((e) => e.metadata.transition !== "recovered")
     .map((e) => ({
@@ -248,7 +267,7 @@ export default async function storeBrief(
   ];
 
   // One brief per day: a rerun on the same day replaces that day's brief.
-  const sameDay = (await readHeads(client, "store.brief", 5)).find(
+  const sameDay = (await readHeads(client, "store.brief", 5, date)).find(
     (e) => e.metadata.date === date
   );
   const saved = await client.knowledge.save({

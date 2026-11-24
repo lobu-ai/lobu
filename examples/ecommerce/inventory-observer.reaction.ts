@@ -190,8 +190,9 @@ export default async function observeInventory(
       continue;
     }
 
-    // The alert is written before the level so a retried run still raises it:
-    // the stored level is what marks a transition as already seen.
+    // Write the alert before the level, keyed by the previous checkpoint and
+    // target state. A retry in another run reuses the alert until the level
+    // advances; a later recurrence has a different previous checkpoint.
     const change = transition(previousLevel?.stock_state, level.stock_state);
     if (change) {
       await client.knowledge.save({
@@ -201,7 +202,7 @@ export default async function observeInventory(
         entity_ids: variant.entity_ids,
         source_url: level.admin_url,
         occurred_at: observedAt,
-        idempotency_key: `${runId}:alert:${level.variant_id}`,
+        idempotency_key: `inventory.alert:${level.variant_id}:${previous?.id ?? "initial"}:${change}`,
         metadata: {
           variant_id: level.variant_id,
           title: level.title,
