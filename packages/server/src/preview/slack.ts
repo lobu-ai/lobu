@@ -14,6 +14,7 @@ import { getConfiguredPublicOrigin } from "../utils/public-origin";
 import { requireOrgUser } from "../utils/require-org-user";
 import {
 	AutomationSubscriptionService,
+	type ChatChannelLabel,
 	resolveChatChannelLabel,
 } from "../gateway/channels/automation-subscription-service";
 import { canLinkChatOrganizations } from "../gateway/channels/chat-link-authorization";
@@ -312,7 +313,7 @@ async function upsertBinding(
 	connectionId: number,
 	configuredBy?: string | null,
 	requireAuthorizedAuthor = false,
-	channelLabel: string | null = null,
+	channelLabel: ChatChannelLabel | null = null,
 ): Promise<boolean> {
 	return new AutomationSubscriptionService().createChatAutomation(
 		agentId,

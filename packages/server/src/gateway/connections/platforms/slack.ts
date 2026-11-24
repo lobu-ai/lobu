@@ -154,6 +154,27 @@ async function resolveSlackNoticeChannelScope(
 }
 
 /**
+ * The connection's workspace name. An OAuth install stores Slack's `team_name`
+ * (and a named BYO connection its display name) as `teamName`; a legacy
+ * bring-your-own app connection stored none, so ask Slack whose workspace its
+ * bot token belongs to. The connection is one workspace, whatever the channel.
+ */
+async function fetchSlackWorkspaceLabel(
+  instance: ChatPlatformInstance
+): Promise<string | null> {
+  const { config, metadata } = instance.connection;
+  const stored = metadata?.teamName;
+  if (typeof stored === "string" && stored.trim()) return stored.trim();
+  if (!isSlackConfig(config) || !config.botToken) return null;
+  const botToken =
+    typeof config.botToken === "function"
+      ? await config.botToken()
+      : config.botToken;
+  if (!botToken) return null;
+  return (await createSlackWebApi().authTest(botToken)).teamName ?? null;
+}
+
+/**
  * Slack vouches for a sender whose HOME workspace is the installation's
  * workspace. Shared-channel (Slack Connect) events carry the sender's own team
  * as `user_team` (and the originating team as `source_team`); an ordinary event
@@ -206,6 +227,8 @@ export const slackPlatform: ChatPlatformDescriptor = {
   // `#` is how a Slack channel is written, and the stored name may or may not
   // already carry it.
   formatChannelLabel: (name) => `#${name.replace(/^#/, "")}`,
+
+  fetchWorkspaceLabel: fetchSlackWorkspaceLabel,
 
   // Inbound Slack events carry the REAL workspace `T…`; the enterprise `E…` of
   // a Grid org is not a workspace and must never be bound to.

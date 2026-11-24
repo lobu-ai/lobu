@@ -286,6 +286,19 @@ export interface ChatPlatformDescriptor {
   formatChannelLabel?(name: string): string;
 
   /**
+   * The name of the workspace (team, server) a channel lives in, so a reader
+   * with several of them can tell `#general` in one from `#general` in
+   * another. Called before any transaction opens, inside the caller's bounded
+   * lookup; it may call the provider. Absent hook or null = the platform has
+   * no workspace axis (Telegram) or no name for it, and readers get the
+   * platform's own name alone.
+   */
+  fetchWorkspaceLabel?(
+    instance: ChatPlatformInstance,
+    channelId: string
+  ): Promise<string | null>;
+
+  /**
    * True when `teamId` is a real workspace id this platform may write onto an
    * Automation subscription — both to converge a teamless one and to scope a
    * newly materialized link. Slack Grid is the case: inbound events reliably

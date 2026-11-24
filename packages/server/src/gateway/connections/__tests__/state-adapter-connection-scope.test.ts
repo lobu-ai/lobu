@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { InMemoryStateAdapter } from "../../__tests__/fixtures/in-memory-state-adapter.js";
+import { slackPlatform } from "../platforms/slack.js";
 import { telegramPlatform } from "../platforms/telegram.js";
 import { scopeInboundClaimsToConnection } from "../state-adapter.js";
 import type { PlatformConnection } from "../types.js";
@@ -87,5 +88,33 @@ describe("connection-scoped inbound state", () => {
     };
     const info = await adapter.fetchChannelInfo("telegram:-100123");
     expect(info).toMatchObject({ id: "-100123", name: "Ops Room", isDM: false });
+  });
+
+  test("Slack names a channel's workspace from the install, else from the bot token", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push(`${url} ${(init.headers as Record<string, string>).Authorization}`);
+      return Response.json({ ok: true, team_id: "T_TEST", team: "Acme" });
+    }) as unknown as typeof fetch;
+    const instance = (metadata: Record<string, unknown>) => ({
+      chat: null,
+      connection: {
+        platform: "slack",
+        metadata,
+        config: { platform: "slack", botToken: "xoxb-test", signingSecret: "s" },
+      } as unknown as PlatformConnection,
+    });
+    try {
+      expect(
+        await slackPlatform.fetchWorkspaceLabel!(instance({ teamName: "Acme Install" }), "slack:C1"),
+      ).toBe("Acme Install");
+      expect(calls).toEqual([]);
+      // A legacy bring-your-own app connection never stored its workspace name.
+      expect(await slackPlatform.fetchWorkspaceLabel!(instance({}), "slack:C1")).toBe("Acme");
+      expect(calls).toEqual(["https://slack.com/api/auth.test Bearer xoxb-test"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

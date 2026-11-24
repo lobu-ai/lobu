@@ -1380,23 +1380,46 @@ export class ChatInstanceManager {
    * already uses. The platform descriptor owns the spelling. Null when the
    * adapter has no channel lookup, the provider returns no name, or the
    * channel is a DM, whose "name" is the correspondent rather than a place.
-   * Hydrates the connection on this pod like the other out-of-band calls.
+   * Alongside it, the workspace the channel lives in from the descriptor's
+   * `fetchWorkspaceLabel`, looked up concurrently; a platform with no such
+   * hook, or a failed lookup, has none. Hydrates the connection on this pod
+   * like the other out-of-band calls.
    */
   async fetchChannelLabel(
     connectionId: string,
     channelId: string,
-  ): Promise<string | null> {
+  ): Promise<{
+    platform: string;
+    channel: string;
+    workspace: string | null;
+  } | null> {
     const running = await this.ensureConnectionRunning(connectionId);
     const instance = running ? this.instances.get(connectionId) : undefined;
     if (!instance) return null;
     const platform = instance.connection.platform;
+    const descriptor = getPlatformDescriptor(platform);
     const channelKey = channelId.startsWith(`${platform}:`)
       ? channelId
       : `${platform}:${channelId}`;
-    const info = await instance.chat?.channel?.(channelKey)?.fetchMetadata?.();
+    const [info, workspace] = await Promise.all([
+      instance.chat?.channel?.(channelKey)?.fetchMetadata?.(),
+      Promise.resolve(descriptor?.fetchWorkspaceLabel?.(instance, channelKey))
+        .then((label) => label?.trim() || null)
+        .catch((error) => {
+          logger.debug(
+            { connectionId, channelId, error: String(error) },
+            "chat channel workspace lookup failed (platform name only)",
+          );
+          return null;
+        }),
+    ]);
     const name = typeof info?.name === "string" ? info.name.trim() : "";
     if (!name || info.isDM) return null;
-    return getPlatformDescriptor(platform)?.formatChannelLabel?.(name) ?? name;
+    return {
+      platform,
+      channel: descriptor?.formatChannelLabel?.(name) ?? name,
+      workspace,
+    };
   }
 
   /**
