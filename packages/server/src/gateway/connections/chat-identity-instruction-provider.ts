@@ -37,21 +37,9 @@ import {
 } from "@lobu/core";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
+import { chatPlatformLabel } from "./platform-label.js";
 
 const logger = createLogger("chat-identity-instructions");
-
-const PLATFORM_LABELS: Record<string, string> = {
-  slack: "Slack",
-  telegram: "Telegram",
-  whatsapp: "WhatsApp",
-  discord: "Discord",
-  teams: "Microsoft Teams",
-  gchat: "Google Chat",
-};
-
-function platformLabel(platform: string): string {
-  return PLATFORM_LABELS[platform] ?? platform;
-}
 
 export interface ChatBotIdentity {
   botUsername?: string;
@@ -108,7 +96,7 @@ export class ChatIdentityInstructionProvider extends BaseInstructionProvider {
   }
 
   protected renderIdentity(identity: ChatBotIdentity): string {
-    const label = platformLabel(this.platform);
+    const label = chatPlatformLabel(this.platform);
     const lines: string[] = [`**${label} identity:**`];
 
     if (identity.botUsername && identity.botUserId) {

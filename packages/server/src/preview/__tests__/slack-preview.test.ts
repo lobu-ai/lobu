@@ -528,7 +528,8 @@ describe("Slack Preview claims + channel Automations", () => {
       // The claim transaction holds its row FOR UPDATE, so this throws (and the
       // link falls back to the id name) if the provider lookup runs inside it.
       await getDb()`SELECT id FROM oauth_states FOR UPDATE NOWAIT`;
-      return labels.shift() ?? null;
+      const channel = labels.shift();
+      return channel ? { platform: "slack", channel, workspace: "Acme" } : null;
     });
     let rebound: Awaited<ReturnType<typeof consumeSlack>>;
     try {
@@ -560,7 +561,7 @@ describe("Slack Preview claims + channel Automations", () => {
       SELECT name FROM automations
       WHERE id = ${(rows[0] as { automation_id: number }).automation_id}
     `;
-    expect(automation?.name).toBe("Messages in #same");
+    expect(automation?.name).toBe("Messages in #same (Acme Slack)");
     expect(lookups).toEqual([
       [CLAIM_SLACK_CONNECTION, "slack:Csame"],
       [CLAIM_SLACK_CONNECTION, "slack:Csame"],

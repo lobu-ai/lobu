@@ -21,6 +21,7 @@ import {
 } from "../../__tests__/helpers/db-setup.js";
 import {
 	AutomationSubscriptionService,
+	resolveChatChannelLabel,
 	setChatChannelLabelResolver,
 } from "../automation-subscription-service.js";
 
@@ -429,18 +430,59 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 		).rejects.toThrow("connectionId must be a positive integer");
 	});
 
-	test("names a new chat link after the channel's resolved label", async () => {
+	test("names a new chat link after its channel, workspace and platform", async () => {
 		const lookups: Array<[string, string]> = [];
 		setChatChannelLabelResolver(async (runtimeConnectionId, channelId) => {
 			lookups.push([runtimeConnectionId, channelId]);
-			return "#general";
+			// `a2` knows no workspace name beyond the platform's own name.
+			return {
+				platform: "slack",
+				channel: "#general",
+				workspace: runtimeConnectionId === "a" ? "Acme" : "slack",
+			};
 		});
-		await new AutomationSubscriptionService().materializeConnectionFallbackLink(
+		const svc = new AutomationSubscriptionService();
+		await svc.materializeConnectionFallbackLink(
 			"a", ORG_A, "agent-a", "slack", CHANNEL, "T1",
 		);
-		expect(await chatLinkNames()).toEqual(["Messages in #general"]);
-		expect(await channelFeedNames()).toEqual(["#general"]);
-		expect(lookups).toEqual([["a", CHANNEL]]);
+		await svc.materializeConnectionFallbackLink(
+			"a2", ORG_A, "agent-a2", "slack", CHANNEL, "T1",
+		);
+		expect(await chatLinkNames()).toEqual([
+			"Messages in #general (Acme Slack)",
+			"Messages in #general (Slack)",
+		]);
+		// A feed sits under its own connection, which already names the workspace.
+		expect(await channelFeedNames()).toEqual(["#general", "#general"]);
+		expect(lookups).toEqual([
+			["a", CHANNEL],
+			["a2", CHANNEL],
+		]);
+	});
+
+	test("labels a channel the same way on every platform", async () => {
+		const places: Record<string, { channel: string; workspace: string | null }> = {
+			"discord:G1:C1": { channel: "#general", workspace: null },
+			"telegram:-100123": { channel: "My Group", workspace: null },
+			"gchat:spaces/S1": { channel: "Eng", workspace: null },
+		};
+		setChatChannelLabelResolver(async (_runtimeConnectionId, channelId) => {
+			const place = places[channelId];
+			return place ? { platform: channelId.split(":")[0]!, ...place } : null;
+		});
+		expect(await resolveChatChannelLabel("d", "discord:G1:C1")).toEqual({
+			channel: "#general",
+			source: "Discord",
+		});
+		expect(await resolveChatChannelLabel("t", "telegram:-100123")).toEqual({
+			channel: "My Group",
+			source: "Telegram",
+		});
+		expect(await resolveChatChannelLabel("g", "gchat:spaces/S1")).toEqual({
+			channel: "Eng",
+			source: "Google Chat",
+		});
+		expect(await resolveChatChannelLabel("d", "discord:G1:C2")).toBeNull();
 	});
 
 	test("falls back to the channel id when the label lookup fails or stalls", async () => {
@@ -479,8 +521,9 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 		await svc.createChatAutomation("agent-a", "slack", CHANNEL, "T1", {
 			organizationId: ORG_A,
 			connectionId: connectionA,
-			channelLabel: "#general",
+			channelLabel: { channel: "#general", source: "Acme Slack" },
 		});
+		expect(await chatLinkNames()).toEqual(["Messages in #general (Acme Slack)"]);
 		await getDb()`
 			UPDATE automations SET name = 'Support triage'
 			WHERE organization_id = ${ORG_A}
@@ -493,7 +536,7 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 		await svc.createChatAutomation("agent-a2", "slack", CHANNEL, "T1", {
 			organizationId: ORG_A,
 			connectionId: connectionA,
-			channelLabel: "#renamed-upstream",
+			channelLabel: { channel: "#renamed-upstream", source: "Acme Slack" },
 		});
 		const [row] = await getDb()<{ name: string }>`
 			SELECT name FROM automations

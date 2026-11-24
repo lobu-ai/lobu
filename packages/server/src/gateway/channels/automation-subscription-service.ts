@@ -11,6 +11,7 @@ import {
 	runtimeConnectionPredicate,
 } from "../../lobu/stores/connections-projection.js";
 import { requireOrgId } from "../../lobu/stores/org-context.js";
+import { chatPlatformLabel } from "../connections/platform-label.js";
 import { getNextNumericId } from "../../tools/admin/helpers/db-helpers.js";
 import {
 	resolveChannelFeedId,
@@ -26,16 +27,27 @@ const CHANNEL_LABEL_TIMEOUT_MS = 2_000;
 
 /**
  * Resolves a chat channel's human-readable label (`#general`) through the
- * connection's own chat adapter, or null when the platform has none. The
- * gateway registers its ChatInstanceManager here at boot. This module cannot
- * import the manager: the platform registry the manager loads already imports
- * this module (Google Chat installs), and a cycle through that registry can
- * read it before it is initialized.
+ * connection's own chat adapter, with the connection's platform and the
+ * workspace the channel lives in when the platform names one, or null when
+ * the channel has no label. The gateway registers its ChatInstanceManager here
+ * at boot. This module cannot import the manager: the platform registry the
+ * manager loads already imports this module (Google Chat installs), and a
+ * cycle through that registry can read it before it is initialized.
  */
 type ChatChannelLabelResolver = (
 	runtimeConnectionId: string,
 	channelId: string,
-) => Promise<string | null>;
+) => Promise<{
+	platform: string;
+	channel: string;
+	workspace: string | null;
+} | null>;
+
+/**
+ * Where a chat link listens: the channel (`#general`) and the place it lives
+ * in (`Acme Slack`, or `Discord` when the workspace has no name).
+ */
+export type ChatChannelLabel = { channel: string; source: string };
 
 let channelLabelResolver: ChatChannelLabelResolver | null = null;
 
@@ -46,16 +58,20 @@ export function setChatChannelLabelResolver(
 }
 
 /**
- * Best-effort, bounded label for a new chat link's channel. No resolver on this
- * process, no adapter lookup, a DM, a provider error or a slow provider all
- * yield null, so the link is named after the channel id and never fails
- * because of its name. Call it BEFORE opening a transaction: it makes a
- * provider call, and a transaction held across it pins a pool connection.
+ * Best-effort, bounded label for a new chat link's channel, with the
+ * workspace and platform it belongs to: a user may link `#general` in two
+ * Slack workspaces, and the Automation is often in another organization than
+ * the connection, so its name is the only place that says which. No resolver
+ * on this process, no adapter lookup, a DM, a provider error or a slow
+ * provider all yield null, so the link is named after the channel id and
+ * never fails because of its name. Call it BEFORE opening a transaction: it
+ * makes provider calls, and a transaction held across them pins a pool
+ * connection.
  */
 export async function resolveChatChannelLabel(
 	runtimeConnectionId: string,
 	channelId: string,
-): Promise<string | null> {
+): Promise<ChatChannelLabel | null> {
 	const resolver = channelLabelResolver;
 	if (!resolver) return null;
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -63,11 +79,25 @@ export async function resolveChatChannelLabel(
 		const timeout = new Promise<null>((resolve) => {
 			timer = setTimeout(() => resolve(null), CHANNEL_LABEL_TIMEOUT_MS);
 		});
-		const label = await Promise.race([
+		const found = await Promise.race([
 			resolver(runtimeConnectionId, channelId),
 			timeout,
 		]);
-		return label?.trim() || null;
+		const channel = found?.channel.trim();
+		if (!found || !channel) return null;
+		const platformName = chatPlatformLabel(found.platform);
+		// A workspace "named" after the platform (a connection left at its
+		// default display name) says nothing the platform name does not.
+		const workspace = found.workspace?.trim();
+		const named =
+			workspace &&
+			![found.platform, platformName].some(
+				(name) => name.toLowerCase() === workspace.toLowerCase(),
+			);
+		return {
+			channel,
+			source: named ? `${workspace} ${platformName}` : platformName,
+		};
 	} catch (err) {
 		logger.debug(
 			{ runtimeConnectionId, channelId, error: String(err) },
@@ -486,11 +516,12 @@ export class AutomationSubscriptionService {
 			 */
 			createOnly?: boolean;
 			/**
-			 * Human label for the channel (e.g. `#general`), resolved by the caller
-			 * with resolveChatChannelLabel before any transaction opens. Names a
-			 * newly created link and its feed; a relink never renames either.
+			 * Human label for the channel (`#general` in `Acme Slack`), resolved
+			 * by the caller with resolveChatChannelLabel before any transaction
+			 * opens. Names a newly created link and its feed; a relink never
+			 * renames either.
 			 */
-			channelLabel?: string | null;
+			channelLabel?: ChatChannelLabel | null;
 		},
 	): Promise<boolean> {
 		if (!Number.isInteger(options.connectionId) || options.connectionId < 1) {
@@ -509,8 +540,10 @@ export class AutomationSubscriptionService {
 			teamId,
 		});
 		// A relink keeps whatever name the Automation has; the user may have changed it.
-		const label = options.channelLabel?.trim() || null;
-		const name = `Messages in ${label ?? channelId}`;
+		const label = options.channelLabel ?? null;
+		const name = label
+			? `Messages in ${label.channel} (${label.source})`
+			: `Messages in ${channelId}`;
 
 		const write = async (tx: DbClient): Promise<boolean> => {
 			// Serialize concurrent create/relink for the same org+connection+channel.
@@ -652,8 +685,10 @@ export class AutomationSubscriptionService {
 			connectionId: String(options.connectionId),
 			organizationId,
 			channelKey: `${platform}:${nativeChannelId(platform, channelId)}`,
-			// Only a newly created feed takes the label; an existing one keeps its name.
-			displayName: label,
+			// Only a newly created feed takes the label; an existing one keeps its
+			// name. The feed sits under its own connection, which already names
+			// the workspace and platform, so it carries the channel alone.
+			displayName: label?.channel ?? null,
 			sql,
 		});
 		logger.info(`Created chat Automation: ${platform}/${channelId} → ${agentId}`);

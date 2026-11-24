@@ -81,6 +81,8 @@ export interface SlackWebApi {
    */
   authTest(botToken: string): Promise<{
     teamId: string;
+    /** The workspace's name, when Slack returned one. */
+    teamName?: string;
     enterpriseId: string | null;
     isEnterpriseInstall: boolean;
   }>;
@@ -241,6 +243,9 @@ export function createSlackWebApi(): SlackWebApi {
       }
       return {
         teamId,
+        ...(typeof json.team === "string" && json.team
+          ? { teamName: json.team }
+          : {}),
         enterpriseId:
           typeof json.enterprise_id === "string" && json.enterprise_id
             ? json.enterprise_id
