@@ -1,38 +1,31 @@
 import {
   connectorFromFile,
+  context,
   defineAgent,
+  defineAutomation,
   defineConfig,
   defineConnection,
-  defineSkill,
   defineEntityType,
   defineRelationshipType,
-  defineAutomation,
   every,
-  secret,
   field,
+  reactionFromFile,
+  Type,
+  viewFromFile,
 } from "@lobu/cli/config";
+import type InventoryObserver from "./inventory-observer.reaction.ts";
+import type StoreBrief from "./store-brief.reaction.ts";
 import type StripeChargesConnector from "./stripe-charges.connector.ts";
 
-const customerActivityTrackerSkill = defineSkill({
-  name: "customer-activity-tracker",
-  content:
-    "Monitor customers for new orders, subscription changes, delivery requests, and support interactions.\n",
-});
-
+// Metadata only: no model provider, so applying this example needs no secret.
+// The store Automations below are code and run without an agent turn; the
+// agent is their owner and permission principal.
 const ecommerceOps = defineAgent({
   id: "ecommerce-ops",
-  skills: [customerActivityTrackerSkill],
   name: "ecommerce-ops",
   description:
     "Manage subscriptions, process order changes, and resolve customer requests",
   dir: ".",
-  providers: [
-    {
-      id: "claude",
-      model: "claude-sonnet-5",
-      key: secret("ANTHROPIC_API_KEY"),
-    },
-  ],
   network: {
     allowed: [
       "github.com",
@@ -69,15 +62,31 @@ const order = defineEntityType({
   },
 });
 
+const column = (schema: Record<string, unknown>) =>
+  Type.Optional(Type.Unsafe({ ...schema, "x-table-column": true }));
+
+// Fields match the Shopify connector's product traits, so the record page
+// shows what the products feed writes.
 const product = defineEntityType({
   key: "product",
   name: "Product",
   description: "A product in the catalog linked to subscriptions and orders",
   properties: {
-    product_name: field("Product", { optional: true }),
-    plan_tier: field("Tier", { optional: true }),
-    delivery_frequency: field("Delivery", { optional: true }),
-    price: field("Price", { optional: true }),
+    title: column({ type: "string", title: "Title" }),
+    sku: column({ type: "string", title: "SKU" }),
+    vendor: column({ type: "string", title: "Vendor" }),
+    price: column({ type: "number", title: "Price" }),
+    available: column({ type: "integer", title: "Available" }),
+    status: column({
+      type: "string",
+      title: "Shopify status",
+      enum: ["ACTIVE", "DRAFT", "ARCHIVED"],
+    }),
+    admin_url: column({
+      type: "string",
+      format: "uri",
+      title: "Shopify admin",
+    }),
   },
 });
 
@@ -127,14 +136,189 @@ const shopify = defineConnection({
   ],
 });
 
-const customerActivityTracker = defineAutomation({
+const stockState = {
+  enum: ["in_stock", "low_stock", "sold_out", "inactive", "not_tracked"],
+  description:
+    "in_stock, low_stock (at or under the threshold), sold_out, inactive (draft or archived product) or not_tracked (Shopify does not track its stock).",
+};
+
+const orderTotals = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      currency: { type: "string", title: "Currency" },
+      total: { type: "number", title: "Total" },
+      orders: { type: "integer", title: "Orders" },
+    },
+    required: ["currency", "total", "orders"],
+  },
+};
+
+// Kinds the store Automations write. `$member` is shared, and apply upserts
+// only the kinds this config declares.
+const storeEventKinds = defineEntityType({
+  key: "$member",
+  // The live display fields, restated so apply changes only the event kinds.
+  name: "Member",
+  description: "Organization member",
+  eventKinds: {
+    "inventory.level": {
+      description:
+        "Current stock of one Shopify variant. One current record per variant; a new version supersedes it only when stock, price, status or SKU changes.",
+      metadataSchema: {
+        type: "object",
+        properties: {
+          variant_id: { type: "string", title: "Variant" },
+          title: { type: "string", title: "Title" },
+          sku: { type: "string", title: "SKU" },
+          vendor: { type: "string", title: "Vendor" },
+          price: { type: "number", title: "Price" },
+          available: { type: "integer", title: "Available" },
+          product_status: { type: "string", title: "Shopify status" },
+          stock_state: { ...stockState, title: "Stock state" },
+          admin_url: { type: "string", format: "uri", title: "Shopify admin" },
+          threshold: { type: "integer", title: "Low-stock threshold" },
+        },
+        required: [
+          "variant_id",
+          "title",
+          "price",
+          "available",
+          "product_status",
+          "stock_state",
+          "admin_url",
+        ],
+      },
+    },
+    "inventory.alert": {
+      description:
+        "A Shopify variant became low on stock, sold out, or recovered. Written once per change.",
+      metadataSchema: {
+        type: "object",
+        properties: {
+          variant_id: { type: "string", title: "Variant" },
+          title: { type: "string", title: "Title" },
+          sku: { type: "string", title: "SKU" },
+          transition: {
+            enum: ["low_stock", "sold_out", "recovered"],
+            title: "Change",
+          },
+          from_state: { ...stockState, title: "From" },
+          to_state: { ...stockState, title: "To" },
+          available: { type: "integer", title: "Available" },
+          previous_available: { type: "integer", title: "Previously" },
+          threshold: { type: "integer", title: "Low-stock threshold" },
+          admin_url: { type: "string", format: "uri", title: "Shopify admin" },
+        },
+        required: [
+          "variant_id",
+          "title",
+          "transition",
+          "to_state",
+          "available",
+        ],
+      },
+    },
+    "store.brief": {
+      description:
+        "Daily store summary from live Shopify orders and the stock records. Counts, totals and order numbers only; no buyer details.",
+      metadataSchema: {
+        type: "object",
+        properties: {
+          date: { type: "string", format: "date", title: "Date" },
+          window_start: { type: "string", format: "date-time", title: "From" },
+          window_end: { type: "string", format: "date-time", title: "To" },
+          orders: { type: "integer", title: "Orders" },
+          cancelled: { type: "integer", title: "Cancelled" },
+          totals: { ...orderTotals, title: "Sales by currency" },
+          units: {
+            type: "array",
+            title: "Units sold",
+            items: {
+              type: "object",
+              properties: {
+                sku: { type: ["string", "null"], title: "SKU" },
+                name: { type: "string", title: "Item" },
+                units: { type: "integer", title: "Units" },
+              },
+              required: ["name", "units"],
+            },
+          },
+          unfulfilled_over_48h: {
+            type: "array",
+            title: "Paid, unfulfilled over 48 hours",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", title: "Order" },
+                processed_at: { type: "string", title: "Processed" },
+                total: { type: "number", title: "Total" },
+                currency: { type: "string", title: "Currency" },
+                url: { type: "string", format: "uri", title: "Shopify" },
+              },
+              required: ["name", "processed_at", "url"],
+            },
+          },
+          new_stock_alerts: {
+            type: "array",
+            title: "New stock alerts",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string", title: "Variant" },
+                sku: { type: "string", title: "SKU" },
+                transition: { type: "string", title: "Change" },
+                available: { type: "integer", title: "Available" },
+                admin_url: { type: "string", title: "Shopify admin" },
+              },
+              required: ["title", "transition"],
+            },
+          },
+          stock: {
+            type: "object",
+            title: "Stock",
+            properties: {
+              variants: { type: "integer", title: "Variants" },
+              low_stock: { type: "integer", title: "Low stock" },
+              sold_out: { type: "integer", title: "Sold out" },
+            },
+          },
+        },
+        required: ["date", "window_start", "window_end", "orders", "totals"],
+      },
+    },
+  },
+});
+
+// Code-only Automations: no prompt, skills or outputs, so no agent turn and no
+// model provider. Each reads its own inputs; a context-only source keeps event
+// arrivals from pacing the schedule.
+const inventoryObserver = defineAutomation({
   agent: ecommerceOps,
-  slug: "customer-activity-tracker",
-  name: "Customer activity tracker",
-  triggers: [every("0 */6 * * *")],
-  tags: ["ecommerce", "customer-ops"],
-  minCooldownSeconds: 300,
-  skills: ["customer-activity-tracker"],
+  slug: "inventory-observer",
+  name: "Inventory observer",
+  description:
+    "Keeps one stock record per Shopify variant and records low-stock, sold-out and recovered changes.",
+  // Ten minutes after each products feed sync (0 */6 * * *).
+  triggers: [every("10 */6 * * *", { skip_if_unchanged: false })],
+  tags: ["ecommerce", "inventory"],
+  sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
+  reaction: reactionFromFile<typeof InventoryObserver>(
+    "./inventory-observer.reaction.ts"
+  ),
+});
+
+const storeBrief = defineAutomation({
+  agent: ecommerceOps,
+  slug: "store-brief",
+  name: "Daily store brief",
+  description:
+    "Summarises the last 24 hours of Shopify orders and the stock picture, without buyer details.",
+  triggers: [every("0 7 * * *", { skip_if_unchanged: false })],
+  tags: ["ecommerce", "orders"],
+  sources: { clock: context("SELECT CURRENT_TIMESTAMP AS observed_at") },
+  reaction: reactionFromFile<typeof StoreBrief>("./store-brief.reaction.ts"),
 });
 
 export default defineConfig({
@@ -149,7 +333,41 @@ export default defineConfig({
     "Manage subscriptions, process order changes, and resolve customer requests",
   agents: [ecommerceOps],
   connections: [shopify],
-  entities: [customer, order, product, subscription],
+  entities: [customer, order, product, subscription, storeEventKinds],
   relationships: [hasPreference, placedOrder, subscribedTo],
-  automations: [customerActivityTracker],
+  automations: [inventoryObserver, storeBrief],
+  views: [
+    viewFromFile("./views/store-today.tsx"),
+    viewFromFile("./views/stock-watch.tsx"),
+    viewFromFile("./views/store-orders.tsx"),
+  ],
+  navigation: {
+    schemaVersion: 1,
+    sections: [
+      {
+        id: "store-operations",
+        label: "Store operations",
+        items: [
+          {
+            id: "store-today",
+            label: "Today",
+            icon: "sun",
+            target: { kind: "view", key: "store-today" },
+          },
+          {
+            id: "stock-watch",
+            label: "Stock watch",
+            icon: "package",
+            target: { kind: "view", key: "stock-watch" },
+          },
+          {
+            id: "store-orders",
+            label: "Orders",
+            icon: "receipt",
+            target: { kind: "view", key: "store-orders" },
+          },
+        ],
+      },
+    ],
+  },
 });
