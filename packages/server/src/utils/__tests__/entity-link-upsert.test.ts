@@ -1774,17 +1774,50 @@ describe('shopify product variants (real connector rule)', () => {
     expect(items.map((_, i) => resolution.entityIdsByItem.get(i)?.length ?? 0)).toEqual([1, 1, 1]);
   });
 
-  it('keeps one product per variant across re-syncs, including one first keyed by SKU alone', async () => {
+  it('keeps a product first keyed by SKU alone, adding the variant id instead of duplicating it', async () => {
     const { org, sql } = await setupShopifyOrg();
-    const [skuOnly] = await syncedVariantEvents([variant('1', 'SKU-1', 'Board')]);
-    // The product as an earlier connector version minted it: SKU identity only.
-    const legacy = { ...skuOnly, metadata: Object.fromEntries(Object.entries(skuOnly.metadata).filter(([key]) => key !== 'variant_key')) };
-    await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items: [legacy] });
+    const [first] = await syncedVariantEvents([variant('1', 'SKU-1', 'Board')]);
+    // Mint the product the way the earlier SKU-only rule did.
+    const skuOnlyRule: TestAttributionRule = {
+      entityType: 'product',
+      autoCreate: true,
+      titlePath: 'metadata.entity_name',
+      identities: [{ namespace: 'shopify_sku', eventPath: 'metadata.sku_key' }],
+      createWhen: { path: 'metadata.sku_key', exists: true },
+    };
+    const legacy = await applyEventAttributions({
+      connectorKey: SHOPIFY_KEY,
+      orgId: org.id,
+      items: [{ ...first, metadata: { ...first.metadata } }],
+      rules: { product_variant: [skuOnlyRule] },
+    });
+    const legacyId = legacy.entityIdsByItem.get(0)?.[0];
+    expect(legacyId).toBeDefined();
 
     const items = await syncedVariantEvents([variant('1', 'SKU-1', 'Board'), variant('2', null, 'Wax')]);
-    await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
+    const resolution = await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
     await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
 
     expect(await productNames(sql, org.id)).toEqual(['Board', 'Wax']);
+    expect(resolution.entityIdsByItem.get(0)).toEqual([legacyId]);
+    const identities = await sql<{ namespace: string }[]>`
+      SELECT namespace FROM entity_identities WHERE entity_id = ${Number(legacyId)} ORDER BY namespace
+    `;
+    expect(identities.map((row) => row.namespace)).toEqual(['shopify_sku', 'shopify_variant']);
+  });
+
+  it('records a SKU that Shopify assigns after the product was first synced', async () => {
+    const { org, sql } = await setupShopifyOrg();
+    for (const sku of [null, 'SKU-9']) {
+      const items = await syncedVariantEvents([variant('2', sku, 'Wax')]);
+      await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
+    }
+
+    const rows = await sql<{ metadata: { sku?: string } }[]>`
+      SELECT e.metadata FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE e.organization_id = ${org.id} AND et.slug = 'product' AND e.deleted_at IS NULL
+    `;
+    expect(rows.map((row) => row.metadata.sku)).toEqual(['SKU-9']);
   });
 });

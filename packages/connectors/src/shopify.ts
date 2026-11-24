@@ -168,7 +168,8 @@ const VARIANT_ATTRIBUTIONS: EventAttributionRule[] = [
     },
     traits: {
       title: { eventPath: 'metadata.title', mergeStrategy: 'overwrite' },
-      sku: { eventPath: 'metadata.sku', mergeStrategy: 'init_only' },
+      // A variant's SKU can be assigned or changed after it was first synced.
+      sku: { eventPath: 'metadata.sku', mergeStrategy: 'overwrite' },
       vendor: { eventPath: 'metadata.vendor', mergeStrategy: 'prefer_non_empty' },
       available: { eventPath: 'metadata.available', mergeStrategy: 'overwrite' },
       price: { eventPath: 'metadata.price', mergeStrategy: 'overwrite' },
