@@ -733,6 +733,14 @@ chat message.
   for one Automation, with at most 25 exact event pointers per run; overflow
   starts another durable run when the Automation's cooldown permits it. A
   configured cooldown may intentionally suppress that new activation.
+- `steer` hands a follow-up to the turn already running instead of starting
+  another. It needs turn execution, `reply_to_source` output, and an event
+  whose connector declares steering. Only a follow-up from the same sender,
+  connection, and reply thread joins; an Automation turn and a direct-link turn
+  never merge, and a `/new` reset never joins. The agent picks the follow-up up
+  between model calls, so a reply it is already writing finishes first, and
+  each message still gets its own reply. A follow-up that cannot join runs as
+  its own turn.
 - One output event may fan out to at most 32 matching Automations, ordered by
   Automation ID. Those matches are considered for activation; cooldown can
   reduce the number queued. Later matches are skipped and the limit is logged.
