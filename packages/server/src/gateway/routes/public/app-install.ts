@@ -84,6 +84,7 @@ import { routeFailure } from "../../../diagnostics.js";
 import { readUserId } from "./install-org.js";
 import {
 	mountTenantAppInstallRoutes,
+	oauthInstallRoutePaths,
 	providerDisplayName,
 	resolveOAuthInstallCallbackUrl,
 	type TenantInstallTokenFetch,
@@ -2008,8 +2009,9 @@ function mountOAuthCodeExchangeRoutes(
 ): void {
 	const { connectorKey, provider, authorizeUrl } = params;
 	const display = providerDisplayName(provider);
+	const paths = oauthInstallRoutePaths(provider);
 
-	router.get(`/${provider}/install`, async (c) => {
+	router.get(paths.install, async (c) => {
 		// Bind the install to the initiating session's active org. Without this an
 		// OAuth link minted under org A's session can be opened from org B's
 		// browser and the resulting install lands in the wrong tenant. On self-host
@@ -2078,7 +2080,7 @@ function mountOAuthCodeExchangeRoutes(
 		return c.redirect(oauthUrl.toString(), 302);
 	});
 
-	router.get(`/${provider}/oauth_callback`, async (c) => {
+	router.get(paths.callback, async (c) => {
 		const state = c.req.query("state");
 		const code = c.req.query("code");
 		if (!code) {
@@ -2231,6 +2233,19 @@ export interface InstallEngineDeps {
 	resolveInstallUserId?(c: import("hono").Context): string | null;
 	/** Token-endpoint fetch for tenant data installs (defaults to the pinned credentialed fetch). */
 	fetchTenantTokenEndpoint?: TenantInstallTokenFetch;
+}
+
+/**
+ * The browser redirect routes the engine mounts for oauth-code-exchange
+ * connectors. They are not an API, so the gateway leaves them out of the public
+ * document. The GitHub App flow keeps its own documented paths.
+ */
+export function oauthInstallBrowserPaths(
+	integrations: ReadonlyArray<Pick<InstallEngineIntegration, "provider" | "method">>,
+): string[] {
+	return integrations
+		.filter((integration) => integration.method?.installShape === "oauth-code-exchange")
+		.flatMap((integration) => Object.values(oauthInstallRoutePaths(integration.provider)));
 }
 
 /**

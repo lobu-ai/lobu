@@ -18,6 +18,13 @@ import {
 	type RouteSpec,
 } from "../routes/shared/define-route.js";
 import { createAgentApi } from "../routes/public/agent.js";
+import {
+	createInstallRoutes,
+	type InstallEngineIntegration,
+	oauthInstallBrowserPaths,
+} from "../routes/public/app-install.js";
+import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
+import { OpenAPIHono } from "@hono/zod-openapi";
 import { Type } from "@sinclair/typebox";
 
 describe("mergeOpenApiPaths", () => {
@@ -261,5 +268,52 @@ describe("optional request bodies", () => {
 		expect(paths["/required-body"].post.requestBody?.required).toBe(true);
 		// The real create-agent route is all-optional → optional body.
 		expect(paths["/api/v1/agents"].post.requestBody?.required).toBe(false);
+	});
+});
+
+describe("hosted-app install routes in the document", () => {
+	test("the engine's browser redirects are left out; GitHub's documented routes stay", () => {
+		const integrations: InstallEngineIntegration[] = [
+			{
+				connectorKey: "examplechat",
+				provider: "examplechat",
+				deliveryKind: "chat",
+				method: {
+					type: "app_installation",
+					provider: "examplechat",
+					installShape: "oauth-code-exchange",
+					authorizeUrl: "https://chat.example.test/oauth/authorize",
+				},
+			},
+			{
+				connectorKey: "github",
+				provider: "github",
+				method: { type: "app_installation", provider: "github", installShape: "github-app" },
+			},
+		];
+		const app = new OpenAPIHono();
+		app.route(
+			"",
+			createInstallRoutes({
+				installationStore: {} as never,
+				resolveInstallOrgId: async () => null,
+				verifyInstallOrgAccess: async () => false,
+				verifyInstallOrgAdminAccess: async () => false,
+				integrations,
+				completeChatPendingInstall: async () => null,
+			}),
+		);
+		registerAutoOpenApiRoutes(app, oauthInstallBrowserPaths(integrations));
+
+		const mounted = app.routes.map((route) => route.path);
+		expect(mounted).toContain("/examplechat/install");
+		expect(mounted).toContain("/examplechat/oauth_callback");
+		const documented = Object.keys(
+			app.getOpenAPI31Document({ openapi: "3.1.0", info: { title: "t", version: "1" } }).paths ?? {},
+		);
+		expect(documented).not.toContain("/examplechat/install");
+		expect(documented).not.toContain("/examplechat/oauth_callback");
+		expect(documented).toContain("/github/app/install");
+		expect(documented).toContain("/github/app/install/callback");
 	});
 });

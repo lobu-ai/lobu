@@ -65,15 +65,25 @@ export function resolveOAuthInstallCallbackUrl(
 	requestUrl: string,
 	provider: string,
 ): string {
+	const paths = oauthInstallRoutePaths(provider);
 	if (gatewayBaseUrl) {
-		return `${gatewayBaseUrl.replace(/\/+$/, "")}/${provider}/oauth_callback`;
+		return `${gatewayBaseUrl.replace(/\/+$/, "")}${paths.callback}`;
 	}
 	const url = new URL(requestUrl);
-	const prefix = url.pathname.replace(
-		new RegExp(`/${provider}/install/?$`),
-		"",
-	);
-	return `${url.origin}${prefix}/${provider}/oauth_callback`;
+	const prefix = url.pathname.replace(new RegExp(`${paths.install}/?$`), "");
+	return `${url.origin}${prefix}${paths.callback}`;
+}
+
+/**
+ * The browser redirect pair mounted for an oauth-code-exchange provider: the
+ * install start and the provider's OAuth callback. Both engines mount these
+ * paths, and the gateway leaves them out of the public API document.
+ */
+export function oauthInstallRoutePaths(provider: string): {
+	install: string;
+	callback: string;
+} {
+	return { install: `/${provider}/install`, callback: `/${provider}/oauth_callback` };
 }
 
 /** Capitalize a provider key for the success-page title ("slack" → "Slack"). */
@@ -173,7 +183,8 @@ export function mountTenantAppInstallRoutes(
 			400,
 		);
 
-	router.get(`/${provider}/install`, async (c) => {
+	const paths = oauthInstallRoutePaths(provider);
+	router.get(paths.install, async (c) => {
 		const creds = resolveAppInstallCredentials(method);
 		if (!creds.clientId || !creds.clientSecret) return notConfigured(c);
 
@@ -185,8 +196,8 @@ export function mountTenantAppInstallRoutes(
 			const gatewayBase = params.getPublicGatewayUrl?.();
 			const basePath = gatewayBase
 				? trimTrailingSlashes(new URL(gatewayBase).pathname)
-				: requestUrl.pathname.slice(0, -`/${provider}/install`.length);
-			const returnTo = `${basePath}/${provider}/install${requestUrl.search}`;
+				: requestUrl.pathname.slice(0, -paths.install.length);
+			const returnTo = `${basePath}${paths.install}${requestUrl.search}`;
 			const origin = trimTrailingSlashes(getConfiguredPublicOrigin() ?? "");
 			return c.redirect(
 				`${origin}/auth/login?${new URLSearchParams({ callbackUrl: returnTo })}`,
@@ -225,7 +236,7 @@ export function mountTenantAppInstallRoutes(
 		return c.redirect(target.toString(), 302);
 	});
 
-	router.get(`/${provider}/oauth_callback`, async (c) => {
+	router.get(paths.callback, async (c) => {
 		const code = c.req.query("code");
 		const rawState = c.req.query("state");
 		if (!code || !rawState) {

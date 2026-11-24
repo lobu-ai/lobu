@@ -19,8 +19,6 @@ const INTERNAL_PREFIXES = [
 const EXCLUDED_ROUTES = [
 	"/", // Landing page
 	"/api/v1/reload", // Dev-only config reload, not a public API
-	"/slack/install", // Slack app install
-	"/slack/oauth_callback", // Slack OAuth callback
 ];
 
 const EXCLUDED_PREFIXES = [
@@ -142,9 +140,12 @@ const ROUTE_SUMMARIES: Record<string, string> = {
 /**
  * Register OpenAPI paths for routes not already defined via app.openapi.
  * Internal routes (worker-facing), webhooks, system probes, and OAuth callbacks
- * are excluded from the public docs.
+ * are excluded from the public docs, as are the caller's `browserPaths`.
  */
-export function registerAutoOpenApiRoutes(app: OpenAPIHono): void {
+export function registerAutoOpenApiRoutes(
+	app: OpenAPIHono,
+	browserPaths: readonly string[] = [],
+): void {
 	const registered = new Set<string>();
 	const definitions = app.openAPIRegistry
 		.definitions as unknown as OpenApiDefinition[];
@@ -196,7 +197,7 @@ export function registerAutoOpenApiRoutes(app: OpenAPIHono): void {
 		}
 
 		// Skip excluded routes (HTML pages, OAuth callbacks, webhooks, probes)
-		if (isExcludedRoute(path)) {
+		if (isExcludedRoute(path) || browserPaths.includes(path)) {
 			continue;
 		}
 
