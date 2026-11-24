@@ -8,9 +8,10 @@ import {
 	explainConnectorPolicy,
 } from "../../../../authz/connector-policy";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
-import { resolveActingPrincipal } from "../../../../authz/entity-policy";
+import { resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
 import { classifyRunDestination, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
+import { writeEffectRank } from "../../../../authz/write-action-manifest";
 import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from "../../../../config/intervals";
 import { getDb } from "../../../../db/client";
 import { getOperationForConnection } from "../../../../operations/connector-operations";
@@ -122,10 +123,25 @@ export async function handleConfirm(
 			: "run";
 		if (deviceAccess === "refuse") return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 
-		const [policy, principal] = await Promise.all([
+		const [requesterPolicy, callerPolicy, principal] = await Promise.all([
 			resolveRunConnectorPolicy({ organizationId: ctx.organizationId, runId: run.id, sql: tx, destination }),
+			resolveConnectorPolicy({
+				organizationId: ctx.organizationId,
+				connectionId: run.connection_id,
+				operation: resolved.operation,
+				actor,
+				appPrincipalId: ctx.appPrincipalId ?? null,
+				input: run.action_input,
+				sql: tx,
+				destination,
+			}),
 			resolvePolicyPrincipal(tx, ctx.organizationId, { kind: run.policy_principal_kind, id: run.policy_principal_id }),
 		]);
+		// A replacement runner may hold this Automation's next window. Its own
+		// restrictions also apply, alongside the persisted requester's policy.
+		const policy = requesterPolicy && writeEffectRank(callerPolicy.effect) > writeEffectRank(requesterPolicy.effect)
+			? callerPolicy
+			: requesterPolicy;
 		if (!policy || policy.effect === "deny") {
 			const why = policy?.reason === "allowlist"
 				? allowlistRefusal(run.action_key)
