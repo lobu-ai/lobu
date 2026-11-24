@@ -194,6 +194,23 @@ function messageFor(organizationId: string): MessagePayload {
   } as MessagePayload;
 }
 
+/**
+ * The metadata shape the chat bridge (`message-handler-bridge.ts`) stores on a
+ * chat-link Automation turn: routing that every message in the thread shares,
+ * plus values that are new for every message (trace, reply target, link,
+ * history, delivery id).
+ */
+function chatBridgeMetadata(n: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    agentId: AGENT_ID, connectionId: 'synthetic-chat-connection', chatId: 'C_SYNTH', responseChannel: 'C_SYNTH',
+    responseThreadId: 'slack:C_SYNTH:1.0', senderId: 'user-turn', teamId: 'T_SYNTH', isGroup: true,
+    automationId: 42, automationActiveRunPolicy: 'steer',
+    traceId: `trace-${n}`, responseId: `msg-${n}`, conversationUrl: `https://chat.example.test/C_SYNTH/p${n}`,
+    conversationHistory: [{ role: 'user', content: `earlier message ${n}` }], automationDeliveryId: `delivery-${n}`,
+    ...overrides,
+  };
+}
+
 async function admittedMessage(message: MessagePayload): Promise<MessagePayload> {
   const sql = getTestDb();
   const [input] = await sql`
@@ -2407,6 +2424,45 @@ describe('agent turn producer', () => {
     expect((await runRow(follower.id)).status).toBe('pending');
   });
 
+  it('offers a chat follow-up whose per-message delivery metadata differs', async () => {
+    const org = await createTestOrganization();
+    const first = { ...messageFor(org.id), platformMetadata: chatBridgeMetadata(1) };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-chat-follow-up', { agent_turn: true })).json();
+    await enqueueMessage({ ...first, messageId: 'chat-follow-up', messageText: 'only the UK ones', platformMetadata: chatBridgeMetadata(2) }, deps);
+    const [, follower] = await agentTurnRuns();
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-chat-follow-up' });
+    expect(await response.json()).toMatchObject({ continue: true, steer: [
+      { run_id: follower.id, message_id: 'chat-follow-up', text: 'only the UK ones' },
+    ] });
+    // The follower keeps its own delivery metadata for its own reply.
+    expect(((await agentTurnRuns())[1].action_input.reply as { platform_metadata: Record<string, unknown> }).platform_metadata)
+      .toEqual(chatBridgeMetadata(2));
+  });
+
+  it.each([
+    ['from another sender in the same thread', {}, { userId: 'user-other' }, { senderId: 'user-other' }],
+    ['on another connection', {}, {}, { connectionId: 'other-chat-connection' }],
+    ['in another reply thread', {}, {}, { responseThreadId: 'slack:C_SYNTH:2.0' }],
+    ['for a direct link behind an Automation turn', {}, {}, { automationId: undefined, automationActiveRunPolicy: undefined }],
+    ['for an Automation behind a direct-link turn', { automationId: undefined, automationActiveRunPolicy: undefined }, {}, {}],
+    ['behind a session-reset turn', { sessionReset: true }, {}, {}],
+  ])('does not offer a chat follow-up %s', async (_case, ownerMetadata, followerFields, followerMetadata) => {
+    const org = await createTestOrganization();
+    const first = { ...messageFor(org.id), platformMetadata: chatBridgeMetadata(1, ownerMetadata) };
+    const deps = { agentSettings: settingsStore, catalog: catalogFor(tokenEchoingModule()), gatewayUrl: GATEWAY_URL };
+    await enqueueMessage(first, deps);
+    const { run_id } = await (await pollFleet('fleet-chat-policy', { agent_turn: true })).json();
+    await enqueueMessage({
+      ...first, ...followerFields, messageId: 'chat-policy-follow-up', messageText: 'keep this input',
+      platformMetadata: chatBridgeMetadata(2, followerMetadata),
+    }, deps);
+    const response = await postAsFleet('/api/workers/heartbeat', { run_id, worker_id: 'fleet-chat-policy' });
+    expect(await response.json()).toEqual({ continue: true });
+    expect((await agentTurnRuns())[1]!.status).toBe('pending');
+  });
+
   it('offers a follow-up whose transient context differs, and carries that context', async () => {
     // The API route attaches a live workspace-attention block, and it changes
     // as runs appear, so two messages sent seconds apart almost never carry
@@ -2766,7 +2822,6 @@ describe('agent turn producer', () => {
     ['routing', { channelId: 'different-channel' }],
     ['grants', { networkConfig: { allowedDomains: ['different.example'] } }],
     ['packages', { nixConfig: { packages: ['git'] } }],
-    ['platform metadata', { platformMetadata: { opaqueRouting: 'different' } }],
     ['traced routing', { platformMetadata: { connectionId: 'different-connection', traceparent: '00-22222222222222222222222222222222-2222222222222222-01' } }],
     ['attachment', { platformMetadata: { files: [{ name: 'notes.txt', mimetype: 'text/plain' }] } }],
     ['reset', { platformMetadata: { sessionReset: true } }],
