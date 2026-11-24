@@ -2,6 +2,7 @@ import {
   connectorFromFile,
   defineAgent,
   defineConfig,
+  defineConnection,
   defineSkill,
   defineEntityType,
   defineRelationshipType,
@@ -112,6 +113,20 @@ const subscribedTo = defineRelationshipType({
   description: "Track which plans and products each customer subscribes to.",
 });
 
+// The Lobu Shopify app links the store through its app installation, so this
+// declaration leaves `config` unset: apply keeps the stored shop and
+// installation link instead of replacing them.
+const shopify = defineConnection({
+  slug: "shopify-lobu-sample-myshopify-com",
+  connector: "shopify",
+  name: "Shopify (lobu-sample.myshopify.com)",
+  feeds: [
+    // Orders are read live from Shopify and never stored, so no schedule.
+    { feed: "orders", name: "Orders" },
+    { feed: "products", name: "Products & inventory", schedule: "0 */6 * * *" },
+  ],
+});
+
 const customerActivityTracker = defineAutomation({
   agent: ecommerceOps,
   slug: "customer-activity-tracker",
@@ -133,6 +148,7 @@ export default defineConfig({
   orgDescription:
     "Manage subscriptions, process order changes, and resolve customer requests",
   agents: [ecommerceOps],
+  connections: [shopify],
   entities: [customer, order, product, subscription],
   relationships: [hasPreference, placedOrder, subscribedTo],
   automations: [customerActivityTracker],
