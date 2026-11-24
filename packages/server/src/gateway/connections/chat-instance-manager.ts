@@ -1374,6 +1374,32 @@ export class ChatInstanceManager {
   }
 
   /**
+   * A channel's human-readable label (`#general` on Slack, a Google Chat
+   * space's display name) through the connection's own Chat SDK adapter
+   * (`fetchChannelInfo`), with the instance credentials every outbound post
+   * already uses. The platform descriptor owns the spelling. Null when the
+   * adapter has no channel lookup, the provider returns no name, or the
+   * channel is a DM, whose "name" is the correspondent rather than a place.
+   * Hydrates the connection on this pod like the other out-of-band calls.
+   */
+  async fetchChannelLabel(
+    connectionId: string,
+    channelId: string,
+  ): Promise<string | null> {
+    const running = await this.ensureConnectionRunning(connectionId);
+    const instance = running ? this.instances.get(connectionId) : undefined;
+    if (!instance) return null;
+    const platform = instance.connection.platform;
+    const channelKey = channelId.startsWith(`${platform}:`)
+      ? channelId
+      : `${platform}:${channelId}`;
+    const info = await instance.chat?.channel?.(channelKey)?.fetchMetadata?.();
+    const name = typeof info?.name === "string" ? info.name.trim() : "";
+    if (!name || info.isDM) return null;
+    return getPlatformDescriptor(platform)?.formatChannelLabel?.(name) ?? name;
+  }
+
+  /**
    * Surface the channels with stored history for a given connection. Used
    * by the local-test-default-target route; falls back to constructing a
    * fresh state-store when the connection isn't currently active.

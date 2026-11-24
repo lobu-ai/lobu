@@ -1,5 +1,6 @@
 import {
 	afterAll,
+	afterEach,
 	beforeAll,
 	beforeEach,
 	describe,
@@ -18,7 +19,10 @@ import {
 	resetTestDatabase,
 	seedAgentRow,
 } from "../../__tests__/helpers/db-setup.js";
-import { AutomationSubscriptionService } from "../automation-subscription-service.js";
+import {
+	AutomationSubscriptionService,
+	setChatChannelLabelResolver,
+} from "../automation-subscription-service.js";
 
 describe("AutomationSubscriptionService connection-scoped routing", () => {
 	const ORG_A = "org-a";
@@ -59,9 +63,36 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 		);
 	});
 
+	afterEach(() => {
+		setChatChannelLabelResolver(null);
+	});
+
 	afterAll(async () => {
 		await resetTestDatabase();
 	});
+
+	async function chatLinkNames(): Promise<string[]> {
+		const rows = await getDb()<{ name: string; version_name: string }>`
+			SELECT w.name, v.name AS version_name
+			FROM automations w
+			JOIN automation_versions v ON v.id = w.current_version_id
+			WHERE w.organization_id = ${ORG_A}
+			  AND w.status = 'active'
+			  AND w.tags @> ARRAY['system:chat-link']::text[]
+			ORDER BY w.id
+		`;
+		for (const row of rows) expect(row.version_name).toBe(row.name);
+		return rows.map((row) => row.name);
+	}
+
+	async function channelFeedNames(): Promise<string[]> {
+		const rows = await getDb()<{ display_name: string }>`
+			SELECT display_name FROM feeds
+			WHERE organization_id = ${ORG_A} AND deleted_at IS NULL
+			ORDER BY id
+		`;
+		return rows.map((row) => row.display_name);
+	}
 
 	test("two bot connections in one workspace can bind the same channel independently", async () => {
 		const svc = new AutomationSubscriptionService();
@@ -396,5 +427,83 @@ describe("AutomationSubscriptionService connection-scoped routing", () => {
 				connectionId: String(connectionA) as never,
 			}),
 		).rejects.toThrow("connectionId must be a positive integer");
+	});
+
+	test("names a new chat link after the channel's resolved label", async () => {
+		const lookups: Array<[string, string]> = [];
+		setChatChannelLabelResolver(async (runtimeConnectionId, channelId) => {
+			lookups.push([runtimeConnectionId, channelId]);
+			return "#general";
+		});
+		await new AutomationSubscriptionService().materializeConnectionFallbackLink(
+			"a", ORG_A, "agent-a", "slack", CHANNEL, "T1",
+		);
+		expect(await chatLinkNames()).toEqual(["Messages in #general"]);
+		expect(await channelFeedNames()).toEqual(["#general"]);
+		expect(lookups).toEqual([["a", CHANNEL]]);
+	});
+
+	test("falls back to the channel id when the label lookup fails or stalls", async () => {
+		const svc = new AutomationSubscriptionService();
+		setChatChannelLabelResolver(async () => {
+			throw new Error("channel_not_found");
+		});
+		await svc.materializeConnectionFallbackLink(
+			"a", ORG_A, "agent-a", "slack", CHANNEL, "T1",
+		);
+		setChatChannelLabelResolver(() => new Promise(() => {}));
+		await svc.materializeConnectionFallbackLink(
+			"a2", ORG_A, "agent-a2", "slack", CHANNEL, "T1",
+		);
+		setChatChannelLabelResolver(async () => null);
+		await svc.materializeConnectionFallbackLink(
+			"a", ORG_A, "agent-a", "slack", "slack:D999", "T1",
+		);
+		expect(await chatLinkNames()).toEqual([
+			`Messages in ${CHANNEL}`,
+			`Messages in ${CHANNEL}`,
+			"Messages in slack:D999",
+		]);
+		// Two connections each own a feed for the shared channel, plus the DM.
+		expect(await channelFeedNames()).toEqual([CHANNEL, CHANNEL, "slack:D999"]);
+		expect((await svc.resolveForConnection("a", CHANNEL, ORG_A))?.agentId).toBe(
+			"agent-a",
+		);
+		expect(
+			(await svc.resolveForConnection("a2", CHANNEL, ORG_A))?.agentId,
+		).toBe("agent-a2");
+	});
+
+	test("relinking keeps a chat link's custom name", async () => {
+		const svc = new AutomationSubscriptionService();
+		await svc.createChatAutomation("agent-a", "slack", CHANNEL, "T1", {
+			organizationId: ORG_A,
+			connectionId: connectionA,
+			channelLabel: "#general",
+		});
+		await getDb()`
+			UPDATE automations SET name = 'Support triage'
+			WHERE organization_id = ${ORG_A}
+			  AND tags @> ARRAY['system:chat-link']::text[]
+		`;
+		await getDb()`
+			UPDATE feeds SET display_name = 'Triage channel'
+			WHERE organization_id = ${ORG_A}
+		`;
+		await svc.createChatAutomation("agent-a2", "slack", CHANNEL, "T1", {
+			organizationId: ORG_A,
+			connectionId: connectionA,
+			channelLabel: "#renamed-upstream",
+		});
+		const [row] = await getDb()<{ name: string }>`
+			SELECT name FROM automations
+			WHERE organization_id = ${ORG_A}
+			  AND tags @> ARRAY['system:chat-link']::text[]
+		`;
+		expect(row.name).toBe("Support triage");
+		expect(await channelFeedNames()).toEqual(["Triage channel"]);
+		expect((await svc.resolveForConnection("a", CHANNEL, ORG_A))?.agentId).toBe(
+			"agent-a2",
+		);
 	});
 });

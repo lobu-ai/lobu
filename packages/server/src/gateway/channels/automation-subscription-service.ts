@@ -22,6 +22,62 @@ import { authorizedChatLinkIds, canLinkChatOrganizations } from "./chat-link-aut
 const logger = createLogger("automation-channel-subscriptions");
 const CHAT_LINK_TAG = "system:chat-link";
 const CHAT_LINK_PROMPT = "Respond helpfully to the incoming message.";
+const CHANNEL_LABEL_TIMEOUT_MS = 2_000;
+
+/**
+ * Resolves a chat channel's human-readable label (`#general`) through the
+ * connection's own chat adapter, or null when the platform has none. The
+ * gateway registers its ChatInstanceManager here at boot. This module cannot
+ * import the manager: the platform registry the manager loads already imports
+ * this module (Google Chat installs), and a cycle through that registry can
+ * read it before it is initialized.
+ */
+type ChatChannelLabelResolver = (
+	runtimeConnectionId: string,
+	channelId: string,
+) => Promise<string | null>;
+
+let channelLabelResolver: ChatChannelLabelResolver | null = null;
+
+export function setChatChannelLabelResolver(
+	resolver: ChatChannelLabelResolver | null,
+): void {
+	channelLabelResolver = resolver;
+}
+
+/**
+ * Best-effort, bounded label for a new chat link's channel. No resolver on this
+ * process, no adapter lookup, a DM, a provider error or a slow provider all
+ * yield null, so the link is named after the channel id and never fails
+ * because of its name. Call it BEFORE opening a transaction: it makes a
+ * provider call, and a transaction held across it pins a pool connection.
+ */
+export async function resolveChatChannelLabel(
+	runtimeConnectionId: string,
+	channelId: string,
+): Promise<string | null> {
+	const resolver = channelLabelResolver;
+	if (!resolver) return null;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const timeout = new Promise<null>((resolve) => {
+			timer = setTimeout(() => resolve(null), CHANNEL_LABEL_TIMEOUT_MS);
+		});
+		const label = await Promise.race([
+			resolver(runtimeConnectionId, channelId),
+			timeout,
+		]);
+		return label?.trim() || null;
+	} catch (err) {
+		logger.debug(
+			{ runtimeConnectionId, channelId, error: String(err) },
+			"chat-link channel label lookup failed (using id)",
+		);
+		return null;
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
 
 /**
  * Routing projection of an active Automation event trigger. It carries no state
@@ -394,6 +450,7 @@ export class AutomationSubscriptionService {
 		`) as Array<{ id: number | string }>;
 		const numericId = rows[0] ? Number(rows[0].id) : NaN;
 		if (!Number.isInteger(numericId) || numericId < 1) return false;
+		const channelLabel = await resolveChatChannelLabel(connectionId, channelId);
 		// create-only: never overwrite an explicit link that a concurrent
 		// `/lobu link` may have committed — the check happens under the advisory
 		// lock inside createChatAutomation, so it is race-safe across replicas.
@@ -401,6 +458,7 @@ export class AutomationSubscriptionService {
 			organizationId,
 			connectionId: numericId,
 			createOnly: true,
+			channelLabel,
 		});
 		return true;
 	}
@@ -427,6 +485,12 @@ export class AutomationSubscriptionService {
 			 * replicas. Explicit link/relink flows omit it and keep relinking.
 			 */
 			createOnly?: boolean;
+			/**
+			 * Human label for the channel (e.g. `#general`), resolved by the caller
+			 * with resolveChatChannelLabel before any transaction opens. Names a
+			 * newly created link and its feed; a relink never renames either.
+			 */
+			channelLabel?: string | null;
 		},
 	): Promise<boolean> {
 		if (!Number.isInteger(options.connectionId) || options.connectionId < 1) {
@@ -444,6 +508,9 @@ export class AutomationSubscriptionService {
 			channelId,
 			teamId,
 		});
+		// A relink keeps whatever name the Automation has; the user may have changed it.
+		const label = options.channelLabel?.trim() || null;
+		const name = `Messages in ${label ?? channelId}`;
 
 		const write = async (tx: DbClient): Promise<boolean> => {
 			// Serialize concurrent create/relink for the same org+connection+channel.
@@ -553,7 +620,7 @@ export class AutomationSubscriptionService {
 					status, created_by, created_at, updated_at, automation_group_id,
 					next_window_start
 				) VALUES (
-					${automationId}, ${`Messages in ${channelId}`}, ${`chat-${platform}-${automationId}`},
+					${automationId}, ${name}, ${`chat-${platform}-${automationId}`},
 					'Chat subscription', ${organizationId}, '{}'::bigint[],
 					NULL, NULL, ${tx.json([trigger])}, ${agentId}, '{}'::jsonb,
 					${model ? tx.json({ model }) : null}, '[]'::jsonb, 1, NULL,
@@ -567,7 +634,7 @@ export class AutomationSubscriptionService {
 					id, automation_id, version, name, description, prompt,
 					version_sources, change_notes, created_by, created_at
 				) VALUES (
-					${versionId}, ${automationId}, 1, ${`Messages in ${channelId}`},
+					${versionId}, ${automationId}, 1, ${name},
 					'Chat subscription', ${CHAT_LINK_PROMPT}, '[]'::jsonb,
 					'Created from chat link', ${createdBy}, current_timestamp
 				)
@@ -585,6 +652,8 @@ export class AutomationSubscriptionService {
 			connectionId: String(options.connectionId),
 			organizationId,
 			channelKey: `${platform}:${nativeChannelId(platform, channelId)}`,
+			// Only a newly created feed takes the label; an existing one keeps its name.
+			displayName: label,
 			sql,
 		});
 		logger.info(`Created chat Automation: ${platform}/${channelId} → ${agentId}`);

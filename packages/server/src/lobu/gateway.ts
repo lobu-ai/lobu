@@ -26,6 +26,7 @@ import {
 	getConfiguredPublicOrigin,
 	resolvePublicGatewayUrl,
 } from "../utils/public-origin";
+import { setChatChannelLabelResolver } from "../gateway/channels/automation-subscription-service";
 import { ChatInstanceManager } from "../gateway/connections/chat-instance-manager";
 import { ChatResponseBridge } from "../gateway/connections/chat-response-bridge";
 import { handleChatSourceIngress } from "../gateway/connections/chat-source-ingress";
@@ -485,6 +486,12 @@ export async function initLobuGateway(options?: {
 				.work(CHAT_SOURCE_INGRESS_QUEUE, (job: QueueJob<ChatSourceIngressJob>) =>
 					handleChatSourceIngress(ingressManager, job),
 				);
+			// New chat links are named after the channel (`#general`) through the
+			// connection's own adapter; without this they keep the channel id.
+			const labelManager = chatInstanceManager;
+			setChatChannelLabelResolver((connectionId, channelId) =>
+				labelManager.fetchChannelLabel(connectionId, channelId),
+			);
 		} catch (error) {
 			logger.warn(
 				{ error: String(error) },
@@ -613,6 +620,7 @@ export async function initLobuGateway(options?: {
  */
 export async function stopLobuGateway(): Promise<void> {
 	try {
+		setChatChannelLabelResolver(null);
 		if (chatInstanceManager) {
 			await chatInstanceManager.shutdown();
 		}

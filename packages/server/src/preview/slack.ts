@@ -12,7 +12,10 @@ import { errorMessage } from "../utils/errors";
 import logger from "../utils/logger";
 import { getConfiguredPublicOrigin } from "../utils/public-origin";
 import { requireOrgUser } from "../utils/require-org-user";
-import { AutomationSubscriptionService } from "../gateway/channels/automation-subscription-service";
+import {
+	AutomationSubscriptionService,
+	resolveChatChannelLabel,
+} from "../gateway/channels/automation-subscription-service";
 import { canLinkChatOrganizations } from "../gateway/channels/chat-link-authorization";
 import {
 	formatChatCommand,
@@ -309,6 +312,7 @@ async function upsertBinding(
 	connectionId: number,
 	configuredBy?: string | null,
 	requireAuthorizedAuthor = false,
+	channelLabel: string | null = null,
 ): Promise<boolean> {
 	return new AutomationSubscriptionService().createChatAutomation(
 		agentId,
@@ -320,6 +324,7 @@ async function upsertBinding(
 			connectionId,
 			configuredBy: configuredBy ?? undefined,
 			requireAuthorizedAuthor,
+			channelLabel,
 			sql: tx,
 		},
 	);
@@ -361,6 +366,11 @@ export async function consumePreviewClaim(args: {
 	} = args;
 	const sql = getDb();
 	const canonicalChannelId = getPlatformDescriptor(platform)?.canonicalChannelId?.(channelId) ?? channelId;
+	// A new link is named after its channel. The lookup calls the chat provider,
+	// so it runs before the claim transaction pins a pool connection.
+	const channelLabel = connectionId
+		? await resolveChatChannelLabel(connectionId, canonicalChannelId)
+		: null;
 
 	const result = await sql.begin(async (tx) => {
 		const claims = await tx<{ payload: ClaimPayload }>`
@@ -459,6 +469,7 @@ export async function consumePreviewClaim(args: {
 			bindingConnectionId,
 			claim.createdBy,
 			claim.connectionOrganizationId != null && claim.connectionOrganizationId !== claim.organizationId,
+			channelLabel,
 		);
 		if (!linked) return { status: "link_authority_revoked" as const };
 		await tx`
@@ -734,6 +745,8 @@ export async function bindChatToAgentForOwner(args: {
 			return { status: "forbidden" };
 		}
 	}
+	// Resolved before the transaction: the lookup calls the chat provider.
+	const channelLabel = await resolveChatChannelLabel(args.connectionId, channelId);
 	const linked = await sql.begin((tx) =>
 		upsertBinding(
 			tx,
@@ -745,6 +758,7 @@ export async function bindChatToAgentForOwner(args: {
 			connections[0].id,
 			lobuUserId,
 			requiresInstallationAuthority,
+			channelLabel,
 		),
 	);
 	return { status: linked ? "bound" : "link_authority_revoked" };
