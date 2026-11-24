@@ -16,8 +16,10 @@ import {
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
+  addUserToOrganization,
   createTestConnection,
   createTestConnectorDefinition,
+  createTestUser,
   seedOwnerContext,
 } from '../setup/test-fixtures';
 import { post } from '../setup/test-helpers';
@@ -519,6 +521,81 @@ describe('manifest-backed device pin admission', () => {
     });
     const fresh = await queueOperation(fixture, 'admission-after-offline');
     expect(fresh.status).toBe('failed');
+  });
+
+  // A device action that waited for a grant only the device's owner can make
+  // names it on its failed completion. The owner is asked once per device,
+  // grant and window, however often an agent retries; a malformed grant asks
+  // nobody.
+  it('asks the device owner once for a grant a failed action names', async () => {
+    const fixture = await seedFixture();
+    const completeFailed = async (actionOutput: Record<string, unknown>) => {
+      const run = await queueOperation(fixture);
+      expect((await pollDevice(fixture.device, fixture.selected)).run_id).toBe(run.runId);
+      const completion = await post('/api/workers/complete-action', {
+        body: {
+          run_id: run.runId,
+          worker_id: fixture.device.workerId,
+          status: 'failed',
+          error_message: 'Lobu for Chrome can\'t access https://sub.example.test yet.',
+          error_code: 'PRECONDITION_FAILED',
+          action_output: actionOutput,
+        },
+      });
+      expect(completion.status).toBe(200);
+      return run.runId;
+    };
+    const grantNotifications = () => getTestDb()<{ user_id: string; title: string; key: string }[]>`
+      SELECT nt.user_id, e.title, e.metadata->>'_lobu_idempotency_key' AS key
+      FROM events e JOIN notification_targets nt ON nt.event_id = e.id
+      WHERE e.organization_id = ${fixture.org.id}
+        AND e.metadata->>'_lobu_idempotency_key' LIKE 'device_grant:%'
+    `;
+
+    const firstRunId = await completeFailed({ device_grant: { kind: 'site_access', subject: 'https://sub.example.test' } });
+    await completeFailed({ device_grant: { kind: 'site_access', subject: 'https://sub.example.test' } });
+    await completeFailed({ device_grant: { kind: 'site_access', subject: 'https://sub.example.test/path' } });
+    await completeFailed({ device_grant: { kind: 'unknown_grant', subject: 'https://other.example.test' } });
+
+    expect(await grantNotifications()).toEqual([
+      {
+        user_id: fixture.user.id,
+        title: 'Allow Lobu on sub.example.test',
+        key: expect.stringContaining(`device_grant:${fixture.device.id}:site_access:https://sub.example.test:`),
+      },
+    ]);
+    const [stored] = await getTestDb()`SELECT status, action_output FROM runs WHERE id = ${firstRunId}`;
+    expect(stored).toMatchObject({
+      status: 'failed',
+      action_output: { device_grant: { kind: 'site_access', subject: 'https://sub.example.test' } },
+    });
+
+    // The connection moves to another person's device while an action is in
+    // flight. The device that ran it is the one missing the grant, so its
+    // owner hears about it, not the new pin's.
+    const otherOwner = await createTestUser({ email: `grant-rebind-${randomUUID()}@test.example.com` });
+    await addUserToOrganization(otherOwner.id, fixture.org.id, 'member');
+    const otherDevice = await seedDevice(otherOwner.id, fixture.org.id, fixture.selected);
+    const rebound = await queueOperation(fixture);
+    expect((await pollDevice(fixture.device, fixture.selected)).run_id).toBe(rebound.runId);
+    await getTestDb()`UPDATE connections SET device_worker_id = ${otherDevice.id} WHERE id = ${fixture.connection.id}`;
+    const completion = await post('/api/workers/complete-action', {
+      body: {
+        run_id: rebound.runId,
+        worker_id: fixture.device.workerId,
+        status: 'failed',
+        error_code: 'PRECONDITION_FAILED',
+        action_output: { device_grant: { kind: 'site_access', subject: 'https://rebound.example.test' } },
+      },
+    });
+    expect(completion.status).toBe(200);
+    expect((await grantNotifications()).filter((n) => n.title === 'Allow Lobu on rebound.example.test')).toEqual([
+      {
+        user_id: fixture.user.id,
+        title: 'Allow Lobu on rebound.example.test',
+        key: expect.stringContaining(`device_grant:${fixture.device.id}:site_access:https://rebound.example.test:`),
+      },
+    ]);
   });
 
   it('admits a compatible operation only to the exact pinned device', async () => {

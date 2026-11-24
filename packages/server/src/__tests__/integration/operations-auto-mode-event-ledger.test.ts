@@ -18,6 +18,7 @@
 
 import { qualifiedOperationKey } from "../../tools/admin/manage_operations/handlers/shared";
 import { upsertEntityApprovalPolicy } from "../../authz/entity-policy";
+import { encodeExternalAutomationClaimOwner } from "../../automations/external-claim-owner";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
@@ -28,6 +29,7 @@ import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
 import {
 	addUserToOrganization,
 	createTestAgent,
+	createTestPAT,
 	createTestUser,
 	createTestConnection,
 	createTestConnectorDefinition,
@@ -418,6 +420,109 @@ describe("operation ledger under Auto policy", () => {
 		expect(await confirm(pendingAtDelete.run_id)).toMatchObject({ reason: "not_pending_check" });
 		expect(await operationLedger(orgId, pendingAtDelete.run_id)).toEqual([]);
 		expect((await sql`SELECT status FROM runs WHERE id = ${expired.run_id}`)[0].status).toBe("timeout");
+	});
+
+	it("an external runner settles its Automation's Check only while it holds the window lease", async () => {
+		const sql = getTestDb();
+		const runner = await createTestUser({ name: "External runner member" });
+		await addUserToOrganization(runner.id, orgId);
+		const runnerCtx: ToolContext = { ...ctx, userId: runner.id, memberRole: "member", appPrincipalId: "web:external-runner.test" };
+		const checkConn = await createTestConnection({ organization_id: orgId, connector_key: CONNECTOR, created_by: runner.id, visibility: "private" });
+		await sql`UPDATE connections SET auth_profile_id = (SELECT auth_profile_id FROM connections WHERE id = ${connectionId}) WHERE id = ${checkConn.id}`;
+		// An external Automation that runs an agent is held for a Check, which its
+		// processor must be able to settle.
+		const agent = await createTestAgent({ organizationId: orgId, ownerUserId: runner.id, name: "External runner agent" });
+		const automationId = 7101;
+		await sql`INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, execution_config, created_by, name, slug)
+			VALUES (${automationId}, ${automationId}, ${orgId}, ${agent.agentId}, ${sql.json({ executor: { kind: "external" } })},
+				${runner.id}, 'External runner fixture', 'external-runner-fixture')`;
+		await upsertEntityApprovalPolicy(orgId, { resourceClass: "connector_action", connectionId: checkConn.id, effects: { execute: "auto" } });
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "connector_action", connectionId: checkConn.id, kind: "guardrail",
+			principalKind: "automation", principalId: `automation:${automationId}`, note: "Only echo values from the window", effects: { execute: "check" },
+		});
+		const [window] = await sql<{ id: number }>`INSERT INTO runs (organization_id, run_type, automation_id, status)
+			VALUES (${orgId}, 'automation', ${automationId}, 'running') RETURNING id`;
+		const lease = (claimedBy: string, seconds: number) => sql`UPDATE runs
+			SET claimed_by = ${claimedBy}, expires_at = now() + make_interval(secs => ${seconds}) WHERE id = ${window.id}`;
+		const ownLease = encodeExternalAutomationClaimOwner(runnerCtx);
+		const otherLease = encodeExternalAutomationClaimOwner({ userId: "synthetic-other-runner" });
+		await lease(ownLease, 300);
+		const execute = async (value: string, as: ToolContext = runnerCtx) => {
+			const held = await manageOperations({
+				action: "execute", connection_id: checkConn.id, operation_key: "echo", input: { value },
+				automation_source: { automation_id: automationId, run_id: Number(window.id) },
+			}, {} as Env, as) as Record<string, unknown> & { run_id: number };
+			expect(held).toMatchObject({ status: "pending_check", policy: { principal: { kind: "automation", id: `automation:${automationId}` } } });
+			return held.run_id;
+		};
+		const confirm = (runId: number, as: ToolContext = runnerCtx) => manageOperations({ action: "confirm", run_id: runId, statement: "The window asked for this value." }, {} as Env, as) as Promise<Record<string, unknown>>;
+		const cancel = (runId: number) => manageOperations({ action: "cancel", run_id: runId }, {} as Env, runnerCtx) as Promise<Record<string, unknown>>;
+
+		// Someone else's lease or a lapsed one does not make the caller the Automation.
+		const confirmed = await execute("confirmed");
+		const withdrawn = await execute("withdrawn");
+		for (const [claimedBy, seconds] of [[otherLease, 300], [ownLease, -1]] as const) {
+			await lease(claimedBy, seconds);
+			expect(await confirm(confirmed), `${claimedBy} ${seconds}`).toHaveProperty("error");
+			expect(await cancel(withdrawn), `${claimedBy} ${seconds}`).toHaveProperty("error");
+		}
+
+		await lease(ownLease, 300);
+		expect(await confirm(confirmed)).toMatchObject({ run_id: confirmed, status: "completed" });
+		expect((await sql`SELECT run_metadata FROM runs WHERE id = ${confirmed}`)[0].run_metadata.policy_check)
+			.toMatchObject({ statement: "The window asked for this value." });
+		expect(await cancel(withdrawn)).toMatchObject({ cancelled: true });
+		expect((await sql`SELECT approval_status FROM runs WHERE id = ${withdrawn}`)[0].approval_status).toBe("withdrawn");
+
+		// A replacement processor's PAT can be stricter than the PAT that held
+		// the Check, even when both act as the same Automation in later windows.
+		const originalPat = await createTestPAT(runner.id, orgId);
+		const replacementPat = await createTestPAT(runner.id, orgId);
+		const patCtx = (id: number): ToolContext => ({ ...runnerCtx, clientId: `pat_${id}`, appPrincipalId: `pat:${id}` });
+		const originalCtx = patCtx(originalPat.id);
+		const replacementCtx = patCtx(replacementPat.id);
+		const setAllowance = (id: number, operationKey: string, effect: "auto" | "approval") => sql`
+			INSERT INTO caller_action_allowlists (organization_id, subject_kind, subject_id, entries)
+			VALUES (${orgId}, 'pat', ${String(id)}, ${sql.json([
+				{ action: "connector.execute", connection_id: checkConn.id, operation_key: operationKey, effect },
+			])})
+			ON CONFLICT (organization_id, subject_kind, subject_id) DO UPDATE SET entries = EXCLUDED.entries`;
+		await setAllowance(originalPat.id, "echo", "auto");
+		await lease(encodeExternalAutomationClaimOwner(originalCtx), 300);
+		const excluded = await execute("excluded by replacement", originalCtx);
+		const asks = await execute("replacement needs approval", originalCtx);
+		const allowed = await execute("allowed replacement", originalCtx);
+		const originalRestricted = await execute("original PAT tightened", originalCtx);
+		await sql`UPDATE runs SET status = 'completed' WHERE id = ${window.id}`;
+		await sql`INSERT INTO runs (organization_id, run_type, automation_id, status, claimed_by, expires_at)
+			VALUES (${orgId}, 'automation', ${automationId}, 'running',
+				${encodeExternalAutomationClaimOwner(replacementCtx)}, now() + interval '5 minutes')`;
+
+		await setAllowance(replacementPat.id, "needs_approval", "auto");
+		expect(await confirm(excluded, replacementCtx)).toMatchObject({
+			error: "'echo' isn't on this caller's allowed actions list.",
+			policy: { reason: "allowlist" },
+		});
+		expect((await sql`SELECT status, approval_status FROM runs WHERE id = ${excluded}`)[0])
+			.toMatchObject({ status: "cancelled", approval_status: "rejected" });
+		expect(await operationLedger(orgId, excluded)).toHaveLength(0);
+
+		await setAllowance(replacementPat.id, "echo", "approval");
+		expect(await confirm(asks, replacementCtx)).toMatchObject({ reason: "policy_changed", policy: { reason: "allowlist" } });
+		expect((await sql`SELECT status, approval_status FROM runs WHERE id = ${asks}`)[0])
+			.toMatchObject({ status: "cancelled", approval_status: "withdrawn" });
+		expect(await operationLedger(orgId, asks)).toHaveLength(0);
+
+		await setAllowance(replacementPat.id, "echo", "auto");
+		expect(await confirm(allowed, replacementCtx)).toMatchObject({ run_id: allowed, status: "completed", output: { value: "allowed replacement" } });
+		// Keeping the new PAT permissive must not discard the original PAT's list.
+		await setAllowance(originalPat.id, "needs_approval", "auto");
+		expect(await confirm(originalRestricted, replacementCtx)).toMatchObject({
+			error: "'echo' isn't on this caller's allowed actions list.",
+			policy: { reason: "allowlist" },
+		});
+		expect(await operationLedger(orgId, originalRestricted)).toHaveLength(0);
 	});
 
 	it("a background device Check is not claimable until the agent confirms it", async () => {

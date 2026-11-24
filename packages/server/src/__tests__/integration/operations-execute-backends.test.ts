@@ -29,6 +29,7 @@ import {
 import * as gateway from "../../lobu/gateway";
 import { ArtifactStore, runArtifactBinding } from "../../gateway/files/artifact-store";
 import { ingestInputFiles } from "../../gateway/files/input-files";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../tools/admin/helpers/connection-helpers";
 
 const LOCAL = "demo.ops.backend.local";
 const INLINE_FILE_BYTES = Buffer.from("%PDF-1.4 inline attachment bytes");
@@ -934,7 +935,7 @@ describe("operations.execute backend lifecycle", () => {
 			},
 		);
 
-		expect(result).toEqual({ error: "Connection not found or not visible." });
+		expect(result).toEqual({ error: OPERATION_TARGET_NOT_FOUND_ERROR });
 	});
 
 	it("keeps organization-visible operations available to a headless Automation", async () => {
@@ -987,7 +988,7 @@ describe("operations.execute backend lifecycle", () => {
 			},
 		);
 
-		expect(result).toEqual({ error: "Connection not found or not visible." });
+		expect(result).toEqual({ error: OPERATION_TARGET_NOT_FOUND_ERROR });
 	});
 
 	it("repairs a failed feedback link without stranding or repeating an inline action", async () => {

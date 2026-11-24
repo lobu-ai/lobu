@@ -23,6 +23,7 @@
  * Kept free of tool and gateway imports so any write surface can reach it.
  */
 
+import { automationIdFromPrincipalId } from '../authz/entity-policy';
 import { type DbClient, getDb } from '../db/client';
 import { encodeExternalAutomationClaimOwner } from './external-claim-owner';
 
@@ -97,26 +98,68 @@ export async function verifiedAutomationSource(
  */
 export async function leasedAutomationId(
   sql: DbClient,
-  caller: {
-    organizationId: string;
-    userId: string | null;
-    agentId?: string | null;
-    clientId?: string | null;
-  },
+  caller: LeaseCaller,
   declared: DeclaredAutomationSource | null | undefined
 ): Promise<number | null> {
-  if (!declared || (!caller.userId && !caller.agentId && !caller.clientId)) return null;
+  if (!declared) return null;
+  return (await holdsWindowLease(sql, caller, declared.automation_id, declared.run_id))
+    ? declared.automation_id
+    : null;
+}
+
+/**
+ * The Automation a held operation run was requested as, while this caller is
+ * running it; otherwise null.
+ *
+ * An external processor's write takes its Automation's rules only under a window
+ * lease (`leasedAutomationId`), so the run it holds names that Automation.
+ * Confirming or withdrawing the run acts as the same Automation and needs a live
+ * lease of it too. Any of its windows will do: the processor may have moved on to
+ * the next window since the run was held.
+ */
+export async function leasedAutomationOfHeldRun(
+  sql: DbClient,
+  caller: LeaseCaller,
+  runId: number
+): Promise<number | null> {
+  const [held] = await sql<{ policy_principal_kind: string | null; policy_principal_id: string | null }>`
+    SELECT policy_principal_kind, policy_principal_id FROM runs
+    WHERE id = ${runId} AND organization_id = ${caller.organizationId}
+  `;
+  const automationId = held?.policy_principal_kind === 'automation'
+    ? automationIdFromPrincipalId(held.policy_principal_id)
+    : null;
+  if (automationId == null) return null;
+  return (await holdsWindowLease(sql, caller, automationId, null)) ? automationId : null;
+}
+
+type LeaseCaller = {
+  organizationId: string;
+  userId: string | null;
+  agentId?: string | null;
+  clientId?: string | null;
+};
+
+/** Whether the caller holds an unexpired window lease of the Automation (of one run, when given). */
+async function holdsWindowLease(
+  sql: DbClient,
+  caller: LeaseCaller,
+  automationId: number,
+  runId: number | null
+): Promise<boolean> {
+  if (!caller.userId && !caller.agentId && !caller.clientId) return false;
   const rows = await sql`
     SELECT 1 FROM runs
-    WHERE id = ${declared.run_id}
-      AND automation_id = ${declared.automation_id}
+    WHERE automation_id = ${automationId}
+      ${runId == null ? sql`` : sql`AND id = ${runId}`}
       AND organization_id = ${caller.organizationId}
       AND run_type = 'automation'
       AND status = 'running'
       AND claimed_by = ${encodeExternalAutomationClaimOwner(caller)}
       AND expires_at > current_timestamp
+    LIMIT 1
   `;
-  return rows.length > 0 ? declared.automation_id : null;
+  return rows.length > 0;
 }
 
 /**

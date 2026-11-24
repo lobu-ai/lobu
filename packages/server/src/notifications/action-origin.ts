@@ -1,24 +1,17 @@
 import { getDb } from "../db/client";
+import { chatPlatformLabel } from "../gateway/connections/platform-label";
 import { parseAutomationRunConversationId } from "../gateway/permissions/automation-run-intent";
 import { currentMcpActivityAttribution } from "../lobu/stores/mcp-client-conversations";
 import type { ToolContext } from "../tools/registry";
 import type { ActionOrigin } from "./action-card-state";
 
-const PLATFORM_LABELS: Record<string, string> = {
-	slack: "Slack",
-	telegram: "Telegram",
-	whatsapp: "WhatsApp",
-	discord: "Discord",
-	teams: "Microsoft Teams",
-	gchat: "Google Chat",
-	mcp: "MCP",
-	web: "Lobu",
-};
-
 function platformName(value: string | null | undefined): string {
 	const platform = value?.trim().toLowerCase();
-	if (!platform || platform === "api" || platform === "lobu") return "Lobu";
-	return PLATFORM_LABELS[platform] ?? platform;
+	if (!platform || platform === "api" || platform === "lobu" || platform === "web") {
+		return "Lobu";
+	}
+	if (platform === "mcp") return "MCP";
+	return chatPlatformLabel(platform);
 }
 
 async function automationOrigin(

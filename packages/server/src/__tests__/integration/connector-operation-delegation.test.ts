@@ -19,6 +19,7 @@ import { handleExecute } from "../../tools/admin/manage_operations/handlers/exec
 import type { Env } from "../../index";
 import { runShellBuiltin } from "../../../../connector-worker/src/daemon/builtins/os-shell";
 import { post } from "../setup/test-helpers";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../tools/admin/helpers/connection-helpers";
 
 const sql = getTestDb();
 const parentKey = "fixture.delegating";
@@ -192,7 +193,7 @@ describe("connector delegation through the public operation lifecycle", () => {
     const stranger = await createTestUser();
     await sql`UPDATE connections SET visibility='private',created_by=${stranger.id} WHERE id=${params.request.connection_id}`;
     expect(await executeConnectorOperation(params)).toMatchObject({
-      error: "Connection not found or not visible.",
+      error: OPERATION_TARGET_NOT_FOUND_ERROR,
     });
     expect(
       await executeConnectorOperation({

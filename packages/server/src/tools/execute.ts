@@ -30,6 +30,8 @@ import { recordMcpConversationActivity } from '../lobu/stores/mcp-client-convers
 import { parseApplyId } from '../utils/apply-context';
 import { assertDeploymentsNotPaused } from '../utils/deployment-pause';
 import { asReadTimeout } from '../utils/bounded-read';
+import logger from '../utils/logger';
+import { listLiveGrantedMemberWorkspaces } from '../auth/oauth/workspace-grants';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { logToolCallFailure, toolErrorScope } from './tool-error-log';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
@@ -242,6 +244,27 @@ function isAccountContentRead(toolName: string, authCtx: AuthContext): boolean {
 }
 
 /**
+ * Name the workspaces an unbound caller may target. The list comes from the
+ * caller's own grant joined to its live memberships, so it reveals nothing the
+ * caller could not already select. A failed lookup only drops the hint.
+ */
+async function grantedWorkspaceTargetsHint(authCtx: AuthContext): Promise<string> {
+  const grantedOrganizationIds = authCtx.grantedOrganizationIds ?? [];
+  if (!authCtx.userId || grantedOrganizationIds.length === 0) return '';
+  try {
+    const workspaces = await listLiveGrantedMemberWorkspaces({
+      userId: authCtx.userId,
+      grantedOrganizationIds,
+    });
+    if (workspaces.length === 0) return '';
+    return ` Workspaces this connection can target: ${workspaces.map((workspace) => workspace.slug).join(', ')}.`;
+  } catch (error) {
+    logger.warn({ error }, '[mcp] granted workspace lookup failed for an unbound tool call');
+    return '';
+  }
+}
+
+/**
  * Check access control for a tool call. Throws on denial.
  */
 export async function checkToolAccess(
@@ -254,7 +277,8 @@ export async function checkToolAccess(
   const accountScope = tool.scope === 'account' || isAccountContentRead(toolName, authCtx);
   if (!accountScope && !authCtx.organizationId) {
     throw new ToolUserError(
-      'This connection has no workspace binding. Pass the tool’s explicit workspace target (for example org_slug), or run it through await client.org(target) in query_sdk/run_sdk.',
+      'This connection has no workspace binding. Pass the tool’s explicit workspace target (for example org_slug), or run it through await client.org(target) in query_sdk/run_sdk.' +
+        (await grantedWorkspaceTargetsHint(authCtx)),
       400,
       'VALIDATION'
     );

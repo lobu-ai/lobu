@@ -117,6 +117,8 @@ import {
   isPersonalCredVisibilityViolation,
   mapConnectionStatusToFeedStatus,
   PERSONAL_CRED_ORG_VISIBILITY_ERROR,
+  CONNECTION_ALREADY_DELETED_ERROR,
+  CONNECTION_NOT_FOUND_ERROR,
   resolveConnectionAuthSelection,
   resolveConnectionDisplayName,
   resolveConnectionVisibility,
@@ -646,7 +648,7 @@ export async function handleGet(
 
   const rows = await query;
   if (rows.length === 0) {
-		return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
+		return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, "NOT_FOUND");
   }
 
 	const [resolved] = await resolveUsernames(
@@ -1541,7 +1543,7 @@ export async function handleUpdate(
       AND c.deleted_at IS NULL
   `;
   if (existingRows.length === 0) {
-		return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
+		return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, "NOT_FOUND");
   }
 
   const existing = existingRows[0] as {
@@ -2256,7 +2258,7 @@ export async function handleUpdate(
     }
     updated = updateOutcome.rows;
     if (updated.length === 0) {
-      return withFailureCode({ error: "Connection not found" }, "NOT_FOUND");
+      return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, "NOT_FOUND");
     }
   } catch (err) {
     if (isConnectionSlugUniqueViolation(err) && updateExplicitSlug) {
@@ -2398,7 +2400,7 @@ export async function handleDelete(
 		LIMIT 1
 	`;
 	if (targets.length === 0) {
-		return withFailureCode({ error: "Connection not found or already deleted" }, "NOT_FOUND");
+		return withFailureCode({ error: CONNECTION_ALREADY_DELETED_ERROR }, "NOT_FOUND");
 	}
 	const target = targets[0] as DeviceAutowireIdentityRow & {
 		credential_mode: string | null;
@@ -2568,7 +2570,7 @@ export async function handleDelete(
 		return { tombstoned, expiredApprovalRunIds };
   });
   if (deleted === null) {
-    return withFailureCode({ error: "Connection not found or already deleted" }, "NOT_FOUND");
+    return withFailureCode({ error: CONNECTION_ALREADY_DELETED_ERROR }, "NOT_FOUND");
   }
 
 	queueApprovalNotificationCardRefresh(

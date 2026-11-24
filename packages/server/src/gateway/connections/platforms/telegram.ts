@@ -285,6 +285,17 @@ export const telegramPlatform: ChatPlatformDescriptor = {
   // Preserve the manager's lazy adapter loading per platform.
   createAdapter: async (c, context) => {
     const adapter = (await import("@chat-adapter/telegram")).createTelegramAdapter(c);
+    // The SDK's Telegram channel id is `telegram:<chatId>` (the adapter's own
+    // channelIdFromThreadId), but its fetchChannelInfo forwards that id to
+    // getChat unchanged, where Telegram needs the bare chat id. Decode it here
+    // so `Chat.channel(id).fetchMetadata()` works like every other adapter's.
+    const fetchChannelInfo = adapter.fetchChannelInfo.bind(adapter);
+    adapter.fetchChannelInfo = (channelId: string) =>
+      fetchChannelInfo(
+        channelId.startsWith("telegram:")
+          ? adapter.decodeThreadId(channelId).chatId
+          : channelId,
+      );
     const connectionId = context?.connection?.id;
     if (!connectionId) return adapter;
 

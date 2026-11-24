@@ -931,9 +931,10 @@ export class OAuthProvider {
   }
 
   /**
-   * Deny a device code owned by the authenticated verifier.
+   * Deny a device code owned by the authenticated verifier. Returns the code's
+   * client id, or null when no pending code matched.
    */
-  async denyDeviceCode(userCode: string, userId: string): Promise<boolean> {
+  async denyDeviceCode(userCode: string, userId: string): Promise<string | null> {
     const result = await this.sql`
       UPDATE oauth_device_codes
       SET status = 'denied'
@@ -941,9 +942,9 @@ export class OAuthProvider {
         AND user_id = ${userId}
         AND status = 'pending'
         AND expires_at > NOW()
-      RETURNING device_code
+      RETURNING client_id
     `;
-    return result.length > 0;
+    return result.length > 0 ? (result[0].client_id as string) : null;
   }
 
   /**

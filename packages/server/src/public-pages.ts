@@ -13,6 +13,10 @@ import { ToolUserError } from './utils/errors';
 import { escapeHtml } from './utils/html';
 import { VIEW_PATH_MARKER, workspaceViewPath } from '@lobu/core/contracts/tools/view-path';
 import {
+  listedPublicOrganizationSql,
+  listedPublicOrganizationsParam,
+} from './workspace/discoverable-workspaces';
+import {
   getConfiguredPublicOrigin,
   getConfiguredSubdomainZone,
 } from './utils/public-origin';
@@ -1316,16 +1320,20 @@ export function injectRuntimeConfig(templateHtml: string): string {
 
 export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[]> {
   const sql = getDb();
+  // An unlisted public workspace is reachable by URL but never advertised.
+  const listedParams = [listedPublicOrganizationsParam()];
+  const listed = listedPublicOrganizationSql('o', '$1');
   const organizationRows = await sql.unsafe<{ slug: string; created_at: string | null }>(
     `
       SELECT
-        slug,
-        "createdAt"::text AS created_at
-      FROM "organization"
-      WHERE visibility = 'public'
-      ORDER BY slug ASC
+        o.slug,
+        o."createdAt"::text AS created_at
+      FROM "organization" o
+      WHERE o.visibility = 'public'
+        AND ${listed}
+      ORDER BY o.slug ASC
     `,
-    []
+    listedParams
   );
 
   const typeRows = await sql.unsafe<{
@@ -1341,11 +1349,12 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
       FROM "organization" o
       JOIN entity_types et ON et.organization_id = o.id AND et.deleted_at IS NULL
       WHERE o.visibility = 'public'
+        AND ${listed}
         AND et.slug NOT LIKE '$%'
       GROUP BY o.slug, et.slug
       ORDER BY o.slug ASC, et.slug ASC
     `,
-    []
+    listedParams
   );
 
   const entityRows = await sql.unsafe<{
@@ -1367,6 +1376,7 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
         JOIN entity_types et ON et.id = e.entity_type_id AND et.deleted_at IS NULL
         JOIN "organization" o ON o.id = e.organization_id
         WHERE o.visibility = 'public'
+          AND ${listed}
           AND e.deleted_at IS NULL
           AND e.parent_id IS NULL
           AND et.slug NOT LIKE '$%'
@@ -1396,7 +1406,7 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
       JOIN "organization" o ON o.id = entity_paths.organization_id
       ORDER BY entity_paths.path ASC
     `,
-    []
+    listedParams
   );
 
   const viewRows = await sql.unsafe<{
@@ -1409,10 +1419,11 @@ export async function buildSitemapEntries(origin: string): Promise<SitemapEntry[
       FROM "organization" o
       JOIN views v ON v.organization_id = o.id
       WHERE o.visibility = 'public'
+        AND ${listed}
         AND v.attach @> '[{"workspace": true}]'::jsonb
       ORDER BY o.slug ASC, v.key ASC
     `,
-    []
+    listedParams
   );
 
   // `organization` has no update timestamp; its page changes when the types,

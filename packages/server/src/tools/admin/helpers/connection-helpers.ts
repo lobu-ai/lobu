@@ -51,6 +51,19 @@ import {
 import type { McpOAuthMetadata } from '../../../mcp-proxy/types';
 
 // ============================================
+// Not-found guidance
+// ============================================
+
+// A missing and a hidden connection read the same, so these name where a valid
+// id comes from without revealing whether the requested one exists.
+const CONNECTIONS_LIST_HINT =
+  'Use a connection_id returned by `client.connections.list()` in this workspace.';
+export const CONNECTION_NOT_FOUND_ERROR = `Connection not found. ${CONNECTIONS_LIST_HINT}`;
+export const CONNECTION_ALREADY_DELETED_ERROR = `Connection not found or already deleted. ${CONNECTIONS_LIST_HINT}`;
+export const OPERATION_TARGET_NOT_FOUND_ERROR =
+  'Connection not found or not visible. Use the connection_id of an `execution_targets` entry returned by `client.operations.listAvailable()`.';
+
+// ============================================
 // Auth Schema Types
 // ============================================
 
@@ -612,7 +625,7 @@ export async function recoverPendingOAuthConnection(params: {
     }
     const [targetHint] = await tx`SELECT auth_profile_id FROM connections
       WHERE id = ${connectionId} AND organization_id = ${organizationId} AND deleted_at IS NULL`;
-    if (!targetHint) return withFailureCode({ error: 'Connection not found' }, 'NOT_FOUND');
+    if (!targetHint) return withFailureCode({ error: CONNECTION_NOT_FOUND_ERROR }, 'NOT_FOUND');
     const [profile] = targetHint.auth_profile_id ? await tx`
       SELECT ap.*, a.scope AS account_scope FROM auth_profiles ap
       LEFT JOIN account a ON a.id = ap.account_id

@@ -32,6 +32,7 @@ import {
 	describeDeviceLastSeen,
 } from "../../../../utils/device-liveness";
 import { withFailureCode } from "../../../../utils/errors";
+import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../helpers/connection-helpers";
 import { buildConnectionAuthUrl, buildConnectionsUrl } from "../../../../utils/url-builder";
 import {
 	DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
@@ -700,7 +701,7 @@ export async function handleListAvailable(
 						visibilityUserId,
 					);
 		if (bareRows.length === 0) {
-			return withFailureCode({ error: "Connection not found or not visible." }, "NOT_FOUND");
+			return withFailureCode({ error: OPERATION_TARGET_NOT_FOUND_ERROR }, "NOT_FOUND");
 		}
 		return {
 			action: "list_available",

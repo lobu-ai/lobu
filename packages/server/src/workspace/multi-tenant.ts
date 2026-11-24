@@ -13,6 +13,7 @@ import {
   publicMcpRequestUrl,
 } from '../auth/oauth/resource-indicator';
 import type { AuthInfo } from '../auth/oauth/types';
+import { recordAuthRejection } from '../auth/span-attributes';
 import { PersonalAccessTokenService } from '../auth/tokens';
 import { isPublicReadable, publicToolDenial } from '../auth/tool-access';
 import { getDb } from '../db/client';
@@ -37,6 +38,10 @@ import type {
   ResolvedOwner,
   WorkspaceProvider,
 } from './types';
+import {
+  listedPublicOrganizationSql,
+  listedPublicOrganizationsParam,
+} from './discoverable-workspaces';
 import { listManagedAuthConnectorOffers } from './managed-auth-discovery';
 import { organizationIdLiveSql, organizationLiveSql } from './deletion-state';
 import { getLiveOrganizationSlug } from './organization-slug';
@@ -534,6 +539,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
         // a session lookup, so menu-bar / CLI clients holding a session
         // token from POST /api/local-init resolve there.
         if (isPat) {
+          recordAuthRejection('invalid_token');
           return c.json(
             { error: 'invalid_token', error_description: 'Invalid or expired access token' },
             401,
@@ -546,6 +552,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
       } else {
 
       if (!authInfo.userId) {
+        recordAuthRejection('token_missing_user', authInfo);
         return c.json(
           { error: 'invalid_token', error_description: 'Token missing user context' },
           401
@@ -557,6 +564,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
       // an existing MCP session. Legacy device grants still use the unscoped
       // account/worker endpoints, whose own middleware checks their scopes.
       if (isPat && !authInfo.organizationId && (requestedOrgId || isMcpRoute || !isUnscopedRoute)) {
+        recordAuthRejection('pat_unscoped', authInfo);
         return c.json(
           {
             error: 'invalid_token',
@@ -576,6 +584,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
           ? getMcpResourceForRequest(publicMcpRequestUrl(c.req.raw))
           : null;
         if (!requestedResource || authInfo.resource !== requestedResource) {
+          recordAuthRejection('resource_mismatch', authInfo);
           return c.json(
             {
               error: 'invalid_token',
@@ -588,6 +597,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
       }
 
       if (!isPat && requestedOrgMissing) {
+        recordAuthRejection('workspace_not_found', authInfo);
         return oauthWorkspaceUnavailable();
       }
 
@@ -629,6 +639,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
       if (authInfo.organizationId) {
         if (requestedOrgId && requestedOrgId !== authInfo.organizationId) {
           if (isPat) {
+            recordAuthRejection('token_org_mismatch', authInfo);
             return c.json(
               {
                 error: 'forbidden',
@@ -673,6 +684,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
         isMcpRoute;
 
       if (!oauthTargetGranted && !allowPublicOrgWithoutMembership) {
+        recordAuthRejection('workspace_not_granted', authInfo);
         // A live member whose grant predates the membership gets the
         // re-consent fix. Everyone else keeps the answer an unknown slug
         // gets, so the grant gate never confirms a workspace exists.
@@ -683,6 +695,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
       }
 
       if (!role && !allowPublicOrgWithoutMembership) {
+        recordAuthRejection('not_a_member', authInfo);
         return c.json(
           {
             error: 'forbidden',
@@ -792,6 +805,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     // standards-compliant clients surface "bad token" rather than mistaking
     // it for "no auth needed."
     if (authHeader?.startsWith('Bearer ')) {
+      recordAuthRejection('invalid_token');
       return c.json(
         { error: 'invalid_token', error_description: 'Invalid or expired access token' },
         401,
@@ -818,6 +832,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     }
 
     if (!allowOrgLevelPublicRead && !allowAnonymousPublicOrgMcp) {
+      recordAuthRejection('missing_token');
       return c.json(
         {
           error: 'unauthorized',
@@ -839,19 +854,20 @@ export class MultiTenantProvider implements WorkspaceProvider {
     let organizations: OrgInfo[];
 
     if (!userId) {
-      const params: string[] = [];
+      const params: (string | null)[] = [listedPublicOrganizationsParam()];
       const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
       organizations = (await sql.unsafe(
         `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at,
                 false as is_member, false as is_personal, o.visibility
          FROM "organization" o
-         WHERE o.visibility = 'public' AND ${organizationLiveSql('o')} ${searchClause}
+         WHERE o.visibility = 'public' AND ${listedPublicOrganizationSql('o', '$1')}
+           AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params
       )) as unknown as OrgInfo[];
     } else {
-      const params: string[] = [userId];
+      const params: (string | null)[] = [userId, listedPublicOrganizationsParam()];
       const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
       organizations = (await sql.unsafe(
@@ -861,7 +877,8 @@ export class MultiTenantProvider implements WorkspaceProvider {
                 o.visibility
          FROM "organization" o
          LEFT JOIN "member" m ON o.id = m."organizationId" AND m."userId" = $1
-         WHERE (m."userId" IS NOT NULL OR o.visibility = 'public')
+         WHERE (m."userId" IS NOT NULL
+                OR (o.visibility = 'public' AND ${listedPublicOrganizationSql('o', '$2')}))
            AND ${organizationLiveSql('o')} ${searchClause}
          ORDER BY o.name ASC`,
         params

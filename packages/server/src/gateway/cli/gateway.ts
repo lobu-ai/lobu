@@ -43,6 +43,7 @@ import { completeSlackPendingInstall } from "../connections/slack-connection-coo
 import { createAgentRoutes } from "../routes/public/agents.js";
 import {
   createInstallRoutes,
+  oauthInstallBrowserPaths,
 } from "../routes/public/app-install.js";
 import {
   type AppWebhookProvider,
@@ -755,7 +756,11 @@ export function createGatewayApp(
     });
   });
 
-  registerAutoOpenApiRoutes(app);
+  // The hosted-app install engine's browser redirects are not an API.
+  registerAutoOpenApiRoutes(
+    app,
+    oauthInstallBrowserPaths(bundledIntegrationConnectors ?? []),
+  );
 
   const openApiDocConfig = {
     openapi: "3.1.0",
