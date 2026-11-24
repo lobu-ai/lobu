@@ -155,9 +155,16 @@ const VARIANT_ATTRIBUTIONS: EventAttributionRule[] = [
     autoCreate: true,
     target: {
       entityType: 'product',
-      identities: [{ namespace: 'shopify_sku', eventPath: 'metadata.sku_key' }],
+      // The variant id names every variant, including the many stores' variants
+      // that have no SKU; the SKU also matches order line items. Neither is
+      // primary, so a product first keyed by SKU alone gains the variant id
+      // instead of being duplicated.
+      identities: [
+        { namespace: 'shopify_variant', eventPath: 'metadata.variant_key' },
+        { namespace: 'shopify_sku', eventPath: 'metadata.sku_key' },
+      ],
       titlePath: 'metadata.entity_name',
-      createWhen: { path: 'metadata.sku_key', exists: true },
+      createWhen: { path: 'metadata.variant_key', exists: true },
     },
     traits: {
       title: { eventPath: 'metadata.title', mergeStrategy: 'overwrite' },
@@ -393,9 +400,12 @@ export default class ShopifyConnector extends ConnectorRuntime {
       for (const v of data.productVariants.nodes) {
         const available = v.inventoryQuantity ?? 0;
         // Only changed variants emit: the checkpoint remembers a short hash of
-        // each variant's last price/stock/status/SKU fingerprint.
+        // each variant's last name/vendor/price/stock/status/SKU fingerprint,
+        // so every field the product record carries reaches it.
         const fingerprint = createHash('sha256')
-          .update(`${v.price}|${available}|${v.product.status}|${v.sku ?? ''}`)
+          .update(
+            JSON.stringify([v.displayName, v.product.vendor, v.price, available, v.product.status, v.sku ?? ''])
+          )
           .digest('hex')
           .slice(0, 12);
         const previous = walk[v.legacyResourceId] ?? seen[v.legacyResourceId];
@@ -412,6 +422,7 @@ export default class ShopifyConnector extends ConnectorRuntime {
           source_url: adminUrl,
           occurred_at: new Date(v.updatedAt),
           metadata: {
+            variant_key: v.id,
             ...(sku ? { sku, sku_key: sku } : {}),
             entity_name: name,
             title: name,

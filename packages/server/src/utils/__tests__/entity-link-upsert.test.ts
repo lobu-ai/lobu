@@ -1,5 +1,6 @@
 import type { EntityIdentitySpec, EntityLinkPredicate, EntityTraitSpec, EventAttributionRule } from '@lobu/connector-sdk';
 import GmailConnector from '@lobu/connectors/google_gmail';
+import ShopifyConnector from '@lobu/connectors/shopify';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../db/client';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
@@ -1690,5 +1691,100 @@ describe('gmail promote-on-interaction (real connector rule)', () => {
 
     const people = await personRows(sql, org.id);
     expect(people).toHaveLength(0);
+  });
+});
+
+describe('shopify product variants (real connector rule)', () => {
+  const SHOPIFY_KEY = 'shopify';
+  const SHOPIFY_FEED = 'products';
+
+  beforeEach(async () => {
+    await cleanupTestDatabase();
+    clearEntityLinkRulesCache();
+  });
+
+  const variant = (id: string, sku: string | null, title: string) => ({
+    id: `gid://shopify/ProductVariant/${id}`,
+    legacyResourceId: id,
+    sku,
+    displayName: `${title} - Default Title`,
+    price: '10.00',
+    inventoryQuantity: 5,
+    updatedAt: '2026-01-01T00:00:00Z',
+    product: { id: `gid://shopify/Product/${id}`, legacyResourceId: id, title, vendor: 'Synthetic', status: 'ACTIVE', handle: id },
+  });
+
+  /** Runs the connector's real catalog walk against a stubbed Admin API and returns the committed events. */
+  async function syncedVariantEvents(nodes: ReturnType<typeof variant>[]) {
+    const connector = new ShopifyConnector();
+    const committed: Array<{ origin_type: string; metadata: Record<string, unknown> }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({ data: { productVariants: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } })) as typeof fetch;
+    try {
+      await connector.definition.feeds[SHOPIFY_FEED].sync!({
+        feedKey: SHOPIFY_FEED,
+        config: { shop: 'demo-store.myshopify.com' },
+        credentials: { accessToken: 'synthetic-token' },
+        checkpoint: null,
+        commit: async (events: typeof committed) => {
+          committed.push(...events);
+        },
+      } as never);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    return committed;
+  }
+
+  async function setupShopifyOrg() {
+    const { org } = await setupOrg('shopify variants org');
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+      VALUES (${org.id}, 'product', 'Product', current_timestamp, current_timestamp)
+    `;
+    await createTestConnectorDefinition({
+      key: SHOPIFY_KEY,
+      name: 'Shopify',
+      organization_id: org.id,
+      feeds_schema: new ShopifyConnector().definition.feeds as Record<string, unknown>,
+    });
+    clearEntityLinkRulesCache();
+    return { org, sql };
+  }
+
+  async function productNames(sql: ReturnType<typeof getTestDb>, orgId: string) {
+    const rows = await sql<{ name: string }[]>`
+      SELECT e.name FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      WHERE e.organization_id = ${orgId} AND et.slug = 'product' AND e.deleted_at IS NULL
+      ORDER BY e.name
+    `;
+    return rows.map((row) => row.name);
+  }
+
+  it('makes every variant a product, with or without a SKU, and links each event to it', async () => {
+    const { org, sql } = await setupShopifyOrg();
+    const items = await syncedVariantEvents([variant('1', 'SKU-1', 'Board'), variant('2', null, 'Wax'), variant('3', '  ', 'Gift card')]);
+
+    const resolution = await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
+
+    expect(await productNames(sql, org.id)).toEqual(['Board', 'Gift card', 'Wax']);
+    expect(items.map((_, i) => resolution.entityIdsByItem.get(i)?.length ?? 0)).toEqual([1, 1, 1]);
+  });
+
+  it('keeps one product per variant across re-syncs, including one first keyed by SKU alone', async () => {
+    const { org, sql } = await setupShopifyOrg();
+    const [skuOnly] = await syncedVariantEvents([variant('1', 'SKU-1', 'Board')]);
+    // The product as an earlier connector version minted it: SKU identity only.
+    const legacy = { ...skuOnly, metadata: Object.fromEntries(Object.entries(skuOnly.metadata).filter(([key]) => key !== 'variant_key')) };
+    await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items: [legacy] });
+
+    const items = await syncedVariantEvents([variant('1', 'SKU-1', 'Board'), variant('2', null, 'Wax')]);
+    await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
+    await applyEventAttributions({ connectorKey: SHOPIFY_KEY, feedKey: SHOPIFY_FEED, orgId: org.id, items });
+
+    expect(await productNames(sql, org.id)).toEqual(['Board', 'Wax']);
   });
 });
