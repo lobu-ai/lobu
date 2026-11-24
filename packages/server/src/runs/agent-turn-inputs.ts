@@ -358,10 +358,17 @@ function executionPolicy(run: NativeTurnRun) {
   // whose context could not be delivered.
   const { message_id, message_text, message_images, message_files, session_jsonl, ephemeral_context, ...turn } = input.turn;
   const { message_id: replyMessageId, platform_metadata, ...reply } = input.reply;
-  // Trace context belongs to the individual delivery, not its execution policy.
-  // Preserve every routing/authority field and leave the persisted reply intact.
-  const { traceparent, ...routingMetadata } = platform_metadata ?? {};
-  return { scope, turn, reply: { ...reply, platform_metadata: routingMetadata } };
+  // The metadata bag is not compared: it mixes each message's own delivery data
+  // (trace, reply target, link, history, delivery id) with routing the signed
+  // `scope` already carries, so comparing it blocked steering for every chat
+  // message. Each input is still answered from its own stored reply. Only the
+  // two flags the claims lack are policy: an Automation turn and a direct-link
+  // turn share a conversation but must not merge, and nothing joins a `/new`.
+  return {
+    scope, turn, reply,
+    automationId: platform_metadata?.automationId ?? null,
+    sessionReset: platform_metadata?.sessionReset === true,
+  };
 }
 
 /** Repeatable offers: the pending rows are retired only by transcript completion. */
