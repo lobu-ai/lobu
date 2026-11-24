@@ -234,7 +234,13 @@ export default function Board() {
     TEST_ENV.VIEW_VALIDATOR_URL = `http://127.0.0.1:${(runner.address() as {port:number}).port}`;
     const map = { key: 'map', attach: [{ workspace: true }], actions: {}, resources: ['https://tiles.example.com'] };
     try {
-      const declared = await setView('export default function Map() { return <img alt="tile" src="https://tiles.example.com/0/0/0.png" />; }', map);
+      // Two saves validating at once share the single-flight runner: the
+      // second waits its turn instead of failing as "runner unavailable".
+      const [declared, concurrent] = await Promise.all([
+        setView('export default function Map() { return <img alt="tile" src="https://tiles.example.com/0/0/0.png" />; }', map),
+        setView(REACT_SOURCE, { key: 'concurrent', attach: [{ workspace: true }], actions: {} }),
+      ]);
+      expect(concurrent.view.key).toBe('concurrent');
       expect(declared.view.resources).toEqual(['https://tiles.example.com']);
       const before = await getView(orgId, 'map');
       await expect(setView('export default function Map() { return <img alt="tile" src="https://elsewhere.example.org/0/0/0.png" />; }', map))
@@ -246,7 +252,7 @@ export default function Board() {
       TEST_ENV.VIEW_VALIDATOR_URL = previous;
       await new Promise<void>((resolve, reject) => runner.close(error => error ? reject(error) : resolve()));
     }
-  }, 3 * VALIDATION_TIMEOUT_MS + 10_000);
+  }, 4 * VALIDATION_TIMEOUT_MS + 10_000);
 
 	it("replays the source migration in either direction without inventing legacy provenance", async () => {
 		const dir = resolve(import.meta.dirname, "../../../../../../db/migrations");
