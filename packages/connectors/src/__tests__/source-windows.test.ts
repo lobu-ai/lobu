@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
+import { classifyToolError, isRetryable } from '@lobu/core';
 import { connectorSdkMock } from './connector-sdk.mock';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
@@ -197,6 +198,28 @@ describe('live source windows', () => {
       await expect(new Shopify().read({
         feedKey: 'orders', config: { shop: 'demo-store.myshopify.com' }, credentials, window,
       })).rejects.toThrow(/cursor|exhaustion/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test.each([
+    ['ACCESS_DENIED', Response.json({ errors: [{
+      message: 'This app is not approved to access the Order object.',
+      extensions: { code: 'ACCESS_DENIED' },
+    }] }), 'AUTH_INVALID'],
+    ['THROTTLED', Response.json({ errors: [{ message: 'Throttled', extensions: { code: 'THROTTLED' } }] }), 'RATE_LIMITED'],
+    ['an HTTP 401', new Response('Invalid API key or access token', { status: 401 }), 'AUTH_INVALID'],
+  ] as const)('Shopify %s keeps a classifiable status instead of a retryable upstream 5xx', async (_case, response, expected) => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => response) as typeof fetch;
+    try {
+      const error = await new Shopify().read({
+        feedKey: 'orders', config: { shop: 'demo-store.myshopify.com' }, credentials, window,
+      }).then(() => undefined, (e: unknown) => e);
+      const code = classifyToolError({ httpStatus: (error as { status?: number } | undefined)?.status });
+      expect(code).toBe(expected);
+      if (expected === 'AUTH_INVALID') expect(isRetryable(code)).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
     }

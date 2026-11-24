@@ -26,6 +26,33 @@ import {
 } from '@lobu/connector-sdk';
 
 const API_VERSION = '2026-07';
+
+/**
+ * A Shopify failure carrying the HTTP status the runtime classifies it by
+ * (`status` crosses the isolate boundary as `httpStatus`).
+ */
+class ShopifyApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'ShopifyApiError';
+  }
+}
+
+/**
+ * GraphQL Admin API answers most failures with HTTP 200 and an `errors[]` entry
+ * whose `extensions.code` names the HTTP status it stands for. ACCESS_DENIED
+ * arrives with a working token whose app lacks a scope or protected customer
+ * data approval, so it is a 403: permanent, and no token refresh can fix it.
+ */
+const GRAPHQL_ERROR_STATUS = new Map<unknown, number>([
+  ['ACCESS_DENIED', 403],
+  ['THROTTLED', 429],
+  ['INTERNAL_SERVER_ERROR', 500],
+]);
+
 const PAGE_SIZE = 50;
 /** Shopify's connection page-size ceiling. */
 const MAX_READ_PAGE = 250;
@@ -252,15 +279,20 @@ export default class ShopifyConnector extends ConnectorRuntime {
       headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
       body: JSON.stringify({ query, variables }),
     });
-    if (!r.ok) throw new Error(`Shopify GraphQL ${r.status}: ${(await r.text()).slice(0, 300)}`);
-    const json = (await r.json()) as { data?: T; errors?: Array<{ message: string }> };
+    if (!r.ok) throw new ShopifyApiError(`Shopify GraphQL ${r.status}: ${(await r.text()).slice(0, 300)}`, r.status);
+    const json = (await r.json()) as {
+      data?: T;
+      errors?: Array<{ message: string; extensions?: { code?: unknown } }>;
+    };
     if (json.errors?.length) {
-      throw new Error(
-        `Shopify GraphQL: ${json.errors
-          .map((e) => e.message)
-          .join('; ')
-          .slice(0, 300)}`
-      );
+      const message = `Shopify GraphQL: ${json.errors
+        .map((e) => e.message)
+        .join('; ')
+        .slice(0, 300)}`;
+      const status = json.errors
+        .map((e) => GRAPHQL_ERROR_STATUS.get(e.extensions?.code))
+        .find((s) => s !== undefined);
+      throw status === undefined ? new Error(message) : new ShopifyApiError(message, status);
     }
     if (!json.data) throw new Error('Shopify GraphQL returned no data');
     return json.data;
