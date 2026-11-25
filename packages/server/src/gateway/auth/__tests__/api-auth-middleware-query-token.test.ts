@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { __resetEncryptionKeyCacheForTests, encrypt } from "@lobu/core";
 import { Hono } from "hono";
 import { createApiAuthMiddleware } from "../api-auth-middleware.js";
+import { createAgentApi } from "../../routes/public/agent.js";
 import { setAuthProvider } from "../../routes/public/settings-auth.js";
 
 const TEST_KEY =
@@ -86,4 +87,36 @@ describe("createApiAuthMiddleware allowSettingsQueryToken", () => {
     });
     expect(res.status).toBe(401);
   });
+});
+
+// The real Agent API router, served both at the origin (standalone gateway) and
+// under `/lobu` (embedded server). The session lookup finds nothing, so 404
+// proves the ticket got through auth and 401 proves it did not.
+describe("Agent API events stream ticket auth across gateway mounts", () => {
+  function agentApi(mount: string) {
+    const api = createAgentApi({
+      sessionManager: { getSession: async () => null },
+    } as unknown as Parameters<typeof createAgentApi>[0]);
+    const root = new Hono();
+    root.route(mount, api);
+    return root;
+  }
+
+  for (const mount of ["", "/lobu"]) {
+    test(`GET ${mount}/api/v1/agents/:id/events accepts a ?token= ticket`, async () => {
+      const res = await agentApi(mount).request(
+        `${mount}/api/v1/agents/session-1/events${qTicket("user-1")}`,
+        { method: "GET" },
+      );
+      expect(res.status).toBe(404);
+    });
+
+    test(`GET ${mount}/api/v1/agents/:id rejects the same ticket`, async () => {
+      const res = await agentApi(mount).request(
+        `${mount}/api/v1/agents/session-1${qTicket("user-1")}`,
+        { method: "GET" },
+      );
+      expect(res.status).toBe(401);
+    });
+  }
 });
