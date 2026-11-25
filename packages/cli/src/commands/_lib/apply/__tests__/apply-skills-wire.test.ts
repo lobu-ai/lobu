@@ -50,7 +50,8 @@ afterEach(() => {
   process.stdout.write = originalWrite;
 });
 
-function mkProject(body: string): string {
+/** `body: null` declares the agent without any skills. */
+function mkProject(body: string | null): string {
   const dir = mkdtempSync(join(import.meta.dir, "skills-wire-fixture-"));
   tempDirs.push(dir);
   writeFileSync(
@@ -58,9 +59,13 @@ function mkProject(body: string): string {
     `import { defineAgent, defineConfig, defineSkill } from "@lobu/cli/config";
 export default defineConfig({
   agents: [
-    defineAgent({ id: "triage", name: "Triage", dir: "./agents/triage", skills: [
+    defineAgent({ id: "triage", name: "Triage", dir: "./agents/triage"${
+      body === null
+        ? ""
+        : `, skills: [
       defineSkill({ name: "ops", description: "Run ops.", content: ${JSON.stringify(body)} }),
-    ] }),
+    ]`
+    } }),
   ],
 });
 `
@@ -254,6 +259,20 @@ describe("apply agent skills over the wire", () => {
       runApply(mkProject("v2"), makeFetch(store).fetchStub)
     ).rejects.toThrow(/Skill "ops" changed since this apply read it/);
     expect(store.skills).toMatchObject([{ content: "v1" }]);
+  });
+
+  test("an agents-only first apply records the skills it wrote, so dropping a declaration detaches it", async () => {
+    const store: Store = { skills: [] };
+    await runApply(mkProject("v1"), makeFetch(store).fetchStub, "agents");
+    expect(store.latestManifest).toMatchObject({ skills: [{ name: "ops" }] });
+    expect(store.latestManifest).not.toHaveProperty("attribution");
+
+    await runApply(mkProject(null), makeFetch(store).fetchStub, "agents");
+    expect(store.skills).toMatchObject([{ name: "ops" }]);
+    expect(store.skills[0]?.applies_to).not.toContainEqual({
+      principal_kind: "agent",
+      principal_id: "triage",
+    });
   });
 
   test("a memory-only apply never reads or writes the library", async () => {

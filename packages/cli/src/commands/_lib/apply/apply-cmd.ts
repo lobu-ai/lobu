@@ -27,12 +27,14 @@ import {
   computeManifestHash,
   type DeploymentSummary,
   loadBaselineFromManifest,
+  loadSkillsBaseline,
   mintApplyId,
   toBaseline,
 } from "./deployment.js";
 import {
   type DesiredAutomation,
   type DesiredConnectorDefinition,
+  type DesiredSkill,
   type DesiredState,
   loadDesiredStateFromConfig,
   normalizeConnectionConfigScope,
@@ -1757,6 +1759,21 @@ async function applyProject(
     latestDeployment?.manifest === undefined
       ? null
       : loadBaselineFromManifest(latestDeployment.manifest);
+  const skillsBaseline = loadSkillsBaseline(latestDeployment?.manifest);
+  /**
+   * The skills this run should RECORD. Skills follow the agents that declare
+   * them, independently of memory attribution: a run that manages them (full
+   * or `--only agents`) records the config's declarations, even on a first
+   * apply with no memory baseline; `--only memory` carries the last record.
+   */
+  const recordableSkills = (
+    snapshot: RemoteSnapshot
+  ): DesiredSkill[] | undefined => {
+    if (opts.only === "memory") return skillsBaseline;
+    if (snapshot.skills !== undefined && state.skills !== undefined)
+      return state.skills;
+    return opts.only === "agents" ? skillsBaseline : undefined;
+  };
   /**
    * The baseline this run should RECORD, from a given remote snapshot. A
    * `--only` run executes one family, so the families it never touched must be
@@ -1764,24 +1781,11 @@ async function applyProject(
    *   - `--only agents` touches neither memory nor connectors → carry the prior
    *     baseline verbatim, leaving it absent when none was recorded;
    *   - `--only memory` rebuilds memory but carries prior connector ownership.
-   * Skills follow the agents that declare them: `--only agents` records them
-   * over the carried baseline, `--only memory` carries the last record.
    */
   const recordableBaseline = (
     snapshot: RemoteSnapshot
   ): BaselineRecord | undefined => {
-    if (opts.only === "agents") {
-      if (!baselineRecord) return undefined;
-      return snapshot.skills !== undefined && state.skills !== undefined
-        ? {
-            ...baselineRecord,
-            attribution: {
-              ...baselineRecord.attribution,
-              skills: state.skills,
-            },
-          }
-        : baselineRecord;
-    }
+    if (opts.only === "agents") return baselineRecord ?? undefined;
     const built = buildAttributionAndOwned(
       state,
       snapshot,
@@ -1791,9 +1795,6 @@ async function applyProject(
     // Navigation is full-apply only: a partial run keeps the last record.
     if (opts.only !== undefined && baselineRecord?.attribution.navigation) {
       built.attribution.navigation = baselineRecord.attribution.navigation;
-    }
-    if (opts.only === "memory" && baselineRecord?.attribution.skills) {
-      built.attribution.skills = baselineRecord.attribution.skills;
     }
     if (opts.only === "memory" && baselineRecord) {
       built.owned = [
@@ -1810,7 +1811,8 @@ async function applyProject(
   // newly allocated incarnation ids enter `owned` (otherwise the next prune
   // cannot config-expressed-delete them).
   let baselineRecordForRecording = recordableBaseline(remote);
-  const baseline = toBaseline(baselineRecord);
+  let skillsForRecording = recordableSkills(remote);
+  const baseline = toBaseline(baselineRecord, skillsBaseline);
 
   const plan = computeDiff(state, remote, {
     only: opts.only,
@@ -1936,7 +1938,8 @@ async function applyProject(
         opts.only
           ? (baselineRecord?.connectorVersions ?? {})
           : connectorVersionPins(state, remote.connectorDefinitions),
-        baselineRecordForRecording
+        baselineRecordForRecording,
+        skillsForRecording
       ),
     });
     printText(chalk.green("\nNothing to apply."));
@@ -2028,6 +2031,7 @@ async function applyProject(
           prune
         );
         baselineRecordForRecording = recordableBaseline(postRemote);
+        skillsForRecording = recordableSkills(postRemote);
         if (!opts.only) {
           pins = {
             ...connectorVersionPins(state, postRemote.connectorDefinitions),
@@ -2051,7 +2055,8 @@ async function applyProject(
       manifest: buildDeploymentManifest(
         state,
         pins,
-        applyErr ? undefined : baselineRecordForRecording
+        applyErr ? undefined : baselineRecordForRecording,
+        applyErr ? undefined : skillsForRecording
       ),
       ...(applyErr
         ? {

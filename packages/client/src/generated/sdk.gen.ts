@@ -691,9 +691,9 @@ export const manageClassifiers = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Workspace skill library (read)
+ * Workspace skill library: list, get, put, archive and install from the catalog
  *
- * Workspace skill library (read). SDK alternative: client.skills.
+ * Workspace skill library: list, get, put, archive and install from the catalog. SDK alternative: client.skills.
  */
 export const manageSkills = <ThrowOnError extends boolean = false>(
   options: Options<ManageSkillsData, ThrowOnError>,

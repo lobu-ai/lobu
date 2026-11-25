@@ -2354,13 +2354,9 @@ describe("apply diff — workspace skills", () => {
   });
   const recorded = (skills: DesiredState["skills"]): Baseline => ({
     recorded: true,
-    attribution: {
-      entityTypes: [],
-      relationshipTypes: [],
-      automations: [],
-      ...(skills ? { skills } : {}),
-    },
+    attribution: { entityTypes: [], relationshipTypes: [], automations: [] },
     owned: new Set(),
+    ...(skills ? { skills } : {}),
   });
   const skillRows = (plan: DiffPlan) =>
     plan.rows.filter((row) => row.kind === "skill");

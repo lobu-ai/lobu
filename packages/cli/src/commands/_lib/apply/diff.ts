@@ -254,11 +254,6 @@ export interface AttributionSnapshot {
   automations: RemoteAutomation[];
   /** The navigation document after this config's last apply. */
   navigation?: { config: NavigationConfig | null };
-  /**
-   * The library skills as this config left them (its agents only). Absent in
-   * a manifest written before apply managed skills: two-way convergence.
-   */
-  skills?: DesiredSkill[];
 }
 
 export interface Baseline {
@@ -277,6 +272,12 @@ export interface Baseline {
    * connector deletes when the remote incarnation was edited post-baseline.
    */
   connectorVersions?: Record<string, string>;
+  /**
+   * The library skills as this config left them (its agents only), recorded
+   * independently of `recorded`. Absent before apply managed skills: two-way
+   * convergence.
+   */
+  skills?: DesiredSkill[];
 }
 
 export const ownedKey = (kind: string, id: number | string | undefined) =>
@@ -2940,9 +2941,7 @@ export function computeDiff(
   // re-saves in the same run (its frozen copy would be outdated otherwise).
   if (only !== "memory" && desired.skills !== undefined) {
     const configAgents = new Set(desired.agents.map((a) => a.metadata.agentId));
-    const applied = baseline?.recorded
-      ? baseline.attribution.skills
-      : undefined;
+    const applied = baseline?.skills;
     const declaredNames = new Set(desired.skills.map((skill) => skill.name));
     const remoteSkills = remote.skills ?? [];
     const remoteSkillByName = new Map(remoteSkills.map((s) => [s.name, s]));

@@ -876,6 +876,18 @@ describe('pinned access matrix', () => {
     expect(lines.join('\n')).toBe(ACCESS_SURFACE);
   });
 
+  it('never classifies a tool with a write or admin action as read-only', () => {
+    const misclassified = getAllTools({ publicOnly: false, maxAccessLevel: 'admin' })
+      .filter((tool) => isAuthorizationReadOnly(getTool(tool.name)))
+      .filter((tool) =>
+        (actionsOf(tool.inputSchema) ?? []).some(
+          (action) => getRequiredAccessLevel(tool.name, { action }, false) !== 'read'
+        )
+      )
+      .map((tool) => tool.name);
+    expect(misclassified).toEqual([]);
+  });
+
   it('resolveMaxAccessLevel is the min of role and scope tiers', () => {
     expect(resolveMaxAccessLevel('owner', ['mcp:admin'])).toBe('admin');
     expect(resolveMaxAccessLevel('owner', ['mcp:write'])).toBe('write');

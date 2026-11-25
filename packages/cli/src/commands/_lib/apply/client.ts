@@ -91,6 +91,8 @@ export interface RemoteDeployment {
     };
     /** Kind-qualified incarnation identities this config applied. */
     owned?: string[];
+    /** Library skills as this config left them; absent before apply managed skills. */
+    skills?: unknown[];
   } | null;
   /** Blocking-drift candidates + confirm token, present on `blocked` runs. */
   candidates?: {

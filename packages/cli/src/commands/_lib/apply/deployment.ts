@@ -127,9 +127,13 @@ export interface DeploymentManifest {
     automations: unknown[];
     /** The navigation document this config last applied (or found equal). */
     navigation?: NavigationBaseline;
-    /** The library skills as this config left them (its agents only). */
-    skills?: DesiredSkill[];
   };
+  /**
+   * The library skills as this config left them (its agents only). Recorded
+   * apart from `attribution`: skills follow the agents that declare them, so
+   * an `--only agents` run records them even when no memory attribution exists.
+   */
+  skills?: DesiredSkill[];
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
    * `automation:b7-…`) this config actually applied — the delete-eligible set.
@@ -148,7 +152,6 @@ export interface BaselineRecord {
     relationshipTypes: unknown[];
     automations: unknown[];
     navigation?: NavigationBaseline;
-    skills?: DesiredSkill[];
   };
   owned: string[];
   /** Connector key → version from the deployment's post-apply pins. */
@@ -187,9 +190,6 @@ export function loadBaselineFromManifest(
       ...(navigation && typeof navigation === "object" && "config" in navigation
         ? { navigation: { config: navigation.config } }
         : {}),
-      ...(Array.isArray(attribution.skills)
-        ? { skills: attribution.skills }
-        : {}),
     },
     owned: manifest.owned,
     ...(manifest.connector_versions
@@ -198,19 +198,34 @@ export function loadBaselineFromManifest(
   };
 }
 
+/** The recorded library skills; undefined before apply managed skills. */
+export function loadSkillsBaseline(
+  manifest: { skills?: unknown[] } | null | undefined
+): DesiredSkill[] | undefined {
+  return Array.isArray(manifest?.skills)
+    ? (manifest.skills as DesiredSkill[])
+    : undefined;
+}
+
 /**
  * Preserve whether attribution was absent or recorded as empty. The former
  * cannot prove ownership and must not enable three-way comparisons.
  */
-export function toBaseline(record: BaselineRecord | null): Baseline {
+export function toBaseline(
+  record: BaselineRecord | null,
+  skills?: DesiredSkill[]
+): Baseline {
+  const recordedSkills = skills ? { skills } : {};
   if (!record) {
     return {
       recorded: false,
       attribution: { entityTypes: [], relationshipTypes: [], automations: [] },
       owned: new Set<string>(),
+      ...recordedSkills,
     };
   }
   return {
+    ...recordedSkills,
     recorded: true,
     attribution: record.attribution as unknown as Baseline["attribution"],
     owned: new Set(record.owned),
@@ -358,10 +373,6 @@ export function buildAttributionAndOwned(
       ...(remote.navigation !== undefined && state.navigation !== undefined
         ? { navigation: { config: state.navigation } }
         : {}),
-      // Likewise the library skills this config declares, as it declares them.
-      ...(remote.skills !== undefined && state.skills !== undefined
-        ? { skills: state.skills }
-        : {}),
     },
     owned,
   };
@@ -376,7 +387,8 @@ export function buildAttributionAndOwned(
 export function buildDeploymentManifest(
   state: DesiredState,
   connectorVersions: Record<string, string>,
-  baseline?: BaselineRecord
+  baseline?: BaselineRecord,
+  skills?: DesiredSkill[]
 ): DeploymentManifest {
   const redacted = redactDesiredState(state);
   const connectors = (redacted.connectors ?? {}) as Record<string, unknown>;
@@ -404,6 +416,7 @@ export function buildDeploymentManifest(
     ...(baseline
       ? { attribution: baseline.attribution, owned: baseline.owned }
       : {}),
+    ...(skills ? { skills } : {}),
   };
 }
 

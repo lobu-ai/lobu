@@ -288,11 +288,11 @@ const ENTRIES: AdminToolEntry[] = [
 	{
 		name: "manage_skills",
 		description:
-			"Workspace skill library (read). SDK alternative: client.skills.",
+			"Workspace skill library: list, get, put, archive and install from the catalog. SDK alternative: client.skills.",
 		schema: ManageSkillsSchema,
 		resultSchema: ManageSkillsResultSchema,
 		handler: manageSkills,
-		annotations: READ_ONLY_WITH_TITLE("Read skills"),
+		annotations: DESTRUCTIVE_WITH_TITLE("Manage skills"),
 	},
 	{
 		name: "manage_views",
