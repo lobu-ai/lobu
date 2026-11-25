@@ -1,9 +1,10 @@
 /**
- * Guardrails reader cutover (`20261125140000_workspace_guardrails_reader_cutover.sql`).
+ * Guardrails reader cutover (`20261125140000_workspace_guardrails_reader_cutover.sql`)
+ * and its custom config normalization (`20261125160000_workspace_guardrails_custom_config_keys.sql`).
  *
  * The backfill moves every agent's built-in toggles (`agents.guardrails`) and
  * custom checks (`agents.guardrails_inline`) into the workspace guardrail
- * library deterministically. Each case replays the migration's up section
+ * library deterministically. Each case replays the migrations' up sections
  * inside a transaction that is ROLLED BACK, so the shared integration DB is
  * not mutated.
  */
@@ -12,11 +13,15 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { getDb } from '../../../db/client';
+import { isBuiltinGuardrailConfig } from '@lobu/core/contracts/workspace-guardrails';
+import { type DbClient, getDb } from '../../../db/client';
 import { loadMigrationUpSection } from '../../../db/migration-loader';
+import { egressJudgeRules } from '../../../gateway/permissions/policy-store';
+import { agentGuardrailPrincipal, resolveGuardrails } from '../../../guardrails/workspace-guardrails';
 import { createTestOrganization } from '../../setup/test-fixtures';
 
 const MIGRATION = '20261125140000_workspace_guardrails_reader_cutover.sql';
+const NORMALIZATION = '20261125160000_workspace_guardrails_custom_config_keys.sql';
 
 function resolveMigrationsDir(): string {
   let dir = __dirname;
@@ -65,6 +70,7 @@ async function insertAgent(
 }
 
 const up = () => loadMigrationUpSection(resolveMigrationsDir(), MIGRATION);
+const normalize = () => loadMigrationUpSection(resolveMigrationsDir(), NORMALIZATION);
 
 const judge = (name: string, policy: string, extra: Record<string, unknown> = {}) => ({
   name,
@@ -201,5 +207,68 @@ describe('workspace guardrails reader cutover migration', () => {
     });
 
     expect(names.map((row) => row.name)).toEqual(['existing']);
+  });
+
+  it('normalizes custom checks the backfill gave stray keys, leaving built-ins as they are', async () => {
+    const orgId = (await createTestOrganization()).id;
+    const agent = synth('agent');
+
+    // Each custom check carries a key outside the custom config contract,
+    // which the retired inline validator accepted and the backfill copied.
+    const cases = [
+      { name: 'leaky', inline: judge('leaky', 'Never paste keys.', { builtin: 'secret-scan' }),
+        config: { kind: 'judge', stage: 'output', policy: 'Never paste keys.' } },
+      { name: 'ghost', inline: judge('ghost', 'Stay polite.', { builtin: 'synthetic-unregistered' }),
+        config: { kind: 'judge', stage: 'output', policy: 'Stay polite.' } },
+      { name: 'odd', inline: judge('odd', 'Be brief.', { builtin: 42, note: 'copied' }),
+        config: { kind: 'judge', stage: 'output', policy: 'Be brief.' } },
+      { name: 'egress-gate',
+        inline: judge('egress-gate', 'Only GET.', { stage: 'egress', domains: ['.example.com'], builtin: 'pii-scan' }),
+        config: { kind: 'judge', stage: 'egress', policy: 'Only GET.', domains: ['.example.com'] } },
+      { name: 'must-reply',
+        inline: { name: 'must-reply', enabled: true, stage: 'output', kind: 'require-tool', tools: ['send_message'], builtin: 'forbidden-tools' },
+        config: { kind: 'require-tool', stage: 'output', tools: ['send_message'] } },
+    ];
+
+    const result = await inRollback(async (tx) => {
+      await insertAgent(tx, orgId, agent, ['secret-scan'], [
+        ...cases.map((c) => c.inline),
+        judge('plain', 'Plain policy.'),
+      ]);
+      const read = async () => {
+        const rows = await resolveGuardrails(tx as unknown as DbClient, orgId, agentGuardrailPrincipal(agent));
+        return {
+          rows: Object.fromEntries(rows.map((row) => [row.name, row])),
+          egress: egressJudgeRules(rows).map((rule) => rule.judgeName),
+        };
+      };
+      await tx.unsafe(up());
+      const backfilled = await read();
+      await tx.unsafe(normalize());
+      const normalized = await read();
+      await tx.unsafe(normalize());
+      const rerun = await read();
+      return { backfilled, normalized, rerun };
+    });
+
+    // The backfill's output reads every stray-keyed check as a built-in, so
+    // the egress judge governs nothing.
+    for (const c of cases) {
+      expect(isBuiltinGuardrailConfig(result.backfilled.rows[c.name]!.config)).toBe(true);
+    }
+    expect(result.backfilled.egress).toEqual([]);
+
+    for (const c of cases) {
+      expect(result.normalized.rows[c.name]?.config).toEqual(c.config);
+      expect(result.normalized.rows[c.name]).toMatchObject({ enabled: true, revision: 2 });
+    }
+    expect(result.normalized.egress).toEqual(['egress-gate']);
+    // A genuine built-in and a check without stray keys stay untouched.
+    expect(result.normalized.rows['secret-scan']?.config).toEqual({ builtin: 'secret-scan' });
+    expect(result.normalized.rows['secret-scan']?.revision).toBe(1);
+    expect(result.normalized.rows.plain?.config).toEqual({ kind: 'judge', stage: 'output', policy: 'Plain policy.' });
+    expect(result.normalized.rows.plain?.revision).toBe(1);
+    // Idempotent: a second run finds nothing to normalize.
+    expect(result.rerun).toEqual(result.normalized);
   });
 });
