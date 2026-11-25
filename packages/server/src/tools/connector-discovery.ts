@@ -26,6 +26,7 @@ import type { ConnectionSetupOptions } from '@lobu/core/contracts/tools/manage-c
 import type { Env } from '../index';
 import type { AccountToolContext } from './registry';
 import { requireWorkspaceContext } from './access-control';
+import { enforceInboundPreToolGuardrails } from './inbound-guardrails';
 import { getWorkspaceProvider } from '../workspace';
 import type { OrgInfo } from '../workspace/types';
 import { METHOD_METADATA } from '../sandbox/method-metadata';
@@ -141,11 +142,17 @@ export async function searchLiveConnectors(
   if (!ctx.userId) return [];
   if (!ctx.organizationId) {
     if (!ctx.allowCrossOrg || !Array.isArray(ctx.grantedOrganizationIds)) return [];
-    const workspaces = await deps.listLiveGrantedOrganizations(ctx.userId, ctx.grantedOrganizationIds);
-    const matches = await Promise.all(workspaces.map(async (workspace) => {
-      const hits = await searchLiveConnectors(query, env, {
-        ...ctx, organizationId: workspace.id, memberRole: workspace.role,
-      }, deps);
+    const workspaces = (await deps.listLiveGrantedOrganizations(ctx.userId, ctx.grantedOrganizationIds))
+      .map((workspace) => ({
+        workspace,
+        workspaceCtx: { ...ctx, organizationId: workspace.id, memberRole: workspace.role },
+      }));
+    // Each workspace's inbound guardrails run before its inventory is read, and
+    // a block in any of them refuses the whole call (the same rule federated
+    // search_memory follows), outside the per-workspace catch below.
+    await Promise.all(workspaces.map(({ workspaceCtx }) => enforceInboundPreToolGuardrails(workspaceCtx)));
+    const matches = await Promise.all(workspaces.map(async ({ workspace, workspaceCtx }) => {
+      const hits = await searchLiveConnectors(query, env, workspaceCtx, deps);
       return hits.map((hit) => `Workspace ${workspace.slug}: use await client.org(${JSON.stringify(workspace.slug)}); the lifecycle below assumes that selected client. ${hit}`);
     }));
     return matches.flat();

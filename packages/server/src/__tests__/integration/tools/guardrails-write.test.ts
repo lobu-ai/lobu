@@ -171,6 +171,33 @@ describe("guardrail library writes", () => {
 		expect((await archive(made.id, "nope")).status).toBe(422);
 	});
 
+	it("accepts app subjects only on a guardrail that runs at pre-tool alone", async () => {
+		const preToolJudge = { kind: "judge", stage: "pre-tool", policy: "Never delete records.", model: RUNNABLE_MODEL };
+		const apps = [{ principal_kind: "app", principal_id: null }, { principal_kind: "app", principal_id: "web:example.com" }];
+		const judged = await created({ name: "app-judge", config: preToolJudge, applies_to: [...apps, { principal_kind: "agent", principal_id: null }] });
+		expect(judged.applies_to).toEqual(expect.arrayContaining([...apps, { principal_kind: "agent", principal_id: null }]));
+		const forbidden = await created({ name: "forbidden-tools", config: { builtin: "forbidden-tools" }, applies_to: [apps[1]] });
+		expect(forbidden.applies_to).toEqual([apps[1]]);
+
+		for (const config of [
+			{ ...preToolJudge, stage: "input" },
+			{ ...preToolJudge, stage: "output" },
+			{ ...preToolJudge, stage: "egress", domains: ["example.com"] },
+			{ kind: "require-tool", stage: "output", tools: ["t"] },
+			{ builtin: "secret-scan" },
+			// pii-scan also runs at input and output.
+			{ builtin: "pii-scan" },
+		]) {
+			const response = await create({ name: "app-elsewhere", config, applies_to: [apps[0]] });
+			expect(response.status, JSON.stringify(config)).toBe(422);
+			expect((await response.json()).error).toMatch(/App subjects apply only to pre-tool guardrails/);
+		}
+		// An app key must be one the server derives; a guardrail cannot move an
+		// app subject off pre-tool.
+		expect((await create({ name: "bad-app-key", config: preToolJudge, applies_to: [{ principal_kind: "app", principal_id: "not an app key" }] })).status).toBe(422);
+		expect((await replace(judged.id, { name: "app-judge", config: { ...preToolJudge, stage: "output" }, applies_to: apps }, 1)).status).toBe(422);
+	});
+
 	it("answers 404 for a missing guardrail and another workspace's", async () => {
 		const other = await createTestOrganization();
 		const foreign = await createTestWorkspaceGuardrail({ organizationId: other.id, name: "pii", config: { builtin: "pii-scan" } });

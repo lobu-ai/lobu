@@ -2,7 +2,8 @@
  * End-to-end guardrails-runtime test against the actual wired call sites.
  *
  * Each block constructs the real service (ChatResponseBridge / MessageConsumer
- * / McpProxy), wires the same registry the production gateway uses, seeds
+ * / McpProxy), or drives Lobu's own `/mcp` endpoint for the inbound pre-tool
+ * stage, wires the same registry the production gateway uses, seeds
  * the workspace guardrail library (`resolveGuardrails` decides what runs for
  * the agent), and drives the public method that handles the corresponding
  * stage. Assertions cover:
@@ -16,8 +17,9 @@
  * a sleep — fire-and-forget audit writes are explicitly awaitable.
  */
 
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateWorkerToken, GuardrailRegistry } from '@lobu/core';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { generateWorkerToken, GuardrailRegistry, MCP_PROTOCOL_VERSION, mintGatewayMcpToken } from '@lobu/core';
+import { deriveAppPrincipalId } from '../auth/app-principal';
 import { AgentSettingsStore } from '../gateway/auth/settings/agent-settings-store';
 import { McpProxy } from '../gateway/auth/mcp/proxy';
 import { ApiResponseRenderer } from '../gateway/api/response-renderer';
@@ -32,14 +34,25 @@ import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
 } from '../gateway/orchestration/deployment-manager';
+import * as gateway from '../lobu/gateway';
 import { orgContext } from '../lobu/stores/org-context';
 import { createPostgresAgentConfigStore } from '../lobu/stores/postgres-stores';
+import { initWorkspaceProvider } from '../workspace';
 import { cleanupTestDatabase, getTestDb } from './setup/test-db';
 import {
+  addUserToOrganization,
+  createTestAccessToken,
   createTestAgent,
+  createTestConnectorDefinition,
+  createTestOAuthClient,
   createTestOrganization,
+  createTestUser,
   createTestWorkspaceGuardrail,
+  seedSystemEntityTypes,
 } from './setup/test-fixtures';
+import { post } from './setup/test-helpers';
+import { createAuthProfile } from '../utils/auth-profiles';
+import { ensureMemberEntityType } from '../utils/member-entity-type';
 
 // Stub the judge transport so custom judge guardrails resolve to a
 // deterministic verdict instead of reaching a provider. The shared TextJudge
@@ -1203,4 +1216,394 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
 afterEach(async () => {
   // Drain anything still in flight so it doesn't leak into the next test.
   await flushPendingGuardrailAudits();
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Inbound: a connected app calling Lobu's own MCP server
+// ─────────────────────────────────────────────────────────────────────────
+
+/** A pre-tool library judge; the stubbed judge client denies every call it sees. */
+const PRE_TOOL_JUDGE = {
+  kind: 'judge',
+  stage: 'pre-tool',
+  policy: 'Deny inbound probe calls (inbound-policy-body).',
+  model: 'test-judge-model',
+} as const;
+
+/** A hosted web app's OAuth client, and the app key its tokens act as. */
+async function hostedApp(host: string) {
+  const redirectUri = `https://${host}/oauth/callback`;
+  const clientName = `${host} app`;
+  const client = await createTestOAuthClient({ redirect_uris: [redirectUri], client_name: clientName });
+  const appKey = deriveAppPrincipalId({
+    kind: 'oauth',
+    clientId: client.client_id,
+    clientName,
+    authorizationGrantType: 'authorization_code',
+    redirectUris: [redirectUri],
+  });
+  return { clientId: client.client_id, appKey };
+}
+
+interface ToolCallResult {
+  isError?: boolean;
+  content: Array<{ text: string }>;
+  structuredContent?: { rows?: unknown[] };
+}
+
+/**
+ * Open a session on the real `/mcp` transport, announcing `clientName` in
+ * `initialize`, and return a `tools/call` function bound to it.
+ */
+async function openMcpSession(
+  path: string,
+  token: string,
+  options: { clientName?: string; headers?: Record<string, string> } = {}
+) {
+  const headers = options.headers ?? {};
+  const init = await post(path, {
+    body: {
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: options.clientName ?? 'lobu-test', version: '1.0' },
+      },
+    },
+    token,
+    headers,
+  });
+  const initBody = await init.json();
+  const sessionId = init.headers.get('mcp-session-id');
+  if (!sessionId) throw new Error(`initialize returned no session: ${JSON.stringify(initBody)}`);
+  const sessionHeaders = { ...headers, 'mcp-session-id': sessionId, 'mcp-protocol-version': MCP_PROTOCOL_VERSION };
+  await post(path, { body: { jsonrpc: '2.0', method: 'notifications/initialized' }, token, headers: sessionHeaders });
+  return async (name: string, args: Record<string, unknown>): Promise<ToolCallResult> => {
+    const response = await post(path, {
+      body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+      token,
+      headers: { ...sessionHeaders, 'X-MCP-Format': 'json' },
+    });
+    const json = await response.json();
+    expect(json.error, JSON.stringify(json.error)).toBeUndefined();
+    return json.result as ToolCallResult;
+  };
+}
+
+const PROBE = { title: 'Inbound probe', sql: 'SELECT 7 AS value' };
+
+function expectRan(result: ToolCallResult) {
+  expect(result.isError, result.content?.[0]?.text).toBeFalsy();
+  expect(result.structuredContent?.rows).toEqual([{ value: 7 }]);
+}
+
+function expectBlocked(result: ToolCallResult) {
+  expect(result.isError).toBe(true);
+  expect(result.content[0]!.text).toContain('Tool call blocked by policy.');
+  // The judge's reason and the guardrail's policy are never echoed.
+  expect(result.content[0]!.text).not.toMatch(/stub judge denied|inbound-policy-body/);
+}
+
+describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools", () => {
+  const registry = new GuardrailRegistry();
+  registerBuiltinGuardrails(registry);
+  let services: ReturnType<typeof vi.spyOn>;
+  let userId: string;
+  let orgA: { id: string; slug: string };
+  let orgB: { id: string; slug: string };
+  let agentId: string;
+  let blocked: Awaited<ReturnType<typeof hostedApp>>;
+  let other: Awaited<ReturnType<typeof hostedApp>>;
+  let nested: Awaited<ReturnType<typeof hostedApp>>;
+
+  /** A token scoped to one workspace (`/mcp/{slug}`), or a bare `/mcp` grant. */
+  const appToken = async (
+    clientId: string,
+    org: { id: string; slug: string } | null,
+    granted: string[],
+    grantType: 'authorization_code' | 'device_code' = 'authorization_code',
+    scope = 'mcp:read'
+  ) =>
+    (
+      await createTestAccessToken(userId, (org?.id ?? null) as string, clientId, {
+        authorizationGrantType: grantType,
+        scope,
+        grantedOrganizationIds: granted,
+        ...(org ? { resource: `http://localhost/mcp/${org.slug}` } : {}),
+      })
+    ).token;
+
+  const scopedSession = async (clientId: string, clientName?: string) =>
+    openMcpSession(`/mcp/${orgA.slug}`, await appToken(clientId, orgA, [orgA.id]), { clientName });
+
+  beforeAll(async () => {
+    await initWorkspaceProvider();
+    await cleanupTestDatabase();
+    await seedSystemEntityTypes();
+    services = vi
+      .spyOn(gateway, 'getLobuCoreServices')
+      .mockReturnValue({ getGuardrailRegistry: () => registry } as never);
+    orgA = await createTestOrganization({ slug: 'inbound-guardrails-a' });
+    orgB = await createTestOrganization({ slug: 'inbound-guardrails-b' });
+    const user = await createTestUser({ email: 'inbound-guardrails@example.test' });
+    userId = user.id;
+    await addUserToOrganization(userId, orgA.id, 'owner');
+    await addUserToOrganization(userId, orgB.id, 'owner');
+    agentId = (await createTestAgent({ organizationId: orgA.id, ownerUserId: userId })).agentId;
+    blocked = await hostedApp('chat.inbound-blocked.test');
+    other = await hostedApp('chat.inbound-other.test');
+    nested = await hostedApp('chat.inbound-nested.test');
+
+    await createTestWorkspaceGuardrail({
+      organizationId: orgA.id,
+      name: 'a-judge',
+      config: PRE_TOOL_JUDGE,
+      appliesTo: [{ kind: 'app', id: blocked.appKey }],
+    });
+    // Applies to `other` but passes any Lobu tool: only a lookup failure can
+    // make it block.
+    await createTestWorkspaceGuardrail({
+      organizationId: orgA.id,
+      name: 'a-forbidden-tools',
+      config: { builtin: 'forbidden-tools' },
+      appliesTo: [{ kind: 'app', id: other.appKey }],
+    });
+    await createTestWorkspaceGuardrail({
+      organizationId: orgB.id,
+      name: 'b-judge',
+      config: PRE_TOOL_JUDGE,
+      appliesTo: [{ kind: 'app', id: nested.appKey }],
+    });
+  });
+
+  afterAll(async () => {
+    services.mockRestore();
+    await getTestDb()`TRUNCATE agents CASCADE`;
+  });
+
+  it('blocks the targeted app, not another app, and audits the trip without the config body', async () => {
+    expectBlocked(await (await scopedSession(blocked.clientId))('query_sql', PROBE));
+    expectRan(await (await scopedSession(other.clientId))('query_sql', PROBE));
+    expectRan(await (await scopedSession(nested.clientId))('query_sql', PROBE));
+
+    await flushPendingGuardrailAudits();
+    const rows = await fetchGuardrailEvents(orgA.id, 'pre-tool');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.metadata).toMatchObject({
+      guardrail: 'a-judge',
+      stage: 'pre-tool',
+      agent_id: null,
+      app_id: blocked.appKey,
+      user_id: userId,
+    });
+    expect(JSON.stringify(rows[0])).not.toMatch(/inbound-policy-body|SELECT 7/);
+  });
+
+  it('keys on the verified app, never a self-asserted client name', async () => {
+    // The MCP clientInfo name is ignored, in both directions.
+    expectBlocked(await (await scopedSession(blocked.clientId, other.appKey))('query_sql', PROBE));
+    expectRan(await (await scopedSession(other.clientId, blocked.appKey))('query_sql', PROBE));
+    // A device client registered under the blocked app's key derives
+    // `local:<name>`, a different principal.
+    const spoof = await createTestOAuthClient({
+      client_name: blocked.appKey,
+      grant_types: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+    });
+    const spoofToken = await appToken(spoof.client_id, orgA, [orgA.id], 'device_code');
+    expectRan(await (await openMcpSession(`/mcp/${orgA.slug}`, spoofToken))('query_sql', PROBE));
+  });
+
+  it("does not apply app subjects to an agent's gateway MCP calls", async () => {
+    const everyApp = await createTestWorkspaceGuardrail({
+      organizationId: orgA.id,
+      name: 'a-every-app',
+      config: PRE_TOOL_JUDGE,
+      appliesTo: [{ kind: 'app', id: null }],
+    });
+    try {
+      const workerToken = mintGatewayMcpToken(
+        generateWorkerToken(userId, 'conv-inbound-agent', 'test-deployment', {
+          channelId: 'api-conv-inbound-agent',
+          agentId,
+          organizationId: orgA.id,
+          platform: 'api',
+          source: 'internal',
+        })
+      );
+      if (!workerToken) throw new Error('failed to narrow the worker token');
+      const agentCall = await openMcpSession(`/mcp/${orgA.slug}`, workerToken, {
+        headers: { 'X-Lobu-Memory-Direct-Auth': '1' },
+      });
+      expectRan(await agentCall('query_sql', PROBE));
+      expectBlocked(await (await scopedSession(other.clientId))('query_sql', PROBE));
+    } finally {
+      await getTestDb()`DELETE FROM workspace_guardrails WHERE id = ${everyApp.id}`;
+    }
+  });
+
+  it('fails closed when the guardrails cannot be checked', async () => {
+    await flushPendingGuardrailAudits();
+    const tripsBefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
+    const call = await scopedSession(other.clientId);
+    services.mockReturnValueOnce({ getGuardrailRegistry: () => undefined } as never);
+    const result = await call('query_sql', PROBE);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('guardrails could not be checked');
+    expect(result.structuredContent?.rows).toBeUndefined();
+    // The lookup failure is not a trip, and the same call passes once the
+    // guardrails can be read.
+    await flushPendingGuardrailAudits();
+    expect(await fetchGuardrailEvents(orgA.id, 'pre-tool')).toHaveLength(tripsBefore);
+    expectRan(await call('query_sql', PROBE));
+  });
+
+  it('enforces in the workspace a bare /mcp call switches into, including client.org()', async () => {
+    await flushPendingGuardrailAudits();
+    const tripsInABefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
+    const call = await openMcpSession('/mcp', await appToken(nested.clientId, null, [orgA.id, orgB.id]));
+    const script = (slug: string) =>
+      `export default async (ctx, client) => (await client.org('${slug}')).query('SELECT 7 AS value');`;
+
+    const inA = await call('query_sdk', { title: 'Nested A', script: script(orgA.slug) });
+    expect(inA.isError, inA.content[0]?.text).toBeFalsy();
+    expect(JSON.parse(inA.content[0]!.text)).toMatchObject({ success: true, return_value: [{ value: 7 }] });
+
+    // A script that starts with no workspace and reaches into B is checked in B.
+    const inB = await call('query_sdk', { title: 'Nested B', script: script(orgB.slug) });
+    expect(inB.content[0]!.text).toContain('Tool call blocked by policy.');
+    expect(inB.content[0]!.text).not.toMatch(/"success":\s*true/);
+
+    // So is a workspace named by the tool argument, and a federated search
+    // that would read B.
+    expectRan(await call('query_sql', { ...PROBE, org_slug: orgA.slug }));
+    expectBlocked(await call('query_sql', { ...PROBE, org_slug: orgB.slug }));
+    expectBlocked(await call('search_memory', { query: 'inbound guardrail probe' }));
+
+    await flushPendingGuardrailAudits();
+    expect(await fetchGuardrailEvents(orgA.id, 'pre-tool')).toHaveLength(tripsInABefore);
+    const tripsInB = await fetchGuardrailEvents(orgB.id, 'pre-tool');
+    expect(tripsInB.length).toBeGreaterThanOrEqual(3);
+    for (const trip of tripsInB) {
+      expect(trip.metadata).toMatchObject({ guardrail: 'b-judge', app_id: nested.appKey, agent_id: null });
+    }
+  });
+  /** A bare `/mcp` session for the app blocked only in B, granted A and B. */
+  const bareNestedSession = async () =>
+    openMcpSession('/mcp', await appToken(nested.clientId, null, [orgA.id, orgB.id]));
+
+  /** A `/mcp/{A}` session for the app blocked only in B, able to write. */
+  const scopedNestedWriter = async () =>
+    openMcpSession(
+      `/mcp/${orgA.slug}`,
+      await appToken(nested.clientId, orgA, [orgA.id], 'authorization_code', 'mcp:read mcp:write')
+    );
+
+  const sdkScript = (body: string) => `export default async (ctx, client) => { ${body} };`;
+
+  it('search_memory: a named workspace and the all-granted default are checked before any shard is read', async () => {
+    const call = await bareNestedSession();
+    const inA = await call('search_memory', { query: 'inbound guardrail probe', workspace: orgA.slug });
+    expect(inA.content[0]!.text).not.toContain('Tool call blocked');
+    expectBlocked(await call('search_memory', { query: 'inbound guardrail probe', workspace: orgB.slug }));
+    // The default fans out to every granted workspace; a block in one refuses
+    // the whole search rather than returning A's results alone.
+    expectBlocked(await call('search_memory', { query: 'inbound guardrail probe' }));
+  });
+
+  it('search_sdk: connector discovery fanned out from bare /mcp checks each workspace before reading its inventory', async () => {
+    const call = await bareNestedSession();
+    expectBlocked(await call('search_sdk', { query: 'gmail' }));
+    // A workspace-scoped session for the same app only reaches A.
+    const scoped = await openMcpSession(`/mcp/${orgA.slug}`, await appToken(nested.clientId, orgA, [orgA.id]));
+    const inA = await scoped('search_sdk', { query: 'gmail' });
+    expect(inA.isError, inA.content[0]?.text).toBeFalsy();
+  });
+
+  it('connect_managed: the public org is checked before the caller is joined to it', async () => {
+    const managed = await createTestOrganization({ slug: 'inbound-guardrails-managed', visibility: 'public' });
+    await createTestConnectorDefinition({
+      key: 'google.gmail',
+      name: 'Gmail',
+      organization_id: managed.id,
+      auth_schema: {
+        methods: [
+          {
+            type: 'oauth',
+            provider: 'google',
+            requiredScopes: ['openid'],
+            authorizationUrl: 'https://accounts.example/authorize',
+            tokenUrl: 'https://accounts.example/token',
+            clientIdKey: 'GOOGLE_CLIENT_ID',
+            clientSecretKey: 'GOOGLE_CLIENT_SECRET',
+          },
+        ],
+      },
+      feeds_schema: { items: {} },
+    });
+    await createAuthProfile({
+      organizationId: managed.id,
+      connectorKey: 'google.gmail',
+      displayName: 'Managed Google App',
+      profileKind: 'oauth_app',
+      provider: 'google',
+      authData: { GOOGLE_CLIENT_ID: 'synthetic-client-id', GOOGLE_CLIENT_SECRET: 'synthetic-client-secret' },
+    });
+    await createTestWorkspaceGuardrail({
+      organizationId: managed.id,
+      name: 'managed-judge',
+      config: PRE_TOOL_JUDGE,
+      appliesTo: [{ kind: 'app', id: nested.appKey }],
+    });
+    const previous = process.env.LOBU_MANAGED_AUTH_ORGS;
+    process.env.LOBU_MANAGED_AUTH_ORGS = managed.slug;
+    try {
+      const call = await scopedNestedWriter();
+      const result = await call('run_sdk', {
+        title: 'Managed connect',
+        script: sdkScript(
+          `return client.connections.connectManaged({ managed_by_org: '${managed.slug}', connector_key: 'google.gmail' });`
+        ),
+      });
+      expect(result.content[0]!.text).toContain('Tool call blocked by policy.');
+      // Refused before the join: no member row, projection or connection exists there.
+      const sql = getTestDb();
+      expect(await sql`SELECT 1 FROM "member" WHERE "organizationId" = ${managed.id} AND "userId" = ${userId}`).toHaveLength(0);
+      expect(await sql`SELECT 1 FROM connections WHERE organization_id = ${managed.id}`).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.LOBU_MANAGED_AUTH_ORGS;
+      else process.env.LOBU_MANAGED_AUTH_ORGS = previous;
+    }
+  });
+
+  it("notifications: the receiving workspace's inbox is checked before it is listed or written", async () => {
+    await ensureMemberEntityType(orgB.id);
+    const sql = getTestDb();
+    const inbox = {
+      inbound_probe: {
+        description: 'Synthetic inbox',
+        metadataSchema: { type: 'object' },
+        inbox: { accept_from: 'authenticated_workspaces', recipients: 'admins' },
+      },
+    };
+    await sql`UPDATE entity_types SET event_kinds = COALESCE(event_kinds, '{}'::jsonb) || ${sql.json(inbox)}
+      WHERE organization_id = ${orgB.id} AND slug = '$member'`;
+    const call = await scopedNestedWriter();
+    const listed = await call('query_sdk', {
+      title: 'List B inboxes',
+      script: sdkScript(`return client.notifications.listInboxes({ organization: '${orgB.slug}' });`),
+    });
+    expect(listed.content[0]!.text).toContain('Tool call blocked by policy.');
+    expect(listed.content[0]!.text).not.toContain('inbound_probe');
+    const submitted = await call('run_sdk', {
+      title: 'Submit to B',
+      script: sdkScript(
+        `return client.notifications.submit({ organization: '${orgB.slug}', inbox: 'inbound_probe', title: 'Probe', idempotency_key: 'inbound-probe-1' });`
+      ),
+    });
+    expect(submitted.content[0]!.text).toContain('Tool call blocked by policy.');
+    expect(await sql`SELECT 1 FROM notification_targets nt JOIN events e ON e.id = nt.event_id
+      WHERE e.organization_id = ${orgB.id}`).toHaveLength(0);
+  });
 });

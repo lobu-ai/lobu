@@ -105,8 +105,10 @@ export interface GetGuardrailResult {
 
 /**
  * A guardrail's writable fields. `applies_to` defaults to every agent;
- * `enabled` defaults to true. Subjects name agents only: every agent
- * (`principal_id: null`) or one agent.
+ * `enabled` defaults to true. Subjects name agents (every agent with
+ * `principal_id: null`, or one agent) or, on a guardrail that runs at the
+ * pre-tool stage only, apps (every app, or one app key): an app's calls to
+ * Lobu's MCP server are checked before they run.
  */
 export const GuardrailInputSchema = Type.Object({
   name: Type.String({
@@ -117,7 +119,7 @@ export const GuardrailInputSchema = Type.Object({
   applies_to: Type.Optional(
     Type.Array(GuardrailSubjectSchema, {
       description:
-        "Who the guardrail applies to: agent subjects only. Defaults to every agent.",
+        "Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (a pre-tool judge or forbidden-tools). Defaults to every agent.",
     })
   ),
   enabled: Type.Optional(Type.Boolean({ description: "Default true" })),

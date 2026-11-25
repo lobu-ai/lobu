@@ -123,6 +123,7 @@ import type { GuardrailsNamespace } from "./namespaces/guardrails";
 import type { SkillsNamespace } from "./namespaces/skills";
 import type { AutomationsNamespace } from "./namespaces/automations";
 import { authzScopeFromToolContext } from "../authz/scope";
+import { enforceInboundPreToolGuardrails } from "../tools/inbound-guardrails";
 
 export interface ClientSDK {
 	agents: AgentsNamespace;
@@ -156,12 +157,23 @@ export interface ClientSDK {
  * Resolve a workspace selected by an OAuth or eligible chat caller and carry its
  * membership into the handler context. The selected workspace, not the
  * account client, is authoritative for every leaf permission
- * check performed with the returned context.
+ * check performed with the returned context, and its inbound pre-tool
+ * guardrails run against the invoking tool call before the context is used.
  */
 export async function resolveCrossOrgToolContext(
 	slugOrId: string,
 	ctx: AccountToolContext,
 	allowCrossOrg: boolean = ctx.allowCrossOrg,
+): Promise<ToolContext> {
+	const target = await resolveCrossOrgWorkspace(slugOrId, ctx, allowCrossOrg);
+	await enforceInboundPreToolGuardrails(target);
+	return target;
+}
+
+async function resolveCrossOrgWorkspace(
+	slugOrId: string,
+	ctx: AccountToolContext,
+	allowCrossOrg: boolean,
 ): Promise<ToolContext> {
 	if (ctx.chatSenderReach) {
 		return resolveChatSenderWorkspace(slugOrId, ctx, ctx.chatSenderReach);

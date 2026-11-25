@@ -9,7 +9,8 @@
  * Guardrails are stage-scoped:
  *   - `input`    — user message before dispatch to worker
  *   - `output`   — worker-produced text/attachments before user rendering
- *   - `pre-tool` — tool call authorization (agent → gateway MCP proxy)
+ *   - `pre-tool` — tool call authorization (agent → gateway MCP proxy, and
+ *                  a connected app → Lobu's own MCP server)
  *   - `egress`   — outbound network request authorization, evaluated in the
  *                  http-proxy egress plane (LLM egress judge). Enforcement
  *                  stays in the proxy — this stage is NOT run by the message
@@ -52,7 +53,8 @@ export interface OutputGuardrailContext {
 }
 
 export interface PreToolGuardrailContext {
-  agentId: string;
+  /** The calling agent; null when a connected app calls Lobu's MCP server. */
+  agentId: string | null;
   userId: string;
   toolName: string;
   /** Raw JSON-RPC params the worker is about to invoke the tool with. */

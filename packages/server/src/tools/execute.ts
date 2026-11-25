@@ -39,10 +39,12 @@ import { enforcePublicReadLimit, getClientIP } from '../utils/rate-limiter';
 import { AccessDeniedError, enforceAdminToolAllowlist, enforceRoleScopeAccess, requireWorkspaceContext, scopeDenialMessage } from './access-control';
 import { recordToolInvocationAudit, recordWorkspaceActivityAudit } from './audit';
 import { getAccountContent } from './get_content';
+import { enforceInboundPreToolGuardrails } from './inbound-guardrails';
 import {
   getTool,
   isAuthorizationReadOnly,
   type AccountToolContext,
+  type InboundToolCall,
   type TokenType,
   type ToolContext,
   type ToolSourceContext,
@@ -459,7 +461,8 @@ async function executeToolInSpan(
   // was already bound to (null on bare account MCP) and never against the
   // requested target, which may be unauthorized or nonexistent.
   const workspaceActivity: WorkspaceActivity = new Map();
-  let toolContext: AccountToolContext = { ...toAccountToolContext(authCtx), workspaceActivity };
+  const inboundToolCall: InboundToolCall = { toolName, arguments: args, checkedWorkspaces: new Map() };
+  let toolContext: AccountToolContext = { ...toAccountToolContext(authCtx), workspaceActivity, inboundToolCall };
   try {
     const field = getTool(toolName)?.workspaceTarget;
     const target = field ? args[field] : undefined;
@@ -487,10 +490,12 @@ async function executeToolInSpan(
     toolContext = {
       ...toAccountToolContext(authCtx),
       workspaceActivity,
+      inboundToolCall,
       ...(requiredAccess === 'read' && callerSignal && { abortSignal: callerSignal }),
     };
     handlerRun.admitted = true;
     handlerRun.signal = toolContext.abortSignal;
+    await enforceInboundPreToolGuardrails(toolContext);
 
     // A capture run records the effect it WOULD have had instead of performing
     // it. SDK capture and eval-window finalization enforce their own

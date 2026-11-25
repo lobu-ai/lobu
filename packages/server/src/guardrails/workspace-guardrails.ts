@@ -1,7 +1,8 @@
 /**
  * The workspace guardrail library (`workspace_guardrails` +
  * `workspace_guardrail_subjects`). Every reader goes through here: the message
- * pipeline (chat input/output, pre-tool on the outbound MCP proxy), the egress
+ * pipeline (chat input/output, pre-tool on the outbound MCP proxy and on inbound
+ * MCP tool calls), the egress
  * policy store and grant guards, and the read-only REST/SDK list/get; the
  * REST writers apply through here too.
  */
@@ -9,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { isLibrarySkillName, LIBRARY_SKILL_NAME_MAX_CHARS } from "@lobu/core/agent-tooling";
 import {
 	type GuardrailSubject,
+	isBuiltinGuardrailConfig,
 	type ListGuardrailsResult,
 	parseGuardrailConfig,
 	type WorkspaceGuardrail,
@@ -16,8 +18,10 @@ import {
 } from "@lobu/core/contracts/workspace-guardrails";
 import type { GuardrailStage } from "@lobu/core";
 import type { ActingPrincipal } from "../authz/entity-policy";
+import { appKeyProblem } from "../authz/policy-principal";
 import type { DbClient } from "../db/client";
 import { pgTextArray } from "../db/client";
+import { builtinGuardrailStages } from "../gateway/guardrails/builtins";
 import { ToolUserError } from "../utils/errors";
 
 /** The subset of a principal a guardrail subject can name; see `principalMatches`. */
@@ -287,30 +291,54 @@ function normalizeGuardrailConfig(raw: unknown): WorkspaceGuardrailConfig {
 }
 
 /**
- * Fold duplicate subjects and accept agent subjects only: every agent
- * (`principal_id: null`) or one agent. Everyone and app subjects are 422.
+ * True when a guardrail runs at the pre-tool stage only: a pre-tool judge, or
+ * a built-in that implements no other stage (forbidden-tools).
  */
-function normalizeGuardrailSubjects(subjects: unknown): GuardrailSubject[] {
+function runsOnlyPreTool(config: WorkspaceGuardrailConfig): boolean {
+	if (!isBuiltinGuardrailConfig(config)) return config.stage === "pre-tool";
+	const stages = builtinGuardrailStages(config.builtin);
+	return stages.length > 0 && stages.every((stage) => stage === "pre-tool");
+}
+
+/**
+ * Fold duplicate subjects and accept agent and app subjects: every agent or
+ * app (`principal_id: null`), one agent, or one app key. An app reaches
+ * guardrails only through its calls to Lobu's MCP server, so an app subject is
+ * 422 unless the guardrail runs at the pre-tool stage only. Everyone is 422.
+ */
+function normalizeGuardrailSubjects(subjects: unknown, config: WorkspaceGuardrailConfig): GuardrailSubject[] {
 	if (!Array.isArray(subjects) || subjects.length === 0) {
-		throw new ToolUserError("applies_to must list at least one agent subject; disable or archive the guardrail instead.", 422);
+		throw new ToolUserError("applies_to must list at least one subject; disable or archive the guardrail instead.", 422);
 	}
 	const seen = new Set<string>();
 	const out: GuardrailSubject[] = [];
 	for (const subject of subjects) {
 		if (
 			!isPlainObject(subject) ||
-			subject.principal_kind !== "agent" ||
+			(subject.principal_kind !== "agent" && subject.principal_kind !== "app") ||
 			!(subject.principal_id === null || (typeof subject.principal_id === "string" && subject.principal_id.trim() !== ""))
 		) {
 			throw new ToolUserError(
-				'applies_to takes agent subjects only: { "principal_kind": "agent", "principal_id": null } for every agent, or an agent id.',
+				'applies_to takes agent or app subjects: { "principal_kind": "agent", "principal_id": null } for every agent, an agent id, or (on a pre-tool guardrail) { "principal_kind": "app", "principal_id": null } for every app, or an app key.',
 				422,
 			);
 		}
-		const key = subject.principal_id ?? "";
+		const kind = subject.principal_kind;
+		const id = subject.principal_id as string | null;
+		if (kind === "app") {
+			if (!runsOnlyPreTool(config)) {
+				throw new ToolUserError(
+					"App subjects apply only to pre-tool guardrails: a judge at stage pre-tool, or the forbidden-tools built-in.",
+					422,
+				);
+			}
+			const problem = id === null ? null : appKeyProblem(id, "An app subject's principal_id");
+			if (problem) throw new ToolUserError(problem, 422);
+		}
+		const key = `${kind}:${id ?? ""}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
-		out.push({ principal_kind: "agent", principal_id: subject.principal_id as string | null });
+		out.push({ principal_kind: kind, principal_id: id });
 	}
 	return out;
 }
@@ -329,10 +357,11 @@ export function normalizeGuardrailInput(input: unknown): GuardrailBody {
 	if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
 		throw new ToolUserError("enabled must be a boolean.", 422);
 	}
+	const config = normalizeGuardrailConfig(input.config);
 	return {
 		name: input.name,
-		config: normalizeGuardrailConfig(input.config),
-		applies_to: normalizeGuardrailSubjects(input.applies_to ?? EVERY_AGENT),
+		config,
+		applies_to: normalizeGuardrailSubjects(input.applies_to ?? EVERY_AGENT, config),
 		enabled: input.enabled ?? true,
 	};
 }
