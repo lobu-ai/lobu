@@ -1785,20 +1785,11 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
           clearSession();
           return buildJsonRpcErrorResponse('Session client changed. Re-initialize.', null, 400);
         }
-        // Grant stability only applies to an already-authenticated session; an
-        // anonymous session upgrading in place legitimately gains its first
-        // workspace snapshot below. A grant that only gained workspaces (its
-        // owner widened the login from the web app) carries on in place; any
-        // workspace removed ends the session.
-        const freshGrantIds = new Set(freshCtx.grantedOrganizationIds ?? []);
-        if ((requestAuthCtx.grantedOrganizationIds ?? []).some((id) => !freshGrantIds.has(id))) {
-          clearSession();
-          return buildJsonRpcErrorResponse(
-            'Session workspace access changed. Re-initialize.',
-            null,
-            400
-          );
-        }
+        // Workspace grants are not session identity. Each request acts with its
+        // own token's grant (assigned below), so a narrowed grant can't reach a
+        // removed workspace. Comparing it to the session would end the session
+        // when an older request, whose token was read before the login was
+        // widened, finishes after a newer one. Revocation closes sessions itself.
       }
 
       requestAuthCtx.isAuthenticated = true;

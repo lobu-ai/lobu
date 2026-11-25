@@ -79,7 +79,7 @@ describe('login upgrade links', () => {
   });
 
   it('links an ungranted workspace to the login page, and the grant reaches the same bearer and its refresh', async () => {
-    const { sql, other, client, token, cookie } = await seedLogin();
+    const { sql, home, other, client, token, cookie } = await seedLogin();
 
     const denied = await searchIn(token, other.slug);
     expect(denied.result?.isError).toBe(true);
@@ -106,6 +106,17 @@ describe('login upgrade links', () => {
     expect(allowed.rpcError).toBeUndefined();
     expect(allowed.result?.isError).toBeFalsy();
     expect(allowed.result?.structuredContent).toBeDefined();
+
+    // An older request whose token was read before the widen finishes last:
+    // it acts with its own narrower grant and leaves the session in place.
+    await sql`UPDATE oauth_tokens SET granted_organization_ids = ${pgTextArray([home.id])}::text[] WHERE id = 'upgrade-access'`;
+    const stale = await searchIn(token, other.slug);
+    expect(stale.rpcError).toBeUndefined();
+    expect(stale.result?.isError).toBe(true);
+    await sql`UPDATE oauth_tokens SET granted_organization_ids = ${pgTextArray([home.id, other.id])}::text[] WHERE id = 'upgrade-access'`;
+    const after = await searchIn(token, other.slug);
+    expect(after.rpcError).toBeUndefined();
+    expect(after.result?.isError).toBeFalsy();
 
     const view = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
     expect(view.status).toBe(200);

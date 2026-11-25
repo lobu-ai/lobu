@@ -217,7 +217,7 @@ export interface AuthInfo {
    */
   userId: string | null;
   organizationId: string | null;
-  /** Immutable workspace snapshot authorized at consent time. */
+  /** Workspaces authorized at consent, or added later by the login owner. */
   grantedOrganizationIds: string[] | null;
   /** Issuing OAuth flow; absent on PATs and legacy OAuth rows. */
   authorizationGrantType?: 'authorization_code' | 'device_code' | null;
