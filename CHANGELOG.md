@@ -26,6 +26,59 @@ upgrading. Find them with `list_feeds` (`status: "paused"`) and resume each one
 you want with `update_feed` (`status: "active"`). Re-entering credentials
 through a connect link needs at least one enabled feed on the connection.
 
+## [24.15.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.14.0...lobu-v24.15.0) (2026-11-25)
+
+
+### Features
+
+* **automations:** let agent-less Automations deliver to a bound channel ([#5130](https://github.com/lobu-ai/lobu/issues/5130)) ([d838d52](https://github.com/lobu-ai/lobu/commit/d838d52b4ee8dc98cee5d03ce89ef2f4f782ae72))
+* **db:** add dormant workspace skill and guardrail tables ([#5166](https://github.com/lobu-ai/lobu/issues/5166)) ([844c05d](https://github.com/lobu-ai/lobu/commit/844c05df6ef03eb7179fb610cce2b745429b4d4f))
+* **examples:** ecommerce Shopify store operations demo ([#5160](https://github.com/lobu-ai/lobu/issues/5160)) ([6259c4c](https://github.com/lobu-ai/lobu/commit/6259c4c78590e42b19c6adc99e837c6d54db1460))
+* **examples:** interactive ecommerce store views ([#5171](https://github.com/lobu-ai/lobu/issues/5171)) ([438077c](https://github.com/lobu-ai/lobu/commit/438077ce36795e3b1aa74dc97c0aa62d859e7951))
+* **guardrails:** move agent guardrails to the workspace library (reader cutover) ([#5184](https://github.com/lobu-ai/lobu/issues/5184)) ([1b72cc6](https://github.com/lobu-ai/lobu/commit/1b72cc69246f35a401540c5212ee1ded27211f5a))
+* **guardrails:** write the workspace guardrail library (REST, guardrails:write PAT, lobu apply) ([#5186](https://github.com/lobu-ai/lobu/issues/5186)) ([20f54ae](https://github.com/lobu-ai/lobu/commit/20f54ae3e3063fc7af264109712a6fbc74a6b2c5))
+* **oauth:** link access denials to a one-click login upgrade ([#5167](https://github.com/lobu-ai/lobu/issues/5167)) ([208735d](https://github.com/lobu-ai/lobu/commit/208735d77915a6570c9440e74ed827831c8e9b08))
+* **oauth:** suggest a first prompt on the MCP consent page ([#5143](https://github.com/lobu-ai/lobu/issues/5143)) ([06faddb](https://github.com/lobu-ai/lobu/commit/06faddbe3c809061d079b287b085571d30075926))
+* **observability:** attribute rejected MCP bearer requests and OAuth consent decisions ([#5141](https://github.com/lobu-ai/lobu/issues/5141)) ([d1e9856](https://github.com/lobu-ai/lobu/commit/d1e9856b8609186305de1b278267a67a8fd97cbf))
+* **operations:** let an agent confirm a check on its own chat send ([#5135](https://github.com/lobu-ai/lobu/issues/5135)) ([c95bfac](https://github.com/lobu-ai/lobu/commit/c95bfac17ed49b9801c7c2ee19efc39b8a257002))
+* **proxy:** read egress judge policy from Postgres and run every matching judge ([#5169](https://github.com/lobu-ai/lobu/issues/5169)) ([7e7bddc](https://github.com/lobu-ai/lobu/commit/7e7bddc74ef4af272d1b9924a4b4868ed744c20e))
+* **server:** name a chat-link Automation after its workspace and platform ([#5154](https://github.com/lobu-ai/lobu/issues/5154)) ([809c9ed](https://github.com/lobu-ai/lobu/commit/809c9ed7c8039f1e8870273d1d3fde93ce7f9e62))
+* **server:** name a new chat-link Automation after its channel ([#5151](https://github.com/lobu-ai/lobu/issues/5151)) ([59b86f2](https://github.com/lobu-ai/lobu/commit/59b86f247d5f08ef0797725c318e232730b115a9))
+* **server:** notify the device owner when a failed action names a missing device grant ([#5139](https://github.com/lobu-ai/lobu/issues/5139)) ([5b5c8b1](https://github.com/lobu-ai/lobu/commit/5b5c8b162cce486b90ce1d1685456d1799d9a39c))
+* **skills:** move agent skills to the workspace library (reader cutover) ([#5173](https://github.com/lobu-ai/lobu/issues/5173)) ([8c18806](https://github.com/lobu-ai/lobu/commit/8c188064de4ef1c07c4204a0e92b914d65904713))
+* **skills:** serve workspace skills over the MCP Skills extension ([#5182](https://github.com/lobu-ai/lobu/issues/5182)) ([c38b098](https://github.com/lobu-ai/lobu/commit/c38b09889cca5b5587208357f985ac39fc91ef6d))
+* **skills:** write the workspace skill library from the SDK, lobu apply and Settings ([#5178](https://github.com/lobu-ai/lobu/issues/5178)) ([e13005a](https://github.com/lobu-ai/lobu/commit/e13005ac08eca20b795d9129d8ca2e268ae47e6c))
+* **workspace:** list only LOBU_DISCOVERABLE_ORGS public workspaces to non-members ([#5149](https://github.com/lobu-ai/lobu/issues/5149)) ([34366d5](https://github.com/lobu-ai/lobu/commit/34366d540e60c55e76cd0f0c3f1f2790c56c56c2))
+
+
+### Bug Fixes
+
+* **automations:** let a chat-link keep its linked foreign connection on update ([#5129](https://github.com/lobu-ai/lobu/issues/5129)) ([5958951](https://github.com/lobu-ai/lobu/commit/5958951336205d3f10e688b3536a43d02faa6f92))
+* **browser:** reuse the verified tab for matching feed navigation ([#5177](https://github.com/lobu-ai/lobu/issues/5177)) ([b1aa078](https://github.com/lobu-ai/lobu/commit/b1aa07864b93699b8094a4cba287e19b67f24f86))
+* **channels:** deliver proactive messages to chat channels linked from another workspace ([#5179](https://github.com/lobu-ai/lobu/issues/5179)) ([ae1d5b2](https://github.com/lobu-ai/lobu/commit/ae1d5b23c44a66a738b7c494351fefc25c3a4afb))
+* **chat:** give cross-org chat contacts the target workspace's entity type ([#5176](https://github.com/lobu-ai/lobu/issues/5176)) ([36832bc](https://github.com/lobu-ai/lobu/commit/36832bca8b3510dc2a3bb02eb6f18eaa6253c936))
+* **chat:** keep a linked channel quiet when its Automation filters reject a message ([#5136](https://github.com/lobu-ai/lobu/issues/5136)) ([cce3100](https://github.com/lobu-ai/lobu/commit/cce3100943c13d0b4d45ee58bde71e940cb7f009))
+* **chat:** link cross-workspace group senders privately ([#5168](https://github.com/lobu-ai/lobu/issues/5168)) ([f2e2516](https://github.com/lobu-ai/lobu/commit/f2e2516bc3fac5ca42526295b80ea248d0a4bec6))
+* **connector-worker:** one timeout classifier and a tested detach recipe for long os.shell work ([#5188](https://github.com/lobu-ai/lobu/issues/5188)) ([41ca94b](https://github.com/lobu-ai/lobu/commit/41ca94b90c52ac6f80ed927b3b88b7f5654387af))
+* **connectors:** make every Shopify variant a product, with or without a SKU ([#5162](https://github.com/lobu-ai/lobu/issues/5162)) ([6cc0daf](https://github.com/lobu-ai/lobu/commit/6cc0dafffb017f03a33b02edbb7f9f96732ec83d))
+* **connectors:** read streamed LinkedIn notifications ([#5163](https://github.com/lobu-ai/lobu/issues/5163)) ([bd9e7e6](https://github.com/lobu-ai/lobu/commit/bd9e7e68fca34481db9c9dca740c8d4a89869708))
+* **connectors:** report Shopify access-denied as a permanent error ([#5158](https://github.com/lobu-ai/lobu/issues/5158)) ([6a3d66f](https://github.com/lobu-ai/lobu/commit/6a3d66fc8dccd9ae92ea5859be04bc7e1828c089))
+* **gateway:** accept the agent events stream ticket under the /lobu mount ([#5172](https://github.com/lobu-ai/lobu/issues/5172)) ([8fa1b4c](https://github.com/lobu-ai/lobu/commit/8fa1b4c13adf7f2798e48fb9ac834e5c3ab26b3b))
+* **gateway:** never leave a second interaction bridge on one connection ([#5131](https://github.com/lobu-ai/lobu/issues/5131)) ([0091f19](https://github.com/lobu-ai/lobu/commit/0091f19e8dc68a06d3401617fe6a2b38dd917884))
+* **guardrails:** drop stray keys the reader-cutover backfill copied into custom guardrail configs ([#5187](https://github.com/lobu-ai/lobu/issues/5187)) ([49f094f](https://github.com/lobu-ai/lobu/commit/49f094f7b552047f4ef810d27294f43dcd078416))
+* **home:** count apps connected through bare /mcp OAuth as workspace clients ([#5140](https://github.com/lobu-ai/lobu/issues/5140)) ([b3915e2](https://github.com/lobu-ai/lobu/commit/b3915e276a98963469198212adf46de270028aaf))
+* **lobu-team:** page on three affected users, not two ([#5189](https://github.com/lobu-ai/lobu/issues/5189)) ([a7aaf5a](https://github.com/lobu-ai/lobu/commit/a7aaf5a1470dd9392519a0396bba66486610706e))
+* **lobu-team:** post the social briefing only when the owner must act ([#5134](https://github.com/lobu-ai/lobu/issues/5134)) ([0ef926f](https://github.com/lobu-ai/lobu/commit/0ef926ff35b1caeb7b17bf81fec571e157232ed5))
+* **mcp:** guide agents through an empty workspace and name valid targets in not-found errors ([#5142](https://github.com/lobu-ai/lobu/issues/5142)) ([a72007c](https://github.com/lobu-ai/lobu/commit/a72007c4994242e330c59a06f364b6e49fc9d132))
+* **notifications:** keep system notices out of every bound channel ([#5137](https://github.com/lobu-ai/lobu/issues/5137)) ([9431905](https://github.com/lobu-ai/lobu/commit/94319050bbe5c9f06ddf74dcf1410c097b4f6423))
+* **operations:** let an external runner settle its Automation's Check under its window lease ([#5152](https://github.com/lobu-ai/lobu/issues/5152)) ([17ec815](https://github.com/lobu-ai/lobu/commit/17ec815824281aabd1242681a7fcc96e1d8b5385))
+* **personal-agent:** send the net-worth digest to its owner only ([#5138](https://github.com/lobu-ai/lobu/issues/5138)) ([bb8478f](https://github.com/lobu-ai/lobu/commit/bb8478f32ddfc53c6e8a7e8de5fbcb8c56189e85))
+* **server:** guide recovery after paired browser read timeouts ([#5181](https://github.com/lobu-ai/lobu/issues/5181)) ([8866787](https://github.com/lobu-ai/lobu/commit/886678793a269318036b8cb0c73e327e14a5fe68))
+* **server:** keep hosted-app install redirects out of the public API document ([#5153](https://github.com/lobu-ai/lobu/issues/5153)) ([79b55ec](https://github.com/lobu-ai/lobu/commit/79b55ecd54a5bfdbbbcb29999b53c2815c766741))
+* **server:** steer chat follow-ups regardless of per-message metadata ([#5156](https://github.com/lobu-ai/lobu/issues/5156)) ([5c424b3](https://github.com/lobu-ai/lobu/commit/5c424b31d4c51f1c3cffb9d15de8f325d4c30401))
+* **views:** queue concurrent validations instead of refusing them as unavailable ([#5161](https://github.com/lobu-ai/lobu/issues/5161)) ([bdbd2bf](https://github.com/lobu-ai/lobu/commit/bdbd2bf57c2b8e8492a59c5af3bd4f82be133fad))
+* **whatsapp:** send plain WhatsApp text without Markdown escapes ([#5174](https://github.com/lobu-ai/lobu/issues/5174)) ([8dba985](https://github.com/lobu-ai/lobu/commit/8dba985021a14c6b897ee2b619ce688f85242516))
+
 ## [24.14.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.13.0...lobu-v24.14.0) (2026-11-23)
 
 
