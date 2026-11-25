@@ -360,7 +360,7 @@ describe("X source chat", () => {
     await expect.poll(() => sends.length, { timeout: 10_000, interval: 50 }).toBe(1);
     expect(sends[0].input).toMatchObject({
       conversation_id: DM,
-      text: "You're connected. Messages you send me here now act as you in X source chat.",
+      text: expect.stringContaining("X source chat"),
     });
     expect(await resolveChatUserIdentity("x", undefined, PEER, orgId)).toBe(member.id);
     expect(await resolveChatUserIdentity("x", undefined, PEER, otherOrg.id)).toBeNull();

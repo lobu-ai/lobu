@@ -1042,7 +1042,10 @@ export class ChatInstanceManager {
   async postDirectMessage(
     connectionId: string,
     platformUserId: string,
-    content: AdapterPostableMessage,
+    content: AdapterPostableMessage | ((target: {
+      channelId: string;
+      threadId: string;
+    }) => Promise<AdapterPostableMessage>),
   ): Promise<{ messageId: string; threadId: string }> {
     const running = await this.ensureConnectionRunning(connectionId);
     const instance = running ? this.instances.get(connectionId) : undefined;
@@ -1058,12 +1061,23 @@ export class ChatInstanceManager {
       throw new Error(`${instance.connection.platform} does not support direct messages`);
     }
     const threadId = await adapter.openDM(platformUserId);
-    const thread = await resolveChatTarget(instance.chat, instance.connection.platform, {
-      channelId: threadId,
-      responseThreadId: threadId,
-    });
+    const buildContent = typeof content === "function" ? content : undefined;
+    const thread = buildContent
+      ? await resolveExactChatThread(instance.chat, instance.connection.platform, threadId)
+      : await resolveChatTarget(instance.chat, instance.connection.platform, {
+          channelId: threadId,
+          responseThreadId: threadId,
+        });
     if (!thread) throw new Error(`Could not resolve direct message target ${threadId}`);
-    const sent = (await thread.post(content)) as {
+    // A link builder may mint a secret for this recipient. Only call it once
+    // the adapter's exact target is verified private.
+    if (buildContent && thread.isDM !== true) {
+      throw new Error("The resolved chat target is not a direct message");
+    }
+    const message = typeof content === "function"
+      ? await content({ channelId: thread.channelId, threadId })
+      : content;
+    const sent = (await thread.post(message)) as {
       id?: unknown;
       threadId?: unknown;
     };
