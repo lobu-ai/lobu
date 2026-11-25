@@ -1,4 +1,4 @@
-/** Route coverage for seeding a catalog default text model at provider create. */
+/** Route coverage for org inference providers: create, edit and live model discovery. */
 
 import {
 	afterAll,
@@ -16,6 +16,8 @@ import {
 } from "@lobu/core";
 import { ApiKeyProviderModule } from "../../gateway/auth/api-key-provider-module.js";
 import { ChatGPTOAuthModule } from "../../gateway/auth/chatgpt/chatgpt-oauth-module.js";
+import { ClaudeOAuthModule } from "../../gateway/auth/claude/oauth-module.js";
+import { __resetModelsDevCacheForTests } from "../../gateway/auth/models-dev.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
@@ -31,6 +33,14 @@ const USER = "u-create-seed";
 let savedEncryptionKey: string | undefined;
 let savedRegistryPath: string | undefined;
 let savedModules: Map<string, ModuleInterface> | undefined;
+/** Signed-in subscription profiles by provider id (the org-bucket sign-in). */
+let oauthProfiles: Record<string, { credential: string; authType: "oauth" }> = {};
+const profileStore = {
+	getBestProfile: async (_agentId: string, provider: string) =>
+		oauthProfiles[provider] ? { ...oauthProfiles[provider], provider } : null,
+	ensureFreshCredential: async (profile: { credential: string }) => profile.credential,
+	hasProviderProfiles: async (_agentId: string, provider: string) => Boolean(oauthProfiles[provider]),
+};
 
 function restoreModules(): void {
 	if (!savedModules) return;
@@ -48,7 +58,7 @@ beforeAll(async () => {
 	__resetEncryptionKeyCacheForTests();
 	// The route resolves the registry via cwd/config/providers.json, which is the
 	// REPO root — not packages/server, where the test runs. Point at the real
-	// file so the seed reads the same catalog defaults production does.
+	// file so the routes read the same catalog production does.
 	process.env.LOBU_PROVIDER_REGISTRY_PATH = new URL(
 		"../../../../../config/providers.json",
 		import.meta.url,
@@ -80,18 +90,9 @@ async function seedOrg(): Promise<void> {
 }
 
 /**
- * Register the provider modules the route's seeding predicate consults.
- *
- * `wouldRoute` asks `buildProviderCatalog()` — with NO configs — because that
- * is the exact expression `getModelPolicy` evaluates when it decides whether a
- * row routes. That reads the MODULE REGISTRY, which a booted server populates
- * and a bare test process does not. Without these registrations the predicate
- * answers "nothing routes" and every alias assertion below would pass for the
- * wrong reason.
- *
- * `groq` registers as a real ApiKeyProviderModule (an API key reaches it);
- * `claude` as a plain OAuth-shaped module, which is what it actually is — it
- * has an upstream in providers.json that only a signed-in session can use.
+ * Register the provider modules the routes consult. A booted server populates
+ * the MODULE REGISTRY; a bare test process does not, so without these the
+ * catalog and model discovery would answer for no provider at all.
  */
 function registerCatalogModules(): void {
 	// The registry is a process-wide singleton and `bun test` shares one process
@@ -126,22 +127,18 @@ function registerCatalogModules(): void {
 			providerIconUrl: "",
 			apiKeyInstructions: "",
 			apiKeyPlaceholder: "",
+			modelsDevId: "google",
 			authProfilesManager: {} as never,
 		}) as unknown as ModuleInterface,
 	);
-	moduleRegistry.register(new ChatGPTOAuthModule({} as never) as unknown as ModuleInterface);
-	moduleRegistry.register({
-		name: "claude-provider",
-		isEnabled: () => true,
-		providerId: "claude",
-		providerDisplayName: "Claude",
-		providerIconUrl: "",
-		authType: "oauth",
-		supportedAuthTypes: ["oauth", "api-key"],
-		sdkCompat: "anthropic",
-		hasSystemKey: () => false,
-		getSecretEnvVarNames: () => [],
-	} as unknown as ModuleInterface);
+	moduleRegistry.register(new ChatGPTOAuthModule(profileStore as never) as unknown as ModuleInterface);
+	moduleRegistry.register(new ClaudeOAuthModule(profileStore as never) as unknown as ModuleInterface);
+}
+
+/** A synthetic ChatGPT access token: unsigned, carrying only an account claim. */
+function syntheticChatGptToken(): string {
+	const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+	return `${encode({ alg: "none" })}.${encode({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } })}.signature`;
 }
 
 async function createProvider(body: Record<string, unknown>): Promise<Response> {
@@ -164,10 +161,12 @@ async function readCapabilities(slug: string): Promise<unknown> {
 	return rows[0]?.capabilities;
 }
 
-describe("POST /inference-providers seeds a routable text model", () => {
+describe("org inference provider routes", () => {
 	beforeEach(async () => {
 		await resetTestDatabase();
 		await seedOrg();
+		oauthProfiles = {};
+		__resetModelsDevCacheForTests();
 		registerCatalogModules();
 		authStash.user = {
 			id: USER,
@@ -194,7 +193,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
     app.route("/api/:orgSlug/agents", agentRoutes);
     const url = `/api/${ORG}/agents/inference-providers`;
     const created = await app.request(url, { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slug: "parity", kind: "groq", apiKey: "synthetic-parity-key" }) });
+      body: JSON.stringify({ slug: "parity", kind: "groq", apiKey: "synthetic-parity-key", capabilities: { text: { model: "synthetic-model" } } }) });
     expect(created.status).toBe(201);
     expect(auth).toBeDefined();
     const sdk = buildClientSDK(toToolContext(auth!), {});
@@ -249,7 +248,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 	});
 
 	test("audit failure rolls back provider creation, edits, defaults, keys and deletion", async () => {
-		for (const slug of ["original", "alternate"]) expect((await createProvider({ slug, kind: "groq", apiKey: `synthetic-${slug}` })).status).toBe(201);
+		for (const slug of ["original", "alternate"]) expect((await createProvider({ slug, kind: "groq", apiKey: `synthetic-${slug}`, capabilities: { text: { model: "synthetic-model" } } })).status).toBe(201);
 		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
 		const snapshot = async () => ({
@@ -293,7 +292,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 			await held;
 		});
 		await ready;
-		const requests = ["parallel-first", "parallel-second"].map(slug => createProvider({ slug, kind: "groq", apiKey: "synthetic-key" }));
+		const requests = ["parallel-first", "parallel-second"].map(slug => createProvider({ slug, kind: "groq", apiKey: "synthetic-key", capabilities: { text: { model: "synthetic-model" } } }));
 		try {
 			const deadline = Date.now() + 5000;
 			while (true) {
@@ -309,21 +308,6 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		expect(await sql`SELECT id FROM events WHERE organization_id = ${ORG} AND metadata->>'resource_kind' = 'inference-provider'`).toHaveLength(2);
 	}, 10000);
 
-	test("a catalog provider created with NO capabilities gets the catalog default model", async () => {
-		const res = await createProvider({
-			slug: "groq",
-			kind: "groq",
-			apiKey: "synthetic-key",
-		});
-		expect(res.status).toBe(201);
-
-		// Without the seed this remains `{}` and cannot become the org default.
-		const capabilities = (await readCapabilities("groq")) as {
-			text?: { model?: string };
-		};
-		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
-	});
-
 	test("discovers Gemini text models under the org's provider slug after connecting", async () => {
 		const { agentRoutes } = await import("../agent-routes.js");
 		const path = "/inference-providers/team-google/models";
@@ -337,8 +321,18 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		const originalFetch = globalThis.fetch;
 		const requests: Array<{ page: string | null; key: string | null }> = [];
 		let upstreamStatus = 200;
+		let modelsDevReachable = true;
 		globalThis.fetch = (async (input, init) => {
 			const url = new URL(String(input));
+			if (url.hostname === "models.dev") {
+				if (!modelsDevReachable) throw new TypeError("synthetic network failure");
+				return Response.json({ google: { models: {
+					"text-1": { tool_call: true, modalities: { output: ["text"] } },
+					"text-retired": { status: "deprecated", tool_call: true, modalities: { output: ["text"] } },
+					"image-1": { tool_call: true, modalities: { output: ["image"] } },
+					"text-no-tools": { tool_call: false, modalities: { output: ["text"] } },
+				} } });
+			}
 			const page = url.searchParams.get("pageToken");
 			requests.push({ page, key: new Headers(init?.headers).get("x-goog-api-key") });
 			if (upstreamStatus !== 200) return new Response("upstream error", { status: upstreamStatus });
@@ -349,21 +343,38 @@ describe("POST /inference-providers seeds a routable text model", () => {
 				models: [
 					{ name: "models/text-1", displayName: "Text One", supportedGenerationMethods: ["generateContent"] },
 					{ name: "models/embed-1", supportedGenerationMethods: ["embedContent"] },
+					{ name: "models/text-retired", supportedGenerationMethods: ["generateContent"] },
+					{ name: "models/image-1", supportedGenerationMethods: ["generateContent"] },
+					{ name: "models/text-no-tools", supportedGenerationMethods: ["generateContent"] },
 				],
 			});
 		}) as typeof fetch;
 		try {
+			// Only text-1 is a current, tool-capable text model per models.dev:
+			// text-retired is deprecated, image-1 is image-only, text-no-tools
+			// cannot call tools, and text-2 is not in models.dev at all.
 			const discovered = await agentRoutes.request(path);
 			expect(discovered.status).toBe(200);
 			expect(discovered.headers.get("cache-control")).toBe("private, no-store");
 			expect(await discovered.json()).toEqual({ models: [
 				{ id: "text-1", label: "Text One" },
-				{ id: "text-2", label: "text-2" },
 			] });
 			expect(requests).toEqual([
 				{ page: null, key: "synthetic-google-credential" },
 				{ page: "second", key: "synthetic-google-credential" },
 			]);
+			// An unreachable models.dev fails open: the provider's own list, unfiltered.
+			__resetModelsDevCacheForTests();
+			modelsDevReachable = false;
+			const unfiltered = await agentRoutes.request(path);
+			expect(unfiltered.status).toBe(200);
+			expect(await unfiltered.json()).toEqual({ models: [
+				{ id: "text-1", label: "Text One" },
+				{ id: "text-retired", label: "text-retired" },
+				{ id: "image-1", label: "image-1" },
+				{ id: "text-no-tools", label: "text-no-tools" },
+				{ id: "text-2", label: "text-2" },
+			] });
 			upstreamStatus = 503;
 			expect((await agentRoutes.request(path)).status).toBe(503);
 			authStash.memberRole = "member";
@@ -373,7 +384,47 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		}
 	});
 
-	test("an explicitly requested model is NOT overwritten by the catalog default", async () => {
+	test("lists Claude and ChatGPT models live from each provider's own catalog", async () => {
+		const { agentRoutes } = await import("../agent-routes.js");
+		const { ensureOAuthInferenceProvider } = await import("../stores/provider-secrets.js");
+		expect((await createProvider({ slug: "team-claude", kind: "claude", apiKey: "synthetic-anthropic-key" })).status).toBe(201);
+		await ensureOAuthInferenceProvider({ organizationId: ORG, slug: "chatgpt", kind: "chatgpt", createdBy: USER });
+		const originalFetch = globalThis.fetch;
+		const credentials: Record<string, string | null> = {};
+		globalThis.fetch = (async (input, init) => {
+			const url = new URL(String(input));
+			const headers = new Headers(init?.headers);
+			if (url.hostname === "models.dev") return Response.json({});
+			if (url.hostname === "api.anthropic.com" && url.pathname === "/v1/models") {
+				credentials.anthropic = headers.get("x-api-key");
+				return Response.json({ data: [{ id: "synthetic-claude-1", display_name: "Synthetic Claude One" }], has_more: false });
+			}
+			if (url.hostname === "chatgpt.com" && url.pathname === "/backend-api/codex/models") {
+				credentials.chatgpt = headers.get("chatgpt-account-id");
+				return Response.json({ models: [{ slug: "synthetic-codex-1", context_window: 1000 }] });
+			}
+			return new Response("unexpected upstream", { status: 500 });
+		}) as typeof fetch;
+		try {
+			const claude = await agentRoutes.request("/inference-providers/team-claude/models");
+			expect(claude.status).toBe(200);
+			expect(await claude.json()).toEqual({ models: [{ id: "synthetic-claude-1", label: "Synthetic Claude One" }] });
+			expect(credentials.anthropic).toBe("synthetic-anthropic-key");
+
+			// The ChatGPT row is a subscription sign-in with no row key, so
+			// discovery needs the caller's org-bucket profile; 409 without one.
+			expect((await agentRoutes.request("/inference-providers/chatgpt/models")).status).toBe(409);
+			oauthProfiles.chatgpt = { credential: syntheticChatGptToken(), authType: "oauth" };
+			const chatgpt = await agentRoutes.request("/inference-providers/chatgpt/models");
+			expect(chatgpt.status).toBe(200);
+			expect(await chatgpt.json()).toEqual({ models: [{ id: "synthetic-codex-1", label: "synthetic-codex-1" }] });
+			expect(credentials.chatgpt).toBe("synthetic-account");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("an explicitly requested text model is stored as given", async () => {
 		const res = await createProvider({
 			slug: "groq",
 			kind: "groq",
@@ -388,60 +439,10 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		expect(capabilities?.text?.model).toBe("explicit-text-model");
 	});
 
-	test("a caller-supplied base_url survives seeding", async () => {
-		// Seeding must MERGE into the caller's text block, never replace it —
-		// dropping a tenant upstream would silently re-point the org at the
-		// catalog URL.
-		const res = await createProvider({
-			slug: "my-upstream",
-			kind: "groq",
-			apiKey: "synthetic-key",
-			capabilities: { text: { base_url: "https://tenant.example.com/v1" } },
-		});
-		expect(res.status).toBe(201);
-
-		const capabilities = (await readCapabilities("my-upstream")) as {
-			text?: { model?: string; base_url?: string };
-		};
-		expect(capabilities?.text?.base_url).toBe("https://tenant.example.com/v1");
-		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
-	});
-
-	test("an ALIAS slug with no base_url IS seeded — its kind's catalog upstream routes it", async () => {
-		// `getModelPolicy` keys its module map by SLUG, so "my-groq" matches no
-		// static module and synthesis is the row's only route. Synthesis falls
-		// back to the upstream the row's KIND resolves to, so the row does route
-		// and must be seeded like any other: a text model is the predicate the
-		// org-default promotion uses, and an unseeded row would be passed over
-		// even though it works.
-		const res = await createProvider({
-			slug: "my-groq",
-			kind: "groq",
-			apiKey: "synthetic-key",
-		});
-		expect(res.status).toBe(201);
-
-		const capabilities = (await readCapabilities("my-groq")) as {
-			text?: { model?: string; base_url?: string };
-		};
-		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
-		// Seeding must NOT write the catalog URL onto the row — the row stays
-		// "no custom upstream" so resolveUrlInvariant keeps answering
-		// `org-credential` rather than the tenant-URL `org-only` path.
-		expect(capabilities?.text?.base_url).toBeUndefined();
-	});
-
-	test("an OAuth kind is NOT seeded and does NOT become the org default", async () => {
-		// The trap this pins: providers.json gives `claude` BOTH an
-		// `upstreamBaseUrl` and `sdkCompat: "anthropic"`, so a seeding predicate
-		// that trusts providers.json says "this routes". It does not — claude
-		// registers as an OAuth module, not an ApiKeyProviderModule, so
-		// `buildProviderCatalog()` reports baseUrl "" and synthesis refuses it.
-		//
-		// Seeding it anyway would be the worst outcome available: a text model is
-		// what `promoteOldestRunnableProvider` keys on, so the unroutable row
-		// becomes the ORG DEFAULT and breaks every allow-all agent in the org.
-		// The predicate therefore asks the same question routing asks.
+	test("a provider created without a text model gets none and is not the org default", async () => {
+		// No repo default exists to seed: the text model is the user's choice,
+		// and `promoteOldestRunnableProvider` keys on it, so a model-less row
+		// must not become the org default.
 		const res = await createProvider({
 			slug: "my-claude",
 			kind: "claude",
@@ -463,10 +464,7 @@ describe("POST /inference-providers seeds a routable text model", () => {
 		expect(rows[0]?.is_default).toBe(false);
 	});
 
-	test("a kind absent from the catalog is still NOT seeded — nothing to route to", async () => {
-		// The remaining unroutable shape: no static module answers to the slug,
-		// the row names no upstream, and the kind has none to fall back to.
-		// Seeding it would promote an unroutable row to org default.
+	test("a kind absent from the catalog is created without a model and is not the org default", async () => {
 		const res = await createProvider({
 			slug: "my-mystery",
 			kind: "some-unlisted-endpoint",
@@ -486,34 +484,5 @@ describe("POST /inference-providers seeds a routable text model", () => {
       WHERE organization_id = ${ORG} AND slug = 'my-mystery' AND deleted_at IS NULL
     `) as Array<{ is_default: boolean }>;
 		expect(rows[0]?.is_default).toBe(false);
-	});
-
-	test("an alias slug WITH a base_url is seeded — synthesis can route it", async () => {
-		const res = await createProvider({
-			slug: "my-groq-2",
-			kind: "groq",
-			apiKey: "synthetic-key",
-			capabilities: { text: { base_url: "https://tenant.example.com/v1" } },
-		});
-		expect(res.status).toBe(201);
-
-		const capabilities = (await readCapabilities("my-groq-2")) as {
-			text?: { model?: string };
-		};
-		expect(capabilities?.text?.model).toBe("llama-3.3-70b-versatile");
-	});
-
-	test("an unknown kind with no model is still created (no catalog default to seed)", async () => {
-		const res = await createProvider({
-			slug: "custom-thing",
-			kind: "some-unlisted-endpoint",
-			apiKey: "sk-custom",
-		});
-		expect(res.status).toBe(201);
-
-		const capabilities = (await readCapabilities("custom-thing")) as {
-			text?: { model?: string };
-		};
-		expect(capabilities?.text?.model).toBeUndefined();
 	});
 });

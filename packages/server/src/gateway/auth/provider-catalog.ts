@@ -93,15 +93,9 @@ export interface ProviderCatalogEntry {
   sdkCompat: string | null;
   /** Upstream base URL pre-fill ("" when the module doesn't expose one). */
   baseUrl: string;
-  defaultModel: string | null;
   modelsEndpoint: string | null;
   /** True when this deployment has a process-level credential for the provider. */
   systemAvailable: boolean;
-  /**
-   * Static fallback model IDs (from providers.json), used by the model picker
-   * when a provider has no live `modelsEndpoint` or the live fetch is empty.
-   */
-  models: string[];
   apiKeyPlaceholder: string;
   apiKeyInstructions: string;
   /** Modalities served; drives which per-modality overrides the UI offers. */
@@ -115,7 +109,7 @@ export interface ProviderCatalogEntry {
  * appear everywhere, carrying their auth metadata.
  *
  * `configs` (the flattened providers.json map, keyed by providerId) enriches
- * the config-driven entries with sdkCompat/defaultModel/modelsEndpoint/
+ * the config-driven entries with sdkCompat/modelsEndpoint/
  * modalities. It's optional: callers without a registry handle (agent-config,
  * which only needs the auth fields) may omit it — those entries then fall back
  * to the module's own metadata and default to text-only.
@@ -137,7 +131,6 @@ export function buildProviderCatalog(
 
       const apiKeyModule = module instanceof ApiKeyProviderModule ? module : null;
       const sdkCompat = module.sdkCompat ?? config?.sdkCompat ?? null;
-      const defaultModel = config?.defaultModel ?? apiKeyModule?.defaultModel ?? null;
       const upstream = apiKeyModule?.getUpstreamConfig();
       const baseUrl = upstream?.upstreamBaseUrl ?? config?.upstreamBaseUrl ?? "";
 
@@ -149,10 +142,8 @@ export function buildProviderCatalog(
         supportedAuthTypes,
         sdkCompat,
         baseUrl,
-        defaultModel,
         modelsEndpoint: config?.modelsEndpoint ?? null,
         systemAvailable: module.hasSystemKey?.() ?? false,
-        models: config?.models ?? module.catalogModels ?? [],
         apiKeyPlaceholder:
           config?.apiKeyPlaceholder ?? module.apiKeyPlaceholder ?? "",
         apiKeyInstructions:
@@ -307,7 +298,6 @@ export class ProviderCatalogService {
       sdkCompat,
       apiKeyHeader: SDK_COMPAT_PROTOCOLS[sdkCompat].apiKeyHeader,
       upstreamBaseUrl: textUpstream,
-      defaultModel: row.capabilities.text?.model,
       envVarName: orgProviderKeyEnvVarName(row.slug),
       providerDisplayName: row.displayName || row.slug,
       providerIconUrl: "",
@@ -573,8 +563,8 @@ export class ProviderCatalogService {
     }
     // A Lobu model ref is "<provider-slug>/<model>", and OpenRouter-style refs
     // keep their own slug first ("openrouter/openai/gpt-4o"), so the leading
-    // segment is the provider — the same prefix `findProviderForModel` falls
-    // back to.
+    // segment is the provider — the same prefix `findProviderForModel` routes
+    // by.
     const isHealthy = (ref: string): boolean => {
       const slash = ref.indexOf("/");
       if (slash <= 0) return true;
@@ -592,7 +582,9 @@ export class ProviderCatalogService {
   }
 
   /**
-   * Find the provider module whose model options include the given model string.
+   * Find the provider module a stored `<providerId>/<model>` ref names. The
+   * leading segment is the provider; provider-native ids may carry further
+   * slashes ("openrouter/openai/gpt-4o"), which stay part of the model.
    */
   async findProviderForModel(
     model: string,
@@ -602,30 +594,11 @@ export class ProviderCatalogService {
     // credentialed provider by slug-prefix (that would route the sentinel as if
     // real, widening the restriction). Return undefined so the run fails closed.
     if (isUnresolvedModelRef(model)) return undefined;
-    const candidates = providers || getModelProviderModules();
-    for (const provider of candidates) {
-      if (!provider.getModelOptions) continue;
-      const options = await provider.getModelOptions("", "");
-      if (options.some((opt) => opt.value === model)) {
-        return provider;
-      }
-    }
-    // Fallback: a "<providerId>/<model>" ref names its provider directly, so
-    // match by the leading segment even when the provider's option list didn't
-    // contain an exact value. This is essential for providers whose models are
-    // fetched live and may be empty in this resolution context (e.g. Claude,
-    // whose `getModelOptions` lists BARE ids like "claude-opus-4-8" while the
-    // stored model is prefixed "claude/claude-opus-4-8"). Without it, a
-    // claude/… model fails to match and falls through to the first credentialed
-    // provider, mis-routing the request to the wrong upstream.
     const slashIndex = model.indexOf("/");
-    if (slashIndex > 0) {
-      const prefix = model.slice(0, slashIndex);
-      const byProviderId = candidates.find((p) => p.providerId === prefix);
-      if (byProviderId) {
-        return byProviderId;
-      }
-    }
-    return undefined;
+    if (slashIndex <= 0) return undefined;
+    const prefix = model.slice(0, slashIndex);
+    return (providers || getModelProviderModules()).find(
+      (p) => p.providerId === prefix
+    );
   }
 }

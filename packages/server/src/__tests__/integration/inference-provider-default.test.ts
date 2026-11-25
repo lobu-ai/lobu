@@ -51,6 +51,17 @@ async function create(
   return result;
 }
 
+/**
+ * Sign a provider in with OAuth, then give it a text model the way a user
+ * would — sign-in itself never seeds one.
+ */
+async function signInWithModel(organizationId: string, slug: string) {
+  await ensureOAuthInferenceProvider({ organizationId, slug, kind: slug });
+  await updateInferenceProviderCapabilities(organizationId, slug, 'text', {
+    model: 'synthetic-model',
+  });
+}
+
 async function defaultSlug(organizationId: string): Promise<string | null> {
   const rows = (await getDb()`
     SELECT slug FROM inference_providers
@@ -318,12 +329,7 @@ describe('inference provider org default', () => {
    */
   it('(j) an OAuth provider is NOT auto-promoted to org default', async () => {
     const org = await newOrg();
-    await ensureOAuthInferenceProvider({
-      organizationId: org.id,
-      slug: 'claude',
-      kind: 'claude',
-      defaultModel: 'claude-sonnet-5',
-    });
+    await signInWithModel(org.id, 'claude');
 
     expect(await defaultSlug(org.id)).toBeNull();
     expect(await getOrgDefaultModel(org.id)).toBeNull();
@@ -332,12 +338,7 @@ describe('inference provider org default', () => {
   it('(j2) an API-key provider is promoted over an older OAuth row', async () => {
     const org = await newOrg();
     // OAuth first, so "oldest wins" alone would pick it.
-    await ensureOAuthInferenceProvider({
-      organizationId: org.id,
-      slug: 'claude',
-      kind: 'claude',
-      defaultModel: 'claude-sonnet-5',
-    });
+    await signInWithModel(org.id, 'claude');
     await create(org.id, 'openai', 'gpt-4o-mini');
 
     expect(await defaultSlug(org.id)).toBe('openai');
@@ -355,12 +356,7 @@ describe('inference provider org default', () => {
   it('(j3) an OAuth provider is rejected as an EXPLICIT org default', async () => {
     const org = await newOrg();
     await create(org.id, 'openai', 'gpt-4o-mini');
-    await ensureOAuthInferenceProvider({
-      organizationId: org.id,
-      slug: 'claude',
-      kind: 'claude',
-      defaultModel: 'claude-sonnet-5',
-    });
+    await signInWithModel(org.id, 'claude');
 
     // A DISTINCT reason from "no text model" — claude HAS one; the problem is
     // that its credential belongs to a single user. The route turns each into
@@ -376,12 +372,7 @@ describe('inference provider org default', () => {
   it('(j4) a LEGACY oauth default is demoted and replaced on read', async () => {
     const org = await newOrg();
     await create(org.id, 'openai', 'gpt-4o-mini');
-    await ensureOAuthInferenceProvider({
-      organizationId: org.id,
-      slug: 'claude',
-      kind: 'claude',
-      defaultModel: 'claude-sonnet-5',
-    });
+    await signInWithModel(org.id, 'claude');
     // Simulate a row written before the oauth rule existed.
     await getDb()`
       UPDATE inference_providers SET is_default = (slug = 'claude')
@@ -408,7 +399,6 @@ describe('inference provider org default', () => {
       organizationId: org.id,
       slug: 'zed',
       kind: 'zed',
-      defaultModel: 'zed-model',
     });
 
     expect(await defaultSlug(org.id)).toBe('openai');
@@ -426,7 +416,6 @@ describe('inference provider org default', () => {
       organizationId: org.id,
       slug: 'zed',
       kind: 'zed',
-      defaultModel: 'zed-model',
     });
 
     expect(await defaultSlug(org.id)).toBeNull();
@@ -443,7 +432,6 @@ describe('inference provider org default', () => {
       organizationId: org.id,
       slug: 'zed',
       kind: 'zed',
-      defaultModel: 'zed-model',
     });
     expect(await defaultSlug(org.id)).toBe('openai');
 
@@ -470,7 +458,6 @@ describe('inference provider org default', () => {
       organizationId: org.id,
       slug: 'zed',
       kind: 'zed',
-      defaultModel: 'zed-model',
     });
 
     expect(await defaultSlug(org.id)).toBe('openai');
@@ -551,18 +538,13 @@ describe('inference provider org default', () => {
 
     it('(p) an OAuth-backed row has no API key, so it never resolves a target', async () => {
       const org = await newOrg();
-      await ensureOAuthInferenceProvider({
-        organizationId: org.id,
-        slug: 'claude',
-        kind: 'claude',
-        defaultModel: 'claude-sonnet-5',
-      });
+      await signInWithModel(org.id, 'claude');
 
       // Even asked for BY NAME, an oauth:// ref joins to no vault secret, so the
       // gateway transport declines rather than sending a keyless request.
       // Claude also uses the non-OpenAI `anthropic` protocol.
       expect(
-        await resolveCompletionTarget(org.id, 'claude/claude-sonnet-5'),
+        await resolveCompletionTarget(org.id, 'claude/synthetic-model'),
       ).toBeNull();
     });
 

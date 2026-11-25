@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { AgentConfigStore, AgentSettings } from "@lobu/core";
+import {
+  type AgentConfigStore,
+  type AgentSettings,
+  type ModuleInterface,
+  moduleRegistry,
+} from "@lobu/core";
 import { Hono } from "hono";
 import { orgContext } from "../../lobu/stores/org-context.js";
+import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
+import { ClaudeOAuthModule } from "../auth/claude/oauth-module.js";
+import { __resetModelsDevCacheForTests } from "../auth/models-dev.js";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { UserAgentsStore } from "../auth/user-agents-store.js";
 import type { GrantStore } from "../permissions/grant-store.js";
@@ -166,5 +174,88 @@ describe("agent config tenant scope", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual([]);
     expect(grantReads).toEqual([]);
+  });
+
+  test("lists every provider's live models as <providerId>/<model id>", async () => {
+    const modules = (
+      moduleRegistry as unknown as { modules: Map<string, ModuleInterface> }
+    ).modules;
+    const savedModules = new Map(modules);
+    const encode = (value: unknown) =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+    const credentials: Record<string, string> = {
+      claude: "synthetic-anthropic-key",
+      chatgpt: `${encode({ alg: "none" })}.${encode({
+        "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" },
+      })}.signature`,
+    };
+    const profiles = {
+      getBestProfile: async (_agentId: string, provider: string) =>
+        credentials[provider]
+          ? {
+              provider,
+              credential: credentials[provider],
+              authType: provider === "claude" ? "api-key" : "oauth",
+            }
+          : null,
+      ensureFreshCredential: async (profile: { credential: string }) =>
+        profile.credential,
+    };
+    moduleRegistry.register(
+      new ClaudeOAuthModule(profiles as never) as unknown as ModuleInterface,
+    );
+    moduleRegistry.register(
+      new ChatGPTOAuthModule(profiles as never) as unknown as ModuleInterface,
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === "models.dev") return Response.json({});
+      if (url.hostname === "api.anthropic.com") {
+        return Response.json({
+          data: [{ id: "synthetic-claude-1", display_name: "Synthetic Claude" }],
+        });
+      }
+      if (url.hostname === "chatgpt.com") {
+        return Response.json({
+          models: [{ slug: "synthetic-codex-1" }],
+        });
+      }
+      return new Response("unexpected upstream", { status: 500 });
+    }) as typeof fetch;
+    __resetModelsDevCacheForTests();
+    setAuthProvider(() => ({
+      userId: "owner-b",
+      platform: "slack",
+      agentId: AGENT_ID,
+      exp: Date.now() + 60_000,
+    }));
+    try {
+      const response = await createApp([], [], {
+        declaredSettings: { models: [], updatedAt: Date.now() },
+      }).request(`/api/v1/agents/${AGENT_ID}/config`);
+
+      expect(response.status).toBe(200);
+      const listed = (await response.json()).providers.models as Record<
+        string,
+        Array<{ value: string; label: string }>
+      >;
+      expect(listed.chatgpt).toEqual([
+        { value: "chatgpt/synthetic-codex-1", label: "synthetic-codex-1" },
+      ]);
+      expect(listed.claude).toEqual([
+        { value: "claude/synthetic-claude-1", label: "Synthetic Claude" },
+      ]);
+      for (const [providerId, options] of Object.entries(listed)) {
+        for (const option of options) {
+          expect(option.value.startsWith(`${providerId}/`)).toBe(true);
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      (
+        moduleRegistry as unknown as { modules: Map<string, ModuleInterface> }
+      ).modules = savedModules;
+    }
   });
 });

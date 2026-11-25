@@ -2,7 +2,8 @@
  * Live provider smoke test — opt-in, credential-gated upstream validation.
  *
  * Unlike the deterministic protocol E2E, this suite answers the time-sensitive
- * question: does the configured upstream, credential, and default model work
+ * question: does the configured upstream, credential, and a model from the
+ * provider's own live listing (filtered by models.dev, as production does) work
  * today? It uses pi-ai's production adapters and consumes their real streaming
  * responses, so Anthropic Messages, OpenAI Responses, ChatGPT Codex Responses,
  * and OpenAI-compatible Chat Completions are serialized and parsed exactly as
@@ -18,6 +19,13 @@
  */
 
 import { ApiKeyProviderModule } from "../../gateway/auth/api-key-provider-module.js";
+import { ChatGPTOAuthModule } from "../../gateway/auth/chatgpt/chatgpt-oauth-module.js";
+import { ClaudeOAuthModule } from "../../gateway/auth/claude/oauth-module.js";
+import {
+	filterModelsByModelsDev,
+	loadModelsDevProvider,
+} from "../../gateway/auth/models-dev.js";
+import type { ModelProviderModule } from "../../gateway/modules/module-system.js";
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -43,8 +51,8 @@ interface ProviderEntry {
 	envVarName: string;
 	upstreamBaseUrl: string;
 	sdkCompat?: SdkCompat;
-	defaultModel?: string;
 	modelsEndpoint?: string;
+	modelsDevId?: string;
 }
 
 interface Credential {
@@ -66,10 +74,6 @@ const requiredIds = new Set(
 		.map((id) => id.trim())
 		.filter(Boolean),
 );
-
-const FALLBACK_MODELS: Record<string, string> = {
-	chatgpt: "gpt-5.1-codex-max",
-};
 
 const TIMEOUT_MS = 60_000;
 const LIVE_ATTEMPTS = 3;
@@ -120,22 +124,22 @@ function resolveCredential(
 	return direct ? { value: direct, kind: "api-key" } : undefined;
 }
 
-async function fetchJson(
-	url: string,
-	init: RequestInit,
-): Promise<{ status: number; body: unknown }> {
-	const response = await fetch(url, {
-		...init,
-		signal: AbortSignal.timeout(TIMEOUT_MS),
+/** The production listing path: each provider's own module, no hand-rolled fetch. */
+function listingModule(id: string, provider: ProviderEntry): ModelProviderModule {
+	if (id === "claude") return new ClaudeOAuthModule({} as never);
+	if (id === "chatgpt") return new ChatGPTOAuthModule({} as never);
+	return new ApiKeyProviderModule({
+		providerId: id,
+		providerDisplayName: provider.displayName,
+		providerIconUrl: "",
+		envVarName: provider.envVarName ?? "",
+		upstreamBaseUrl: provider.upstreamBaseUrl,
+		modelsEndpoint: provider.modelsEndpoint,
+		sdkCompat: provider.sdkCompat,
+		apiKeyInstructions: "",
+		apiKeyPlaceholder: "",
+		authProfilesManager: {} as never,
 	});
-	const text = await response.text();
-	let body: unknown = text;
-	try {
-		body = JSON.parse(text);
-	} catch {
-		// Keep raw text for the assertion message.
-	}
-	return { status: response.status, body };
 }
 
 async function listModels(
@@ -143,57 +147,16 @@ async function listModels(
 	provider: ProviderEntry,
 	credential: Credential,
 ): Promise<string[]> {
-	if (id === "gemini") {
-		const module = new ApiKeyProviderModule({
-			providerId: id,
-			providerDisplayName: provider.displayName,
-			providerIconUrl: "",
-			envVarName: provider.envVarName ?? "",
-			upstreamBaseUrl: provider.upstreamBaseUrl,
-			apiKeyInstructions: "",
-			apiKeyPlaceholder: "",
-			authProfilesManager: {} as never,
-		});
-		const models = await module.discoverModels(credential.value);
-		return (models ?? []).map(({ value }) => value.slice(id.length + 1));
-	}
-
-	if (id === "claude") {
-		const headers: Record<string, string> = {
-			Accept: "application/json",
-			"anthropic-version": "2023-06-01",
-		};
-		if (credential.kind === "oauth") {
-			headers.Authorization = `Bearer ${credential.value}`;
-		} else {
-			headers["x-api-key"] = credential.value;
-		}
-		const { status, body } = await fetchJson(
-			`${provider.upstreamBaseUrl.replace(/\/$/, "")}/v1/models`,
-			{ method: "GET", headers },
-		);
-		expect(
-			status,
-			`claude /v1/models returned ${status}: ${JSON.stringify(body)}`,
-		).toBe(200);
-		return ((body as { data?: Array<{ id?: string }> }).data ?? [])
-			.map((model) => model.id?.trim())
-			.filter((id): id is string => !!id);
-	}
-
-	if (!provider.modelsEndpoint) return [];
-	const url = `${provider.upstreamBaseUrl.replace(/\/$/, "")}${provider.modelsEndpoint}`;
-	const { status, body } = await fetchJson(url, {
-		method: "GET",
-		headers: { Authorization: `Bearer ${credential.value}` },
-	});
-	expect(
-		status,
-		`${id} models endpoint returned ${status}: ${JSON.stringify(body)}`,
-	).toBe(200);
-	return ((body as { data?: Array<{ id?: string }> }).data ?? [])
-		.map((model) => model.id?.trim())
-		.filter((modelId): modelId is string => !!modelId);
+	const [models, modelsDev] = await Promise.all([
+		listingModule(id, provider).listModels?.(
+			credential,
+			AbortSignal.timeout(TIMEOUT_MS),
+		),
+		loadModelsDevProvider(provider.modelsDevId),
+	]);
+	return filterModelsByModelsDev(models ?? [], modelsDev).map(
+		(model) => model.id,
+	);
 }
 
 function buildLiveModel(
@@ -365,11 +328,11 @@ if (activeIds.length === 0) {
 for (const { id, provider } of flattened) {
 	const credential = resolveCredential(id, provider.envVarName);
 	const required = requiredIds.has(id);
-	const configuredModel = provider.defaultModel ?? FALLBACK_MODELS[id];
 	let discovered: Promise<string[]> | undefined;
 	const discover = () => (discovered ??= listModels(id, provider, credential!));
-	const liveModel = async () => configuredModel ?? (canListModels ? (await discover())[0] : undefined);
-	const canListModels = id === "claude" || id === "gemini" || !!provider.modelsEndpoint;
+	const canListModels =
+		id === "claude" || id === "chatgpt" || id === "gemini" || !!provider.modelsEndpoint;
+	const liveModel = async () => (canListModels ? (await discover())[0] : undefined);
 
 	describe.skipIf(!credential)(`live: ${id} (${provider.displayName})`, () => {
 		test.skipIf(!canListModels)("lists models with production auth", async () => {
@@ -381,7 +344,7 @@ for (const { id, provider } of flattened) {
 
 		test("answers a streamed production-adapter turn", async () => {
 			const modelId = await liveModel();
-			expect(modelId, `${id} has no configured or discovered live model`).toBeDefined();
+			expect(modelId, `${id} has no discovered live model`).toBeDefined();
 			const response = await completeWithRetry({
 				id,
 				provider,
@@ -404,7 +367,7 @@ for (const { id, provider } of flattened) {
 
 		test("returns a parsed streamed tool call", async () => {
 			const modelId = await liveModel();
-			expect(modelId, `${id} has no configured or discovered live model`).toBeDefined();
+			expect(modelId, `${id} has no discovered live model`).toBeDefined();
 			const response = await completeWithRetry({
 				id,
 				provider,

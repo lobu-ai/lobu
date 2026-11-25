@@ -63,7 +63,7 @@ Lobu is provider-agnostic. The bundled `config/providers.json` ships 17 provider
 - OpenAI-compatible: Groq, Together AI, Fireworks, OpenRouter, Cerebras, NVIDIA, xAI, DeepSeek, Mistral, Cohere, Perplexity, Gemini
 - Specialized: OpenCode Zen
 
-Add API keys via the admin UI (Settings → Providers) at runtime. No env-var required. Per-agent model selection picks among configured providers.
+Add API keys via the admin UI (Settings → Providers) at runtime. No env-var required. Per-agent model selection picks among configured providers; each provider's model list comes live from the provider itself, keeping only the models models.dev lists as current, text-generating and tool-calling (any other model id can still be typed). No model id ships in the registry: set `AGENT_DEFAULT_MODEL=<provider>/<model id>` to give agents served by environment keys a default.
 
 **Agent runtime**: Lobu's worker runs its native Pi-based agent loop per task. An Automation can still select a CLI agent kind where an Automation explicitly drives one. Runtime choice is independent from the LLM provider serving the agent.
 

@@ -6,13 +6,6 @@ import {
   type FoundationModelSummary,
 } from "@aws-sdk/client-bedrock";
 import { getModels, type Model } from "@mariozechner/pi-ai";
-import {
-	createLogger,
-	getErrorMessage,
-} from "@lobu/core";
-
-const logger = createLogger("bedrock-model-catalog");
-
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface BedrockCatalogModel {
@@ -86,15 +79,6 @@ function normalizeFoundationModel(
   };
 }
 
-function normalizeRegistryModel(model: Model<any>): BedrockCatalogModel {
-  return {
-    id: model.id,
-    label: model.name || model.id,
-    inputModalities: model.input.map((input) => input.toUpperCase()),
-    outputModalities: ["TEXT"],
-  };
-}
-
 function sortModels(a: BedrockCatalogModel, b: BedrockCatalogModel): number {
   return a.label.localeCompare(b.label) || a.id.localeCompare(b.id);
 }
@@ -156,12 +140,6 @@ async function loadBedrockModelsFromAws(): Promise<BedrockCatalogModel[]> {
     .sort(sortModels);
 }
 
-function loadFallbackRegistryModels(): BedrockCatalogModel[] {
-  return getModels("amazon-bedrock")
-    .map(normalizeRegistryModel)
-    .sort(sortModels);
-}
-
 export class BedrockModelCatalog {
   private readonly cacheTtlMs: number;
   private readonly loadModelsImpl: () => Promise<BedrockCatalogModel[]>;
@@ -180,27 +158,14 @@ export class BedrockModelCatalog {
       return this.cachedModels.models;
     }
 
-    try {
-      const models = await this.loadModelsImpl();
-      this.cachedModels = {
-        expiresAt: now + this.cacheTtlMs,
-        models,
-      };
-      return models;
-    } catch (error) {
-      logger.warn(
-        {
-          error: getErrorMessage(error),
-        },
-        "Falling back to static Bedrock model registry"
-      );
-      const fallback = loadFallbackRegistryModels();
-      this.cachedModels = {
-        expiresAt: now + this.cacheTtlMs,
-        models: fallback,
-      };
-      return fallback;
-    }
+    // The live AWS catalog is the only source: a failure propagates so callers
+    // report it instead of offering a stale bundled list.
+    const models = await this.loadModelsImpl();
+    this.cachedModels = {
+      expiresAt: now + this.cacheTtlMs,
+      models,
+    };
+    return models;
   }
 
   async listModelOptions(): Promise<Array<{ id: string; label: string }>> {

@@ -45,7 +45,6 @@ interface CatalogEntry {
   displayName: string;
   authType: string;
   supportedAuthTypes?: string[];
-  defaultModel: string | null;
   modalities?: string[];
   systemAvailable?: boolean;
 }
@@ -122,9 +121,6 @@ export async function providersCatalogCommand(
 
   console.log(chalk.bold("\n  Available provider kinds"));
   for (const entry of catalog) {
-    const model = entry.defaultModel
-      ? chalk.dim(`  default: ${entry.defaultModel}`)
-      : "";
     // `supportedAuthTypes`, not `authType`: kinds like Claude list OAuth as
     // primary but also take a key, and `create --key` works for them. Sign-in
     // itself stays web-console-only (the OAuth routes reject PATs).
@@ -137,7 +133,7 @@ export async function providersCatalogCommand(
         : chalk.dim("  api key")
       : chalk.yellow("  sign-in via web console");
     console.log(
-      `  ${chalk.bold(entry.slug)} ${chalk.dim(entry.displayName)}${auth}${model}`
+      `  ${chalk.bold(entry.slug)} ${chalk.dim(entry.displayName)}${auth}`
     );
   }
   console.log(

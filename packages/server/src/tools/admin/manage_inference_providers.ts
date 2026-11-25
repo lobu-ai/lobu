@@ -124,7 +124,6 @@ async function ensureVisibleOAuthProvidersForUser(ctx: ToolContext): Promise<voi
       slug: config.id,
       kind: config.id,
       displayName: config.name,
-      defaultModel: config.defaultModel,
       createdBy: user.id,
     });
   }
@@ -153,18 +152,11 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
   // Known catalog kinds must accept API keys AND speak a routable wire
   // protocol — a subscription kind can speak one and still have nothing an API
   // key may reach. Unknown kinds pass because custom endpoints are synthesized
-  // as OpenAI-compatible providers. Read the default from configs because the
-  // catalog contains only provider modules registered in this process.
-  let catalogDefaultModel: string | undefined;
-  // The upstream this `kind` already resolves to. An alias row (slug !== kind)
-  // with no base_url of its own is synthesized against it, so its presence is
-  // what decides whether such a row will route.
-  let catalogBaseUrl: string | undefined;
+  // as OpenAI-compatible providers.
   try {
     const registry = new ProviderRegistryService(resolveProviderRegistryPath());
     const configs = await registry.getProviderConfigs();
-    const catalog = buildProviderCatalog(configs);
-    const entry = catalog.find((e) => e.slug === kind);
+    const entry = buildProviderCatalog(configs).find((e) => e.slug === kind);
     if (
       entry &&
       (!entry.supportedAuthTypes.includes("api-key") ||
@@ -172,24 +164,6 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
     ) {
       throw new ToolUserError(`Provider '${kind}' can't be added with an API key — it signs in instead.`, 400);
     }
-    catalogDefaultModel = configs[kind]?.defaultModel ?? undefined;
-    // The EXACT expression `getModelPolicy` evaluates — argless
-    // `buildProviderCatalog()`, then the same auth-method and `sdkCompat`
-    // gates. These two must agree: a text model is what
-    // `promoteOldestRunnableProvider` keys on, so a row seeded as routable and
-    // then dropped at routing becomes the org DEFAULT and breaks every
-    // allow-all agent in the org.
-    //
-    // `configs[kind].upstreamBaseUrl` looks equivalent and is not. It gives
-    // `claude` a URL, but claude registers as an OAuth module rather than an
-    // ApiKeyProviderModule, so the catalog reports "" and synthesis refuses
-    // it — trusting providers.json would seed exactly that unroutable row.
-    const catalogEntry = buildProviderCatalog().find((e) => e.slug === kind);
-    catalogBaseUrl =
-      catalogEntry?.supportedAuthTypes.includes("api-key") &&
-      isSdkCompat(catalogEntry.sdkCompat)
-        ? catalogEntry.baseUrl || undefined
-        : undefined;
   } catch (err) {
     if (err instanceof ToolUserError) throw err;
     // Fail open on catalog-load errors: don't block creation on a metadata
@@ -200,54 +174,14 @@ async function create(body: InferenceProviderCreateInput, ctx: ToolContext) {
     );
   }
 
-  // Seed the curated model so each API caller need not duplicate catalog
-  // defaults — and so a row cannot be born unroutable.
-  //
-  // `resolveInferenceProviderConfig` selects `capabilities -> <modality>` and
-  // returns null when the block is absent, so `resolveUrlInvariant` answers
-  // `no-custom-upstream` and the row's own org key is NEVER read. With no
-  // deployment env key that resolves to no credential at all: the provider is
-  // dropped from routing and the model goes upstream with its slug prefix
-  // intact, surfacing as an opaque "400 invalid model ID".
-  //
-  // Merge into the caller's text block rather than replacing it — dropping a
-  // tenant `base_url` would silently re-point the org at the catalog URL.
-  //
-  // Seed ONLY a row that will actually route. A text model is also the
-  // predicate `promoteOldestRunnableProvider` uses to choose the org default,
-  // so seeding an unroutable row would promote it to default and break every
-  // allow-all agent in the org. `getModelPolicy` keys its module map by the
-  // row's SLUG, so the row resolves to a module only when one of:
-  //   - slug === kind    → the catalog's own static module answers to it,
-  //   - a text base_url  → `synthesizeOrgProviderModule` routes there, or
-  //   - the kind has a catalog upstream → synthesis falls back to it, which is
-  //     what makes an alias slug (slug=my-gemini, kind=gemini) routable.
-  // Only a kind the catalog does not know at all matches none of these; such a
-  // row is dropped by the policy and must not look configured.
-  const requestedCapabilities =
-    body.capabilities ?? {};
-  const hasTextModel = !!requestedCapabilities.text?.model?.trim();
-  const wouldRoute =
-    slug === kind ||
-    !!requestedCapabilities.text?.base_url?.trim() ||
-    !!catalogBaseUrl;
-  const capabilities =
-    hasTextModel || !catalogDefaultModel || !wouldRoute
-      ? requestedCapabilities
-      : {
-          ...requestedCapabilities,
-          text: {
-            ...requestedCapabilities.text,
-            model: catalogDefaultModel,
-          },
-        };
+  // No model is seeded: the text model is the caller's choice from the
+  // provider's live model list. A row without one does not route and is never
+  // promoted to the org default until `capabilities.text.model` is set.
+  const capabilities = body.capabilities ?? {};
   if (!capabilities.text?.model) {
-    // Nothing seeded: unknown kind, no catalog default, or a kind with no
-    // upstream to fall back to. Say so at creation — otherwise the row's only
-    // symptom is a far-away 400 naming a different provider.
     logger.warn(
-      { slug, kind, wouldRoute },
-      "[inference-providers create] created with no text model — this provider will not route until `capabilities.text.model` is set (a row whose `kind` is not in the catalog also needs `capabilities.text.base_url`)"
+      { slug, kind },
+      "[inference-providers create] created with no text model — this provider will not route until `capabilities.text.model` is set"
     );
   }
 

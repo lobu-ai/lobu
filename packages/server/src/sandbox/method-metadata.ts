@@ -1067,7 +1067,7 @@ export default async (_ctx, client) => {
 	},
 	"inferenceProviders.create": {
 		summary:
-			"Create an org-shared API-key inference provider. Uses catalog model defaults; the first runnable provider becomes the org default. OAuth sign-in stays on the interactive settings page.",
+			"Create an org-shared API-key inference provider. No model is seeded: pass `capabilities.text.model` (an id from the provider's live model list) to make it runnable; the first runnable provider becomes the org default. OAuth sign-in stays on the interactive settings page.",
 		access: "admin",
 		signature:
 			"inferenceProviders.create(input: { slug: string; kind: string; apiKey: string; displayName?: string; capabilities?: InferenceCapabilities }): Promise<{ provider: InferenceProviderSummary & { isDefault: boolean } }>",

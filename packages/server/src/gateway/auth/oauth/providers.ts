@@ -19,7 +19,6 @@ export type OAuthGrantKind = ProviderOAuthGrantKind;
 export type OAuthProviderConfig = ProviderOAuthConfig & {
   id: string;
   name: string;
-  defaultModel?: string;
 };
 
 const logger = createLogger("oauth-provider-registry");
@@ -58,7 +57,6 @@ export function loadOAuthProvidersFromConfigs(
       ...oauth,
       id,
       name: entry.displayName || id,
-      defaultModel: entry.defaultModel,
     });
   }
   registry = next;

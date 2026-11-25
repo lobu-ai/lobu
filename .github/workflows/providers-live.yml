@@ -7,8 +7,7 @@ name: Live Providers
 #
 # Two tiers (both driven by `make test-providers-live`):
 #   - keyless: probes every protocol-correct completion/models route against
-#     the real API and checks each defaultModel against public catalogs. Runs
-#     with NO secrets, every time.
+#     the real API. Runs with NO secrets, every time.
 #   - keyed:   production-adapter streaming + tool-call round-trip. The required
 #     readiness tier fails closed when a credential is missing; extra provider
 #     secrets remain optional coverage. Each turn is retried, and a failure the

@@ -10,7 +10,6 @@
           "envVarName": "MOCK_API_KEY",
           "upstreamBaseUrl": "http://127.0.0.1:11434/v1",
           "sdkCompat": "openai",
-          "defaultModel": "mock-model",
           "modelsEndpoint": "/models"
         }
       ]

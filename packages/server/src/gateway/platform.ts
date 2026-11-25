@@ -11,7 +11,6 @@ import type { McpProxy } from "./auth/mcp/proxy.js";
 import type { ProviderOAuthStateStore } from "./auth/oauth/state-store.js";
 import type { ProviderCatalogService } from "./auth/provider-catalog.js";
 import type { AgentSettingsStore } from "./auth/settings/agent-settings-store.js";
-import type { ModelPreferenceStore } from "./auth/settings/model-preference-store.js";
 import type { UserAgentsStore } from "./auth/user-agents-store.js";
 import type { AutomationSubscriptionService } from "./channels/automation-subscription-service.js";
 import type { ArtifactStore } from "./files/artifact-store.js";
@@ -49,7 +48,6 @@ export interface CoreServices {
   getWorkerGateway(): WorkerGateway | undefined;
   getMcpProxy(): McpProxy | undefined;
   getMcpConfigService(): McpConfigService | undefined;
-  getModelPreferenceStore(): ModelPreferenceStore | undefined;
   getOAuthStateStore(): ProviderOAuthStateStore | undefined;
   getPublicGatewayUrl(): string;
   getArtifactStore(): ArtifactStore;

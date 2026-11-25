@@ -50,9 +50,6 @@ describe("OAuth registry from providers.json", () => {
     expect(ids).toContain("xai");
 
     expect(getOAuthProviderConfig("claude")?.grant).toBe("authorization-code");
-    expect(getOAuthProviderConfig("claude")?.defaultModel).toBe(
-      configs.claude?.defaultModel
-    );
     expect(getOAuthProviderConfig("chatgpt")?.grant).toBe("openai-device-auth");
     expect(getOAuthProviderConfig("xai")?.grant).toBe("device-code");
     expect(getOAuthProviderConfig("xai")?.deviceCodeUrl).toContain("auth.x.ai");

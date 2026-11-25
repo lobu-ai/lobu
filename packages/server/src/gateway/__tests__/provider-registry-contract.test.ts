@@ -63,7 +63,6 @@ function buildModule(
 		upstreamBaseUrl: provider.upstreamBaseUrl,
 		modelsEndpoint: provider.modelsEndpoint,
 		sdkCompat: provider.sdkCompat,
-		defaultModel: provider.defaultModel,
 		catalogVisible: provider.catalogVisible,
 		authProfilesManager: stubAuthProfiles,
 	});
@@ -72,21 +71,6 @@ function buildModule(
 describe("provider registry contract (config/providers.json)", () => {
 	test("registry parses and has providers", () => {
 		expect(flattened.length).toBeGreaterThan(0);
-	});
-
-	test("Qwen excludes qwen-turbo while preserving the other choices and default", () => {
-		const qwen = flattened.find(({ id }) => id === "qwen")?.provider;
-		expect(qwen).toBeDefined();
-		expect(qwen!.models).not.toContain("qwen-turbo");
-		expect(qwen!.models).toEqual([
-			"qwen3.8-max",
-			"qwen3.8-max-preview",
-			"qwen-max",
-			"qwen-plus",
-			"qwen2.5-coder-32b-instruct",
-			"qwen2.5-72b-instruct",
-		]);
-		expect(qwen!.defaultModel).toBe("qwen-max");
 	});
 
 	test("official OpenAI agent turns use Responses for reasoning with tools", () => {

@@ -27,7 +27,6 @@ describe("provider base-URL env key collision", () => {
       slug: "openai",
       upstreamBaseUrl: "https://api.openai.com/v1",
       sdkCompat: "openai",
-      defaultModel: "gpt-4o",
       // Module never touches the manager for base-URL mapping.
       authProfilesManager: {} as never,
     });
@@ -45,7 +44,6 @@ describe("provider base-URL env key collision", () => {
       slug: "groq",
       upstreamBaseUrl: "https://api.groq.com/openai/v1",
       sdkCompat: "openai",
-      defaultModel: "llama-3.3-70b-versatile",
       authProfilesManager: {} as never,
     });
 
