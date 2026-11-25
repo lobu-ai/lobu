@@ -2,17 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ClaudeOAuthModule } from "../oauth-module.js";
 
 /**
- * getModelOptions() powers the model picker. It must use the system env key
- * (ANTHROPIC_API_KEY) when the agent has no auth profile — otherwise an
- * env-configured Anthropic agent shows an empty picker and the operator can't
- * select a model (now required, since Lobu no longer silently picks a default).
+ * The model picker lists Claude models with the system env key when the agent
+ * has no auth profile — otherwise an env-configured Anthropic agent shows an
+ * empty picker and the operator can't select a model (required, since Lobu
+ * never picks a default). The env var decides how the key is presented.
  */
-describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
+describe("ClaudeOAuthModule model listing — env-key credential", () => {
   const ENV_KEYS = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "AGENT_DEFAULT_MODEL",
+    "ANTHROPIC_BASE_URL",
   ] as const;
   const saved: Record<string, string | undefined> = {};
   let originalFetch: typeof globalThis.fetch;
@@ -33,12 +33,23 @@ describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
   });
 
   function makeModule(): ClaudeOAuthModule {
-    // No per-agent profile — forces the system-env-key path. No pinned model.
+    // No per-agent profile — forces the system-env-key path.
     const authProfilesManager = { getBestProfile: async () => null } as never;
-    const modelPreferenceStore = {
-      getModelPreference: async () => null,
-    } as never;
-    return new ClaudeOAuthModule(authProfilesManager, modelPreferenceStore);
+    return new ClaudeOAuthModule(authProfilesManager);
+  }
+
+  async function listModels(): Promise<string[] | null> {
+    const module = makeModule();
+    const credential = await module.resolveModelListingCredential(
+      "agent-1",
+      { userId: "user-1" },
+      { includeSystemEnv: true }
+    );
+    const models = await module.listModels(
+      credential,
+      AbortSignal.timeout(5000)
+    );
+    return models ? models.map((model) => model.id) : null;
   }
 
   test("uses ANTHROPIC_API_KEY (x-api-key) and lists the live models", async () => {
@@ -60,12 +71,7 @@ describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
       );
     }) as typeof globalThis.fetch;
 
-    const options = await makeModule().getModelOptions("agent-1", "user-1");
-
-    expect(options.map((o) => o.value)).toEqual([
-      "claude-newest-1",
-      "claude-older-2",
-    ]);
+    expect(await listModels()).toEqual(["claude-newest-1", "claude-older-2"]);
     expect(sentApiKeyHeader).toBe("sk-ant-api03-test");
     expect(sentAuthHeader).toBeUndefined();
   });
@@ -84,23 +90,71 @@ describe("ClaudeOAuthModule.getModelOptions — env-key credential", () => {
       );
     }) as typeof globalThis.fetch;
 
-    const options = await makeModule().getModelOptions("agent-1", "user-1");
-
-    expect(options.map((o) => o.value)).toContain("claude-x");
+    expect(await listModels()).toEqual(["claude-x"]);
     expect(sentAuthHeader).toBe("Bearer sk-ant-oat-bearer");
     expect(sentApiKeyHeader).toBeUndefined();
   });
 
-  test("no credentials → empty picker (no silent model)", async () => {
+  test.each([
+    { kind: "api-key" as const, basePath: "" },
+    { kind: "api-key" as const, basePath: "/anthropic///" },
+    { kind: "oauth" as const, basePath: "" },
+    { kind: "oauth" as const, basePath: "/anthropic///" },
+  ])(
+    "lists models from the configured upstream ($kind, '$basePath')",
+    async ({ kind, basePath }) => {
+      const credential = { kind, value: "synthetic-proxy-only-credential" };
+      const expectedPath = basePath
+        ? "/anthropic/v1/models?limit=1000"
+        : "/v1/models?limit=1000";
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(request) {
+          const url = new URL(request.url);
+          const validAuth = kind === "oauth"
+            ? request.headers.get("authorization") === `Bearer ${credential.value}` &&
+              !request.headers.has("x-api-key")
+            : request.headers.get("x-api-key") === credential.value &&
+              !request.headers.has("authorization");
+          if (`${url.pathname}${url.search}` !== expectedPath || !validAuth) {
+            return new Response(null, { status: 401 });
+          }
+          return Response.json({ data: [{ id: "claude-proxy-model" }] });
+        },
+      });
+      try {
+        process.env.ANTHROPIC_BASE_URL = `${server.url.origin}${basePath}`;
+        // Block nonlocal requests if a regression targets the public API.
+        globalThis.fetch = ((input, init) => {
+          const url = new URL(
+            input instanceof Request ? input.url : String(input)
+          );
+          if (url.origin !== server.url.origin) {
+            throw new Error("Unexpected model listing destination");
+          }
+          return originalFetch(input, init);
+        }) as typeof globalThis.fetch;
+
+        const models = await makeModule().listModels(
+          credential,
+          AbortSignal.timeout(5000)
+        );
+        expect(models?.map((model) => model.id)).toEqual(["claude-proxy-model"]);
+      } finally {
+        await server.stop(true);
+      }
+    }
+  );
+
+  test("no credentials → nothing listed and no request (no silent model)", async () => {
     let fetched = false;
     globalThis.fetch = (async () => {
       fetched = true;
       return new Response("{}", { status: 200 });
     }) as typeof globalThis.fetch;
 
-    const options = await makeModule().getModelOptions("agent-1", "user-1");
-
-    expect(options).toEqual([]);
+    expect(await listModels()).toBeNull();
     expect(fetched).toBe(false);
   });
 });

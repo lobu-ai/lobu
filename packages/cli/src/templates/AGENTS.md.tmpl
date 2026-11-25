@@ -91,7 +91,8 @@ const agent = defineAgent({
   description: "<one sentence: what it does>",
   providers: [
     // init prewrites this from --provider; canonical ids include `claude`, `openai`.
-    { id: "claude", model: "claude-sonnet-4-20250514", key: secret("ANTHROPIC_API_KEY") },
+    // `model` is an id from the provider's own live model list.
+    { id: "claude", model: "<model-id>", key: secret("ANTHROPIC_API_KEY") },
   ],
   // network: { allowed: ["api.example.com"] }, // egress allowlist
 });

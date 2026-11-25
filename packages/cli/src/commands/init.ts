@@ -94,8 +94,8 @@ const SYNTHETIC_CLAUDE_PROVIDER: RegistryProvider = {
       displayName: "Claude (Anthropic)",
       envVarName: "ANTHROPIC_API_KEY",
       upstreamBaseUrl: "https://api.anthropic.com",
-      // No hardcoded default model — left unset so the agent runs in auto mode
-      // and the gateway resolves the provider's current model at runtime.
+      // No hardcoded default model: `init` asks for one, and a model left
+      // unset must be chosen before the agent runs.
       apiKeyInstructions:
         "Get your API key from https://console.anthropic.com/settings/keys",
     },
@@ -137,14 +137,13 @@ function printProviderList(): void {
   for (const p of providers) {
     const first = p.providers?.[0];
     const env = first?.envVarName ?? "";
-    const model = first?.defaultModel ? ` — ${first.defaultModel}` : "";
     const aliases = Object.entries(PROVIDER_ALIASES)
       .filter(([, target]) => target === p.id)
       .map(([alias]) => alias);
     const aliasSuffix =
       aliases.length > 0 ? chalk.dim(`  (alias: ${aliases.join(", ")})`) : "";
     console.log(
-      `  ${chalk.cyan(p.id.padEnd(idCol))}  ${chalk.dim(env)}${chalk.dim(model)}${aliasSuffix}`
+      `  ${chalk.cyan(p.id.padEnd(idCol))}  ${chalk.dim(env)}${aliasSuffix}`
     );
   }
   console.log(
@@ -500,7 +499,7 @@ export async function initCommand(
   const providerChoices = [
     { name: "Skip — I'll add a provider later", value: "" },
     ...providerSkills.map((s) => ({
-      name: `${s.providers![0]!.displayName}${s.providers![0]!.defaultModel ? ` (${s.providers![0]!.defaultModel})` : ""}`,
+      name: s.providers![0]!.displayName,
       value: s.id,
     })),
   ];
@@ -535,7 +534,6 @@ export async function initCommand(
     selectedProvider = getProviderByIdWithSynth(providerId);
     const p = selectedProvider?.providers?.[0];
     if (p) {
-      providerModel = p.defaultModel;
       if (options.providerKey) {
         providerApiKey = options.providerKey;
       } else if (process.env[p.envVarName]) {
@@ -547,16 +545,17 @@ export async function initCommand(
           mask: true,
         });
       }
-      if (p.modelsEndpoint && !providerModel && !useDefaults) {
-        providerModel = (
-          await input({
-            message: `${p.displayName} model ID:`,
-            validate: (value) =>
-              value.trim() && !value.trim().startsWith("models/")
-                ? true
-                : "Enter the provider's model ID without a models/ prefix",
-          })
-        ).trim();
+      if (!useDefaults) {
+        providerModel =
+          (
+            await input({
+              message: `${p.displayName} model ID (leave empty to choose later):`,
+              validate: (value) =>
+                !value.trim().startsWith("models/")
+                  ? true
+                  : "Enter the provider's model ID without a models/ prefix",
+            })
+          ).trim() || undefined;
       }
     }
   }
@@ -773,10 +772,10 @@ export async function initCommand(
     // Keep the potentially long install visible. Hiding installer output behind
     // the scaffold spinner makes a healthy first run look wedged on small hosts.
     spinner.succeed("Project files created");
-    if (selectedProvider?.providers?.[0]?.modelsEndpoint && !providerModel) {
+    if (selectedProvider && !providerModel) {
       console.log(
         chalk.yellow(
-          `Set the ${providerId} model ID in lobu.config.ts before running this agent.`
+          `No ${providerId} model chosen. Before running this agent, set \`model\` on its provider in lobu.config.ts, or pick one from the provider's live model list in the Lobu web console.`
         )
       );
     }

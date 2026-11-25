@@ -102,17 +102,15 @@ export interface ProviderConfigEntry {
    * truth for the UI + STT eligibility.
    */
   modalities?: ("text" | "image" | "stt" | "tts")[];
-  /** Default model ID when none is configured */
-  defaultModel?: string;
   /** Relative path to fetch model list (e.g. "/v1/models") */
   modelsEndpoint?: string;
   /**
-   * Static fallback model IDs for the model picker, used when a provider has no
-   * live `modelsEndpoint` (e.g. OAuth providers like Anthropic) or the live
-   * fetch is empty/fails. Curated in `config/providers.json`; the live list
-   * takes precedence when available, so this only needs to be roughly current.
+   * This provider's id in the models.dev catalog (e.g. "google" for gemini).
+   * The live model listing keeps only models that models.dev lists under this
+   * id as current, text-generating and tool-calling. Omitted ⇒ the listing is
+   * unfiltered.
    */
-  models?: string[];
+  modelsDevId?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
   /**

@@ -6,7 +6,16 @@ const ORG = "org-credential-test";
 const USER = "user-credential-test";
 const AGENT = "agent-credential-test";
 const ACCOUNT = "acct_credential_test";
-const STORED_CREDENTIAL = "synthetic-stored-oauth-credential";
+// An unsigned synthetic JWT carrying the account claim the Codex catalog needs.
+const STORED_CREDENTIAL = [
+  "e30",
+  Buffer.from(
+    JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: ACCOUNT },
+    })
+  ).toString("base64url"),
+  "synthetic",
+].join(".");
 
 function makeManager() {
   return new AuthProfilesManager({
@@ -42,15 +51,25 @@ describe("ChatGPT subscription credentials", () => {
     const module = new ChatGPTOAuthModule(makeManager());
     const originalFetch = globalThis.fetch;
     let authorization: string | null = null;
+    let account: string | null = null;
     globalThis.fetch = (async (_url, init) => {
-      authorization = new Headers(init?.headers).get("Authorization");
-      return Response.json({ models: [{ slug: "test-model", title: "Test model" }] });
+      const headers = new Headers(init?.headers);
+      authorization = headers.get("Authorization");
+      account = headers.get("ChatGPT-Account-Id");
+      return Response.json({ models: [{ slug: "test-model" }] });
     }) as typeof fetch;
     try {
-      expect(await module.getModelOptions(AGENT, USER)).toEqual([
-        { value: "openai-codex/test-model", label: "Test model" },
-      ]);
+      const credential = await module.resolveModelListingCredential(
+        AGENT,
+        { userId: USER },
+        { includeSystemEnv: false }
+      );
+      expect(credential?.kind).toBe("oauth");
+      expect(
+        await module.listModels(credential, AbortSignal.timeout(5000))
+      ).toEqual([{ id: "test-model", label: "test-model" }]);
       expect(authorization).toBe(`Bearer ${STORED_CREDENTIAL}`);
+      expect(account).toBe(ACCOUNT);
     } finally {
       globalThis.fetch = originalFetch;
     }

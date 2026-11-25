@@ -1,36 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { type ModuleInterface, moduleRegistry } from "@lobu/core";
-import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
+import { describe, expect, test } from "bun:test";
 import {
   buildRegistryMap,
   DeclaredAgentRegistry,
   entryFromAgentConfig,
 } from "../services/declared-agent-registry.js";
-
-function clearRegistry(): void {
-  (
-    moduleRegistry as unknown as { modules: Map<string, ModuleInterface> }
-  ).modules = new Map();
-}
-
-/** Register a real config-driven module so its catalog defaultModel resolves. */
-function registerApiKeyModule(providerId: string, defaultModel: string): void {
-  moduleRegistry.register(
-    new ApiKeyProviderModule({
-      providerId,
-      slug: providerId,
-      sdkCompat: "openai",
-      upstreamBaseUrl: `https://${providerId}.example.com/v1`,
-      defaultModel,
-      envVarName: `${providerId.toUpperCase()}_API_KEY`,
-      providerDisplayName: providerId,
-      providerIconUrl: "",
-      apiKeyInstructions: "",
-      apiKeyPlaceholder: "",
-      authProfilesManager: { getBestProfile: async () => null } as never,
-    }) as unknown as ModuleInterface
-  );
-}
 
 describe("DeclaredAgentRegistry", () => {
   test("starts empty", () => {
@@ -52,8 +25,6 @@ describe("DeclaredAgentRegistry", () => {
 });
 
 describe("entryFromAgentConfig", () => {
-  afterEach(() => clearRegistry());
-
   test("expands providers into an ordered concrete models list + credentials", () => {
     const entry = entryFromAgentConfig({
       id: "agent-1",
@@ -82,19 +53,7 @@ describe("entryFromAgentConfig", () => {
     ]);
   });
 
-  test("resolves a provider with no declared model to its catalog defaultModel (never auto)", () => {
-    registerApiKeyModule("acme", "acme-large-1");
-    const entry = entryFromAgentConfig({
-      id: "agent-2",
-      name: "Agent 2",
-      providers: [{ id: "acme" }, { id: "openai", model: "gpt-4o" }],
-    } as any);
-
-    // The primary keeps its position with a CONCRETE ref from the catalog.
-    expect(entry.settings.models).toEqual(["acme/acme-large-1", "openai/gpt-4o"]);
-  });
-
-  test("#3(b): a provider with no model + no catalog default becomes a restriction sentinel (NOT dropped)", () => {
+  test("#3(b): a provider with no declared model becomes a restriction sentinel (NOT dropped)", () => {
     const entry = entryFromAgentConfig({
       id: "agent-3",
       name: "Agent 3",

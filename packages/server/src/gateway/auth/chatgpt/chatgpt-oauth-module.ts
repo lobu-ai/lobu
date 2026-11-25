@@ -1,10 +1,13 @@
-import { createLogger, type ModelOption } from "@lobu/core";
+import { createLogger } from "@lobu/core";
 import type { ProviderCredentialContext } from "../../embedded.js";
-import type { ProviderModelMetadata } from "../../modules/module-system.js";
+import type {
+  ModelListingCredential,
+  ProviderModel,
+  ProviderModelMetadata,
+} from "../../modules/module-system.js";
 import { BaseProviderModule } from "../base-provider-module.js";
 import { extractJwtAccountId } from "../oauth/client.js";
 import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
-import { fetchModelOptions } from "../utils/fetch-model-options.js";
 
 const logger = createLogger("chatgpt-oauth-module");
 // The Codex catalog endpoint negotiates on the CLIENT's version, not Lobu's:
@@ -14,8 +17,9 @@ const CODEX_CATALOG_CLIENT_VERSION = "0.154.0";
 /**
  * ChatGPT provider module — runtime credential surface for the ChatGPT
  * (subscription login) provider. The OAuth device-code FLOW lives in the
- * generic org routes; this module declares the Codex wire protocol and keeps
- * model listing. Does not require the oauth registry at construction time.
+ * generic org routes; this module declares the Codex wire protocol and reads
+ * the account's Codex catalog for both the model listing and per-model
+ * metadata. Does not require the oauth registry at construction time.
  */
 export class ChatGPTOAuthModule extends BaseProviderModule {
   constructor(authProfilesManager: AuthProfilesManager) {
@@ -48,24 +52,55 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
     this.name = "chatgpt-oauth";
   }
 
-  async getModelOptions(
-    agentId: string,
-    userId: string,
-  ): Promise<ModelOption[]> {
-    const token = await this.getCredential(agentId, { userId });
-    if (!token) return [];
+  /**
+   * The account's Codex model catalog — the one endpoint both the listing and
+   * {@link getModelMetadata} read. Throws on any failure; the error never
+   * carries the token, URL or upstream body.
+   */
+  private async fetchCodexCatalog(
+    token: string,
+    signal: AbortSignal
+  ): Promise<Array<Record<string, unknown>>> {
+    const accountId = extractJwtAccountId(token);
+    if (!accountId) throw new Error("ChatGPT token carries no account id");
+    const upstream = this.getUpstreamConfig();
+    if (!upstream) throw new Error("ChatGPT has no configured upstream");
+    const response = await fetch(
+      `${upstream.upstreamBaseUrl.replace(/\/+$/, "")}/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "ChatGPT-Account-Id": accountId,
+          originator: "codex_cli_rs",
+          Accept: "application/json",
+        },
+        signal,
+        redirect: "error",
+      }
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Codex model catalog returned HTTP ${response.status}`);
+    }
+    const payload = (await response.json()) as { models?: unknown };
+    if (!Array.isArray(payload.models)) {
+      throw new Error("Codex model catalog has no models array");
+    }
+    return payload.models.filter(
+      (model): model is Record<string, unknown> =>
+        Boolean(model) && typeof model === "object"
+    );
+  }
 
-    return fetchModelOptions<{
-      models?: Array<{ slug?: string; title?: string }>;
-    }>({
-      url: "https://chatgpt.com/backend-api/models",
-      headers: { Authorization: `Bearer ${token}` },
-      prefix: "openai-codex",
-      pick: (payload) =>
-        (payload.models || []).map((m) => {
-          const id = m.slug?.trim();
-          return id ? { id, label: m.title?.trim() || id } : null;
-        }),
+  async listModels(
+    credential: ModelListingCredential | null,
+    signal: AbortSignal
+  ): Promise<ProviderModel[] | null> {
+    if (!credential) return null;
+    const models = await this.fetchCodexCatalog(credential.value, signal);
+    return models.flatMap((model) => {
+      const id = typeof model.slug === "string" ? model.slug.trim() : "";
+      return id ? [{ id, label: id }] : [];
     });
   }
 
@@ -81,30 +116,10 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
     context: ProviderCredentialContext
   ): Promise<ProviderModelMetadata | undefined> {
     const token = await this.getCredential(agentId, context);
-    if (!token) return undefined;
-    const accountId = extractJwtAccountId(token);
-    if (!accountId) return undefined;
+    if (!token || !extractJwtAccountId(token)) return undefined;
     try {
-      const response = await fetch(
-        `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "ChatGPT-Account-Id": accountId,
-            originator: "codex_cli_rs",
-            Accept: "application/json",
-          },
-          signal: AbortSignal.timeout(5000),
-          redirect: "error",
-        }
-      );
-      if (!response.ok) {
-        logger.warn({ status: response.status }, "Codex model catalog unavailable");
-        return undefined;
-      }
-      const payload = await response.json() as { models?: Array<Record<string, unknown>> };
-      if (!Array.isArray(payload.models)) return undefined;
-      const model = payload.models.find(candidate => candidate?.slug === modelId);
+      const models = await this.fetchCodexCatalog(token, AbortSignal.timeout(5000));
+      const model = models.find(candidate => candidate.slug === modelId);
       if (!model) return undefined;
       const metadata: ProviderModelMetadata = {};
       if (typeof model.context_window === "number" && Number.isSafeInteger(model.context_window) && model.context_window > 0) {

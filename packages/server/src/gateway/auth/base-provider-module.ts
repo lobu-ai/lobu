@@ -5,14 +5,21 @@ import { readOrgSharedProviderApiKey } from "../../lobu/stores/provider-secrets.
 import type { ProviderCredentialContext } from "../embedded.js";
 import {
   BaseModule,
+  type ModelListingCredential,
   type ModelProviderModule,
   type ProviderUpstreamConfig,
+  resolveSystemCredential,
 } from "../modules/module-system.js";
 import { resolveUrlInvariant } from "./inference-invariant.js";
 import { resolveEnv } from "./mcp/string-substitution.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
 
 const logger = createLogger("base-provider-module");
+
+/** Whether two base URLs name the same upstream, ignoring trailing slashes. */
+export function sameProviderDiscoveryUpstream(a: string, b: string): boolean {
+  return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+}
 
 /**
  * Look up the org-shared API key for this provider (tier 2 of the resolution
@@ -68,8 +75,8 @@ interface BaseProviderConfig {
   apiKeyPlaceholder?: string;
   catalogDescription?: string;
   catalogVisible?: boolean;
-  /** Static model shortlist for the picker (OAuth modules with no JSON entry). */
-  catalogModels?: string[];
+  /** This provider's id in the models.dev catalog (filters its live listing). */
+  modelsDevId?: string;
   /** Wire protocol this provider speaks (see SDK_COMPAT_PROTOCOLS). */
   sdkCompat?: SdkCompat;
 }
@@ -82,7 +89,7 @@ interface BaseProviderConfig {
  *
  * Subclasses provide a config object and optionally override:
  * - `setupRoutes(app)` to add provider-specific routes
- * - `getModelOptions()` for model listing
+ * - `listModels()` for the provider's live model listing
  * - `buildEnvVars()` for custom env var injection
  * - `hasSystemKey()` / `injectSystemKeyFallback()` for multi-env-var logic
  */
@@ -101,13 +108,7 @@ export abstract class BaseProviderModule
   catalogDescription?: string;
   catalogVisible?: boolean;
   sdkCompat?: SdkCompat;
-  /**
-   * Static shortlist of model IDs for the model picker, for modules with no
-   * `config/providers.json` entry (the OAuth ones — Claude/ChatGPT/Gemini).
-   * Surfaced through `buildProviderCatalog`; the config `models` array takes
-   * precedence when a provider has both.
-   */
-  catalogModels?: string[];
+  modelsDevId?: string;
 
   protected readonly providerConfig: BaseProviderConfig;
   protected readonly authProfilesManager: AuthProfilesManager;
@@ -131,7 +132,7 @@ export abstract class BaseProviderModule
     this.apiKeyPlaceholder = config.apiKeyPlaceholder;
     this.catalogDescription = config.catalogDescription;
     this.catalogVisible = config.catalogVisible;
-    this.catalogModels = config.catalogModels;
+    this.modelsDevId = config.modelsDevId;
     this.sdkCompat = config.sdkCompat;
 
     this.app = new Hono();
@@ -273,8 +274,9 @@ export abstract class BaseProviderModule
    *   2. org-shared API key written by `lobu apply`
    *   3. system env var (only when `includeSystemEnv` is set)
    *
-   * Returns the credential and which tier produced it, so callers can keep
-   * their tier-specific logging. `buildEnvVars` omits the system-env tier (the
+   * Returns the credential, which tier produced it, and its kind (a profile's
+   * non-api-key sign-in is `oauth`), so callers can keep their tier-specific
+   * logging and present it upstream correctly. `buildEnvVars` omits the system-env tier (the
    * worker resolves that via `injectSystemKeyFallback`); `getCredential`
    * includes it.
    */
@@ -285,6 +287,7 @@ export abstract class BaseProviderModule
   ): Promise<{
     credential: string;
     source: "profile" | "org" | "system";
+    kind: ModelListingCredential["kind"];
     baseUrl?: string;
   } | null> {
     // URL invariant (see inference-invariant.ts): if this org configured a
@@ -296,10 +299,10 @@ export abstract class BaseProviderModule
       resolveOrgId(context?.organizationId) ?? undefined
     );
     if (invariant.kind === "org-only") {
-      return { credential: invariant.credential, source: "org", baseUrl: invariant.baseUrl };
+      return { credential: invariant.credential, source: "org", kind: "api-key", baseUrl: invariant.baseUrl };
     }
     if (invariant.kind === "org-credential") {
-      return { credential: invariant.credential, source: "org" };
+      return { credential: invariant.credential, source: "org", kind: "api-key" };
     }
     if (invariant.kind === "org-only-unavailable") {
       // Custom upstream but no usable org key: fail CLOSED, do not fall through.
@@ -320,12 +323,16 @@ export abstract class BaseProviderModule
           })
         : profile?.credential;
     if (profileCredential) {
-      return { credential: profileCredential, source: "profile" };
+      return {
+        credential: profileCredential,
+        source: "profile",
+        kind: profile?.authType === "api-key" ? "api-key" : "oauth",
+      };
     }
 
     const orgKey = await readOrgSharedProviderKey(this.providerId, context);
     if (orgKey) {
-      return { credential: orgKey, source: "org" };
+      return { credential: orgKey, source: "org", kind: "api-key" };
     }
 
     if (opts.includeSystemEnv) {
@@ -334,7 +341,7 @@ export abstract class BaseProviderModule
         this.providerConfig.credentialEnvVarName;
       const systemKey = process.env[sysVar];
       if (systemKey) {
-        return { credential: systemKey, source: "system" };
+        return { credential: systemKey, source: "system", kind: "api-key" };
       }
     }
 
@@ -361,6 +368,29 @@ export abstract class BaseProviderModule
       }
     }
     return envVars;
+  }
+
+  async resolveModelListingCredential(
+    agentId: string,
+    context: ProviderCredentialContext | undefined,
+    opts: { includeSystemEnv: boolean }
+  ): Promise<ModelListingCredential | null> {
+    const resolved = await this.resolveCredential(agentId, context, {
+      includeSystemEnv: false,
+    });
+    if (resolved) {
+      // A tenant upstream's key is consented for that URL only; a listing
+      // contacts the server-configured upstream, so it must not carry it.
+      const upstream = this.getUpstreamConfig()?.upstreamBaseUrl;
+      if (
+        resolved.baseUrl &&
+        (!upstream || !sameProviderDiscoveryUpstream(resolved.baseUrl, upstream))
+      ) {
+        return null;
+      }
+      return { value: resolved.credential, kind: resolved.kind };
+    }
+    return opts.includeSystemEnv ? (resolveSystemCredential(this) ?? null) : null;
   }
 
   getApp(): Hono {

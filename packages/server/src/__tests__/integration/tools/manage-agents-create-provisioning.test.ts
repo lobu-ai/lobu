@@ -66,6 +66,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 	let ownerCtx: AuthContext;
 	const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
 	const savedRegistryPath = process.env.LOBU_PROVIDER_REGISTRY_PATH;
+	const savedDefaultModel = process.env.AGENT_DEFAULT_MODEL;
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -74,11 +75,12 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		// The prod shape this bug reproduces: the deployment's ONLY model
 		// credential is an environment API key. There is deliberately no
 		// `inference_providers` row (and therefore no org default), because env
-		// keys never create one. The registry path is pinned so the catalog's
-		// `defaultModel` resolves to a concrete ref (as it does in prod) rather
-		// than an `__unresolved__` sentinel.
+		// keys never create one. The deployment's AGENT_DEFAULT_MODEL supplies
+		// the concrete ref (as it does in prod) rather than an `__unresolved__`
+		// sentinel.
 		process.env.ANTHROPIC_API_KEY = "sk-ant-test-system-key";
 		process.env.LOBU_PROVIDER_REGISTRY_PATH = PROVIDERS_JSON;
+		process.env.AGENT_DEFAULT_MODEL = "claude/synthetic-model";
 
 		const org = await createTestOrganization({
 			name: "env-key create provisioning",
@@ -115,6 +117,11 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		} else {
 			process.env.LOBU_PROVIDER_REGISTRY_PATH = savedRegistryPath;
 		}
+		if (savedDefaultModel === undefined) {
+			delete process.env.AGENT_DEFAULT_MODEL;
+		} else {
+			process.env.AGENT_DEFAULT_MODEL = savedDefaultModel;
+		}
 	});
 
 	it("the org has NO inference_providers default row (env keys never create one)", async () => {
@@ -139,7 +146,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 		// `models` was left NULL and no org-default row exists to fall back to.
 		expect(res.model.not_runnable).toBe(false);
 		expect(res.model.source).toBe("agent");
-		expect(res.model.effective_model).toBe("claude/claude-sonnet-5");
+		expect(res.model.effective_model).toBe("claude/synthetic-model");
 
 		// The list is persisted on the row — the same single source of truth
 		// the shared provisioning helper writes, not a read-time inference.
@@ -148,7 +155,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 			SELECT models FROM agents
 			WHERE organization_id = ${orgId} AND id = 'envkey-bot'
 		`;
-		expect(rows[0]?.models).toContain("claude/claude-sonnet-5");
+		expect(rows[0]?.models).toContain("claude/synthetic-model");
 	});
 
 	it("an explicit default_model still wins over the system-key default", async () => {
@@ -211,7 +218,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 			SELECT models FROM agents WHERE organization_id = ${org.id}
 		`;
 		expect(rows.length).toBeGreaterThan(0);
-		expect(rows[0]?.models).toContain("claude/claude-sonnet-5");
+		expect(rows[0]?.models).toContain("claude/synthetic-model");
 	});
 
 	// ── The shared UPSERT (`saveMetadata`) ────────────────────────────────────
@@ -244,7 +251,7 @@ describe("manage_agents create — env-key deployment provisions a runnable agen
 			SELECT models FROM agents
 			WHERE organization_id = ${freshOrg.id} AND id = 'store-fresh-bot'
 		`;
-		expect(rows[0]?.models).toContain("claude/claude-sonnet-5");
+		expect(rows[0]?.models).toContain("claude/synthetic-model");
 	});
 
 	it("an org WITH a default seeds no models list (inherits the fallback)", async () => {
@@ -366,12 +373,14 @@ describe("agent create — an org default is inherited, never shadowed", () => {
 	let ownerCtx: AuthContext;
 	const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
 	const savedRegistryPath = process.env.LOBU_PROVIDER_REGISTRY_PATH;
+	const savedDefaultModel = process.env.AGENT_DEFAULT_MODEL;
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
 		await initWorkspaceProvider();
 		process.env.ANTHROPIC_API_KEY = "sk-ant-test-system-key";
 		process.env.LOBU_PROVIDER_REGISTRY_PATH = PROVIDERS_JSON;
+		process.env.AGENT_DEFAULT_MODEL = "claude/synthetic-model";
 
 		const org = await createTestOrganization({ name: "org-default provisioning" });
 		orgId = org.id;
@@ -418,6 +427,11 @@ describe("agent create — an org default is inherited, never shadowed", () => {
 		} else {
 			process.env.LOBU_PROVIDER_REGISTRY_PATH = savedRegistryPath;
 		}
+		if (savedDefaultModel === undefined) {
+			delete process.env.AGENT_DEFAULT_MODEL;
+		} else {
+			process.env.AGENT_DEFAULT_MODEL = savedDefaultModel;
+		}
 	});
 
 	it("manage_agents create resolves via the ORG DEFAULT, not a baked system-key model", async () => {
@@ -430,7 +444,7 @@ describe("agent create — an org default is inherited, never shadowed", () => {
 
 		expect(res.created).toBe(true);
 		expect(res.model.not_runnable).toBe(false);
-		// THE REGRESSION: this was 'agent' / 'claude/claude-sonnet-5', because
+		// THE REGRESSION: this was 'agent' / 'claude/synthetic-model', because
 		// provisioning baked the system-key list in regardless of the org default.
 		expect(res.model.source).toBe("org_default");
 		expect(res.model.effective_model).toBe("myco/myco-large");

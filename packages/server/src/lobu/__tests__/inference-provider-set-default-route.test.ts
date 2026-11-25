@@ -125,17 +125,20 @@ describe("PUT /inference-providers/:slug/default", () => {
 	});
 
 	test("an oauth provider → 400 explaining the credential is per-user", async () => {
-		const { ensureOAuthInferenceProvider } = await import(
-			"../stores/provider-secrets.js"
-		);
-		await orgContext.run({ organizationId: ORG }, () =>
-			ensureOAuthInferenceProvider({
+		const {
+			ensureOAuthInferenceProvider,
+			updateInferenceProviderCapabilities,
+		} = await import("../stores/provider-secrets.js");
+		await orgContext.run({ organizationId: ORG }, async () => {
+			await ensureOAuthInferenceProvider({
 				organizationId: ORG,
 				slug: "claude",
 				kind: "claude",
-				defaultModel: "claude-sonnet-5",
-			}),
-		);
+			});
+			await updateInferenceProviderCapabilities(ORG, "claude", "text", {
+				model: "synthetic-model",
+			});
+		});
 
 		const res = await setDefault("claude");
 		expect(res.status).toBe(400);

@@ -730,6 +730,7 @@ routes.get("/inference-providers/:slug/models", async (c) => {
 	try {
 		const result = await discoverInferenceProviderModels(
 			c.get("organizationId") as string,
+			(c.get("user") as { id: string } | undefined)?.id,
 			c.req.param("slug"),
 		);
 		if ("error" in result) return c.json({ error: result.error }, result.status);
@@ -941,7 +942,6 @@ routes.post("/inference-providers/oauth/complete", async (c) => {
 			slug: config.id,
 			kind: config.id,
 			displayName: config.name,
-			defaultModel: config.defaultModel,
 			createdBy: user.id,
 		}, tx);
 		await emitConfigChange(c, {

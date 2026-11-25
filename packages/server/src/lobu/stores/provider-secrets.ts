@@ -435,7 +435,6 @@ export async function ensureOAuthInferenceProvider(args: {
 	slug: string;
 	kind: string;
 	displayName?: string | null;
-	defaultModel?: string | null;
 	createdBy?: string | null;
 }, transaction?: DbClient): Promise<InferenceProviderRow> {
 	const {
@@ -443,13 +442,12 @@ export async function ensureOAuthInferenceProvider(args: {
 		slug,
 		kind,
 		displayName = null,
-		defaultModel = null,
 		createdBy = null,
 	} = args;
 	const sql = transaction ?? getDb();
-	const oauthCapabilities: InferenceCapabilities = defaultModel
-		? { text: { model: defaultModel } }
-		: {};
+	// The text model is the user's choice from the live model list; nothing is
+	// seeded here.
+	const oauthCapabilities: InferenceCapabilities = {};
 
 	try {
 		const mutate = async (tx: DbClient) => {
@@ -468,24 +466,6 @@ export async function ensureOAuthInferenceProvider(args: {
 			if (existingRow) {
 				if (isOAuthInferenceProviderRef(existingRow.api_key_ref)) {
 					let row = existingRow;
-					if (
-						defaultModel &&
-						!existingRow.capabilities?.text?.model?.trim()
-					) {
-						const updated = (await tx`
-							UPDATE inference_providers
-							SET capabilities = capabilities || jsonb_build_object(
-								'text',
-								COALESCE(capabilities -> 'text', '{}'::jsonb) ||
-									jsonb_build_object('model', ${defaultModel}::text)
-							),
-							    updated_at = now()
-							WHERE id = ${existingRow.id}
-							RETURNING id, organization_id, slug, kind, display_name, api_key_ref,
-							          capabilities, has_custom_upstream, status, created_at, is_default
-						`) as RawInferenceProviderRow[];
-						row = updated[0] ?? existingRow;
-					}
 					// A row that is ALREADY `oauth://` can still carry `is_default`:
 					// rows predating the demote below landed that way, and this
 					// branch returns before reaching it. Clearing here is the same

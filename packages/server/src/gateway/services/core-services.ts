@@ -32,7 +32,6 @@ import { ClaudeOAuthModule } from "../auth/claude/oauth-module.js";
 import { ExternalAuthClient } from "../auth/external/client.js";
 import { McpConfigService } from "../auth/mcp/config-service.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
-import { resolveEnv } from "../auth/mcp/string-substitution.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
 import { buildOAuthRefreshers } from "../auth/oauth/client.js";
 import {
@@ -47,7 +46,6 @@ import {
 import { ProviderCatalogService } from "../auth/provider-catalog.js";
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
-import { ModelPreferenceStore } from "../auth/settings/model-preference-store.js";
 import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 import { UserAgentsStore } from "../auth/user-agents-store.js";
 import { AutomationSubscriptionService } from "../channels/automation-subscription-service.js";
@@ -64,7 +62,10 @@ import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import { QueueProducer, RunsQueue } from "../infrastructure/queue/index.js";
 import { sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
 import { InteractionService } from "../interactions.js";
-import { getModelProviderModules } from "../modules/module-system.js";
+import {
+	getModelProviderModules,
+	resolveSystemCredential,
+} from "../modules/module-system.js";
 import { GrantStore, sweepExpiredGrants } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
 import { SecretProxy } from "../proxy/secret-proxy.js";
@@ -125,7 +126,6 @@ export class CoreServices {
 	private authProfilesManager?: AuthProfilesManager;
 	private declaredAgentRegistry?: DeclaredAgentRegistry;
 	private userAuthProfileStore?: UserAuthProfileStore;
-	private modelPreferenceStore?: ModelPreferenceStore;
 	private oauthStateStore?: ProviderOAuthStateStore;
 	private secretProxy?: SecretProxy;
 	private secretStore?: SecretStoreRegistry;
@@ -533,7 +533,6 @@ export class CoreServices {
 			this.authProfilesManager,
 		);
 		this.artifactStore = new ArtifactStore();
-		this.modelPreferenceStore = new ModelPreferenceStore("claude");
 
 		// Embedded SDK mode: per-agent in-memory credentials supplied via
 		// `provider.key` are exposed as ephemeral profiles. Credentials with
@@ -631,7 +630,7 @@ export class CoreServices {
 		this.oauthStateStore = createOAuthStateStore("claude");
 		const claudeOAuthModule = new ClaudeOAuthModule(
 			this.authProfilesManager,
-			this.modelPreferenceStore,
+			configProvidersEarly.claude?.modelsDevId,
 		);
 		moduleRegistry.register(claudeOAuthModule);
 		logger.debug("Claude OAuth module registered");
@@ -699,7 +698,7 @@ export class CoreServices {
 				upstreamBaseUrl: entry.upstreamBaseUrl,
 				modelsEndpoint: entry.modelsEndpoint,
 				sdkCompat: entry.sdkCompat,
-				defaultModel: entry.defaultModel,
+				modelsDevId: entry.modelsDevId,
 				apiKeyInstructions: entry.apiKeyInstructions,
 				apiKeyPlaceholder: entry.apiKeyPlaceholder,
 				authProfilesManager: this.authProfilesManager,
@@ -745,32 +744,7 @@ export class CoreServices {
 			const modules = getModelProviderModules();
 			this.secretProxy.setSystemKeyResolver((providerId: string) => {
 				const mod = modules.find((m) => m.providerId === providerId);
-				if (!mod) return undefined;
-				// Use the module's injectSystemKeyFallback to resolve the system key.
-				// The fallback may inject into a different env var than credentialEnvVarName
-				// (e.g., Claude injects ANTHROPIC_API_KEY, not CLAUDE_CODE_OAUTH_TOKEN),
-				// so check all secret env var names.
-				const testEnv: Record<string, string> = {};
-				mod.injectSystemKeyFallback(testEnv);
-				const value =
-					mod
-						.getSecretEnvVarNames()
-						.map((v) => testEnv[v])
-						.find(Boolean) ?? testEnv[mod.getCredentialEnvVarName()];
-				if (!value) return undefined;
-				// Classify by the SOURCE env var, not the destination: a module's
-				// injectSystemKeyFallback may re-home a Bearer/OAuth token into an
-				// api-key var (e.g. Claude copies ANTHROPIC_AUTH_TOKEN into
-				// ANTHROPIC_API_KEY). Match the resolved value back to a declared
-				// bearer var so a Bearer token is still presented as Bearer, not
-				// x-api-key.
-				const isBearer = (mod.getBearerCredentialEnvVarNames?.() ?? []).some(
-					(v) => {
-						const raw = resolveEnv(v);
-						return !!raw && raw === value;
-					},
-				);
-				return { value, kind: isBearer ? "oauth" : "api-key" };
+				return mod ? resolveSystemCredential(mod) : undefined;
 			});
 			logger.debug("Provider upstreams registered with secret proxy");
 		}
@@ -1022,10 +996,6 @@ export class CoreServices {
 
 	getMcpConfigService(): McpConfigService | undefined {
 		return this.mcpConfigService;
-	}
-
-	getModelPreferenceStore(): ModelPreferenceStore | undefined {
-		return this.modelPreferenceStore;
 	}
 
 	getOAuthStateStore(): ProviderOAuthStateStore | undefined {

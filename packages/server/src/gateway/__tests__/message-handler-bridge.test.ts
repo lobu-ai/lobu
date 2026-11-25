@@ -1186,7 +1186,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       hasSystemKey: () => true,
       hasCredentials: async () => true,
       getProxyBaseUrlMappings: () => ({ openai: "https://gw/api/proxy/openai" }),
-      getModelOptions: async () => [{ value: "openai/gpt-5" }],
     };
     const providerCatalog = makeCatalogMock({
       modules: [openai],
@@ -1216,26 +1215,18 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
   test("FALLBACK iterates the LISTED alternates in order, never the catalog default", async () => {
     // models=["xai/grok-4","openai/gpt-5"] but the DEFAULT provider (xai) is
     // unroutable. The fallback must be the LISTED alternate openai/gpt-5 (an
-    // exact models[] entry), and the code must NOT consult getModelOptions to
-    // pick a provider's catalog/first default. We prove that by exploding if
-    // getModelOptions is ever called.
+    // exact models[] entry), never a provider's catalog/first default.
     const xai = {
       providerId: "xai",
       hasSystemKey: () => false,
       hasCredentials: async () => false, // unroutable
       getProxyBaseUrlMappings: () => ({}),
-      getModelOptions: async () => {
-        throw new Error("fallback must not consult getModelOptions");
-      },
     };
     const openai = {
       providerId: "openai",
       hasSystemKey: () => true,
       hasCredentials: async () => true,
       getProxyBaseUrlMappings: () => ({ openai: "https://gw/api/proxy/openai" }),
-      getModelOptions: async () => {
-        throw new Error("fallback must not consult getModelOptions");
-      },
     };
     const providerCatalog = makeCatalogMock({
       modules: [xai, openai],
@@ -1265,7 +1256,6 @@ describe("MessageHandlerBridge.handleMessage — routing and unlinked chats", ()
       hasSystemKey: () => false,
       hasCredentials: async () => false,
       getProxyBaseUrlMappings: () => ({}),
-      getModelOptions: async () => [{ value: "z-ai/glm-5.2" }],
     };
     const providerCatalog = makeCatalogMock({
       modules: [zai],

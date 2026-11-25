@@ -95,8 +95,8 @@ function makeCatalog(opts: {
       models: opts.models,
     }),
   } as never;
-  // findProviderForModel probes each module's getModelOptions, which resolves
-  // credentials through the profiles manager — stub it to "no profile".
+  // Routability checks resolve credentials through the profiles manager —
+  // stub it to "no profile".
   const authProfilesManager = { getBestProfile: async () => null } as never;
   const listOrgInferenceProviders =
     opts.withOrgReader === false ? undefined : async () => opts.orgRows ?? [];
@@ -149,7 +149,6 @@ describe("ProviderCatalogService.getInstalledModules — org inference providers
     });
 
     expect(mod.sdkCompat).toBe("openai");
-    expect(mod.defaultModel).toBe("glm-4.6");
 
     // Never surfaced in the "Add Provider" catalog.
     expect(mod.catalogVisible).toBe(false);

@@ -7,7 +7,7 @@ import { bedrockProviderModule } from "@mariozechner/pi-ai/bedrock-provider";
 const streamBedrock = bedrockProviderModule.streamBedrock;
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { createLogger } from "@lobu/core";
+import { createLogger, getErrorMessage } from "@lobu/core";
 import { authenticateWorker } from "../routes/internal/middleware.js";
 import {
   BedrockModelCatalog,
@@ -545,7 +545,24 @@ export class BedrockOpenAIService {
     this.app.use("/openai/*", authenticateWorker);
 
     this.app.get("/openai/a/:agentId/v1/models", async (c) => {
-      const models = await this.modelCatalog.listModelOptions();
+      let models: Array<{ id: string; label: string }>;
+      try {
+        models = await this.modelCatalog.listModelOptions();
+      } catch (error) {
+        logger.warn(
+          { error: getErrorMessage(error) },
+          "Bedrock model catalog unavailable"
+        );
+        return c.json(
+          {
+            error: {
+              type: "api_error",
+              message: "Bedrock model catalog is unavailable",
+            },
+          },
+          503
+        );
+      }
       return c.json({
         object: "list",
         data: models.map((model) => ({
@@ -572,7 +589,17 @@ export class BedrockOpenAIService {
 
     if (staticModel) return staticModel;
 
-    const discoveredModel = await this.modelCatalog.getModel(requestedModel);
+    // The catalog only enriches the label and input modalities; an AWS listing
+    // failure must not block a turn on a model id the caller already chose.
+    const discoveredModel = await this.modelCatalog
+      .getModel(requestedModel)
+      .catch((error: unknown) => {
+        logger.warn(
+          { error: getErrorMessage(error), model: requestedModel },
+          "Bedrock model catalog unavailable; using defaults for the model"
+        );
+        return null;
+      });
     return buildDynamicBedrockModel(requestedModel, discoveredModel);
   }
 

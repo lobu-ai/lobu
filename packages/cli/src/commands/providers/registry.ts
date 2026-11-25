@@ -13,7 +13,6 @@ export interface RegistryProvider {
     displayName: string;
     envVarName: string;
     upstreamBaseUrl: string;
-    defaultModel?: string;
     apiKeyInstructions?: string;
     modelsEndpoint?: string;
   }>;

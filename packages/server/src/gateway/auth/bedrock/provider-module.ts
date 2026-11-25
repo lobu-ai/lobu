@@ -1,5 +1,8 @@
-import type { ModelOption } from "@lobu/core";
 import type { BedrockModelCatalog } from "../../services/bedrock-model-catalog.js";
+import type {
+  ModelListingCredential,
+  ProviderModel,
+} from "../../modules/module-system.js";
 import { BaseProviderModule } from "../base-provider-module.js";
 import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
 
@@ -43,6 +46,7 @@ export class BedrockProviderModule extends BaseProviderModule {
         apiKeyPlaceholder: "Not required",
         catalogDescription:
           "Use Amazon Bedrock models through gateway-owned AWS credentials",
+        modelsDevId: "amazon-bedrock",
       },
       authProfilesManager
     );
@@ -106,14 +110,14 @@ export class BedrockProviderModule extends BaseProviderModule {
     return context?.workerToken ?? "";
   }
 
-  async getModelOptions(
-    _agentId: string,
-    _userId: string
-  ): Promise<ModelOption[]> {
-    const models = await this.modelCatalog.listModelOptions();
-    return models.map((model) => ({
-      value: `amazon-bedrock/${model.id}`,
-      label: model.label,
-    }));
+  /**
+   * Bedrock lists with the gateway's own AWS credentials, not a stored key, so
+   * the listing credential is ignored. AWS failures propagate to the caller.
+   */
+  async listModels(
+    _credential: ModelListingCredential | null,
+    _signal: AbortSignal
+  ): Promise<ProviderModel[]> {
+    return this.modelCatalog.listModelOptions();
   }
 }

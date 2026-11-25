@@ -1,12 +1,11 @@
-import type { ModelOption, SdkCompat } from "@lobu/core";
+import type { SdkCompat } from "@lobu/core";
+import type {
+  ModelListingCredential,
+  ProviderModel,
+} from "../modules/module-system.js";
 import { BaseProviderModule } from "./base-provider-module.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
-import { resolveEnv } from "./mcp/string-substitution.js";
-import { fetchModelOptions } from "./utils/fetch-model-options.js";
-
-export function sameProviderDiscoveryUpstream(a: string, b: string): boolean {
-  return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
-}
+import { fetchProviderModels } from "./utils/fetch-provider-models.js";
 
 interface ApiKeyProviderConfig {
   providerId: string;
@@ -28,8 +27,8 @@ interface ApiKeyProviderConfig {
   sdkCompat?: SdkCompat;
   /** How the API key is presented upstream ("x-api-key" for Anthropic; Bearer otherwise). */
   apiKeyHeader?: "authorization" | "x-api-key";
-  /** Default model ID when none is configured */
-  defaultModel?: string;
+  /** This provider's id in the models.dev catalog (filters its live listing). */
+  modelsDevId?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
   /**
@@ -48,7 +47,7 @@ interface ApiKeyProviderConfig {
  * Any model provider that only needs a "paste your API key" flow
  * can be instantiated from this class without writing a full module.
  *
- * Config-driven providers declare their protocol and picker defaults here.
+ * Config-driven providers declare their protocol and model listing here.
  */
 export class ApiKeyProviderModule extends BaseProviderModule {
   protected readonly apiKeyConfig: ApiKeyProviderConfig;
@@ -74,6 +73,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
         catalogVisible: config.catalogVisible,
         sdkCompat: config.sdkCompat,
         apiKeyHeader: config.apiKeyHeader,
+        modelsDevId: config.modelsDevId,
       },
       config.authProfilesManager,
     );
@@ -129,73 +129,45 @@ export class ApiKeyProviderModule extends BaseProviderModule {
     return mappings;
   }
 
-  get defaultModel(): string | undefined {
-    return this.apiKeyConfig.defaultModel;
-  }
-
-  async getModelOptions(
-    agentId: string,
-    userId: string,
-  ): Promise<ModelOption[]> {
-    const resolved = await this.resolveCredential(agentId, { userId }, { includeSystemEnv: true });
-    const upstream = this.getUpstreamConfig()?.upstreamBaseUrl;
-    if (!resolved || !upstream ||
-        (resolved.baseUrl && !sameProviderDiscoveryUpstream(resolved.baseUrl, upstream))) {
-      return [];
-    }
-    return this.discoverModels(resolved.credential, false) ?? [];
-  }
-
   get supportsModelDiscovery(): boolean {
     return this.providerId === "gemini" || Boolean(this.apiKeyConfig.modelsEndpoint);
   }
 
-  get supportsAutomaticDiscoveryDefault(): boolean {
-    // Gemini's listing mixes chat, preview and specialist models without a default.
-    return this.providerId !== "gemini";
-  }
-
-  getSystemDiscoveryKey(): string | undefined {
-    return resolveEnv(this.apiKeyConfig.systemEnvVarName ?? this.apiKeyConfig.envVarName);
-  }
-
-  discoverModels(
-    key: string,
-    strict = true,
-    signal = AbortSignal.timeout(5000),
-  ): Promise<ModelOption[]> | undefined {
+  async listModels(
+    credential: ModelListingCredential | null,
+    signal: AbortSignal,
+  ): Promise<ProviderModel[] | null> {
     const upstream = this.getUpstreamConfig();
-    if (!upstream) return undefined;
+    if (!upstream || !this.supportsModelDiscovery) return [];
+    if (!credential) return null;
     if (this.providerId === "gemini") {
-      return this.fetchGeminiModels(key, upstream.upstreamBaseUrl, strict, signal);
+      return this.fetchGeminiModels(credential, upstream.upstreamBaseUrl, signal);
     }
     const endpoint = this.apiKeyConfig.modelsEndpoint;
-    if (!endpoint) return undefined;
-    return this.fetchModelsGeneric(key, upstream.upstreamBaseUrl, endpoint, strict, signal);
+    if (!endpoint) return [];
+    return this.fetchModelsGeneric(credential, upstream.upstreamBaseUrl, endpoint, signal);
   }
 
   /**
-   * Generic model fetcher using Bearer auth. Works with OpenAI-compatible
-   * endpoints ({data:[{id}]}) and Ollama ({models:[{name}]}).
+   * Generic model fetcher. Works with OpenAI-compatible endpoints
+   * ({data:[{id}]}) and Ollama ({models:[{name}]}). An OAuth credential always
+   * rides Bearer; an API key uses the provider's API-key header.
    */
   private async fetchModelsGeneric(
-    apiKey: string,
+    credential: ModelListingCredential,
     baseUrl: string,
     endpoint: string,
-    strict: boolean,
     signal: AbortSignal,
-  ): Promise<ModelOption[]> {
-    return fetchModelOptions<{
+  ): Promise<ProviderModel[]> {
+    return fetchProviderModels<{
       data?: Array<{ id?: string; name?: string; display_name?: string }>;
       models?: Array<{ name?: string; model?: string }>;
     }>({
       url: `${baseUrl.replace(/\/$/, "")}${endpoint}`,
-      headers: this.apiKeyConfig.apiKeyHeader === "x-api-key"
-        ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
-        : { Authorization: `Bearer ${apiKey}` },
-      strict,
+      headers: credential.kind === "api-key" && this.apiKeyConfig.apiKeyHeader === "x-api-key"
+        ? { "x-api-key": credential.value, "anthropic-version": "2023-06-01" }
+        : { Authorization: `Bearer ${credential.value}` },
       signal,
-      prefix: this.providerId,
       pick: (payload) => {
         if (Array.isArray(payload.data)) {
           return payload.data.map((m) =>
@@ -210,24 +182,22 @@ export class ApiKeyProviderModule extends BaseProviderModule {
             return id ? { id } : null;
           });
         }
-        if (strict) throw new Error("Invalid model listing");
-        return [];
+        throw new Error("Invalid model listing");
       },
     });
   }
 
   private async fetchGeminiModels(
-    apiKey: string,
+    credential: ModelListingCredential,
     baseUrl: string,
-    strict: boolean,
     signal: AbortSignal,
-  ): Promise<ModelOption[]> {
+  ): Promise<ProviderModel[]> {
     const url = new URL(`${baseUrl.replace(/\/+$/, "").replace(/\/openai$/, "")}/models`);
-    const models = new Map<string, ModelOption>();
+    const models = new Map<string, ProviderModel>();
     // Both the time limit and the page cap apply across the entire listing.
-    for (let page = 0; page < (strict ? 10 : 1); page++) {
+    for (let page = 0; page < 10; page++) {
       let nextPageToken: string | undefined;
-      const options = await fetchModelOptions<{
+      const options = await fetchProviderModels<{
         nextPageToken?: string;
         models?: Array<{
           name?: string;
@@ -236,15 +206,12 @@ export class ApiKeyProviderModule extends BaseProviderModule {
         }>;
       }>({
         url: url.toString(),
-        headers: { "x-goog-api-key": apiKey },
-        prefix: this.providerId,
+        headers: credential.kind === "oauth"
+          ? { Authorization: `Bearer ${credential.value}` }
+          : { "x-goog-api-key": credential.value },
         signal,
-        strict,
         pick: (payload) => {
-          if (!Array.isArray(payload.models)) {
-            if (strict) throw new Error("Invalid model listing");
-            return [];
-          }
+          if (!Array.isArray(payload.models)) throw new Error("Invalid model listing");
           nextPageToken = payload.nextPageToken;
           return payload.models.map((model) => {
             if (!model?.supportedGenerationMethods?.includes("generateContent")) return null;
@@ -254,7 +221,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
         },
       });
       for (const option of options) {
-        models.set(option.value, option);
+        models.set(option.id, option);
         if (models.size >= 1000) return [...models.values()];
       }
       if (!nextPageToken || nextPageToken === url.searchParams.get("pageToken")) break;

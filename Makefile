@@ -234,7 +234,7 @@ test-e2e-cli:
 # Live provider validation — opt-in, networked, NOT part of the default gates.
 # Two tiers, both derived from config/providers.json:
 #   keyless — probes every protocol-correct completion/models route against the
-#             real APIs and checks defaultModel against public catalogs.
+#             real APIs.
 #   keyed   — production-adapter streaming + parsed tool-call round-trip per
 #             configured credential. REQUIRED_LIVE_PROVIDERS fails closed when
 #             a required credential is absent.

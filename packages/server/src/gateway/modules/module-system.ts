@@ -1,5 +1,6 @@
-import type { ModelOption, SdkCompat } from "@lobu/core";
+import type { SdkCompat } from "@lobu/core";
 import { type ModuleInterface, moduleRegistry } from "@lobu/core";
+import { resolveEnv } from "../auth/mcp/string-substitution.js";
 import type { ProviderCredentialContext } from "../embedded.js";
 
 interface OrchestratorModule extends ModuleInterface {
@@ -35,6 +36,22 @@ export interface ProviderModelMetadata {
   input?: ("text" | "image")[];
 }
 
+/** One model in a provider's own live listing, id WITHOUT a provider prefix. */
+export interface ProviderModel {
+  id: string;
+  label: string;
+}
+
+/**
+ * The credential a model listing is fetched with. `kind` decides how it is
+ * presented upstream: an `oauth` token always rides `Authorization: Bearer`,
+ * an `api-key` uses the provider's API-key header.
+ */
+export interface ModelListingCredential {
+  value: string;
+  kind: "api-key" | "oauth";
+}
+
 export interface ModelProviderModule extends OrchestratorModule {
   providerId: string;
   providerDisplayName: string;
@@ -46,10 +63,10 @@ export interface ModelProviderModule extends OrchestratorModule {
   catalogDescription?: string;
   catalogVisible?: boolean;
   /**
-   * Static model shortlist for the picker — for OAuth modules (Claude/ChatGPT/
-   * Gemini) that have no `config/providers.json` entry to carry a `models` list.
+   * This provider's id in the models.dev catalog, used to drop deprecated and
+   * non-text models from its live listing. Omitted ⇒ listing is unfiltered.
    */
-  catalogModels?: string[];
+  modelsDevId?: string;
   /**
    * Wire protocol this provider speaks (see SDK_COMPAT_PROTOCOLS). Lets the
    * catalog know a module's protocol uniformly — including OAuth modules like
@@ -80,7 +97,26 @@ export interface ModelProviderModule extends OrchestratorModule {
     envVars: Record<string, string>
   ): Record<string, string>;
   getApp?(): any;
-  getModelOptions?(agentId: string, userId: string): Promise<ModelOption[]>;
+  /**
+   * The provider's own live model listing, fetched with `credential`. Resolves
+   * `null` when listing needs a credential and none was given; throws when the
+   * upstream fails. Only server-configured upstreams are ever contacted.
+   */
+  listModels?(
+    credential: ModelListingCredential | null,
+    signal: AbortSignal
+  ): Promise<ProviderModel[] | null>;
+  /**
+   * The credential this module would list models with for an agent: the same
+   * resolution chain as egress (profile → org key → system env when allowed).
+   * Answers `null` when the org points the provider at a tenant upstream, since
+   * a listing only ever contacts the server-configured one.
+   */
+  resolveModelListingCredential?(
+    agentId: string,
+    context: ProviderCredentialContext | undefined,
+    opts: { includeSystemEnv: boolean }
+  ): Promise<ModelListingCredential | null>;
   /**
    * Gateway-only capability lookup, consulted ONLY for a model the bundled
    * registry does not carry — a provider that shipped a new model since this
@@ -117,13 +153,36 @@ export abstract class BaseModule implements OrchestratorModule {
   ): Promise<Record<string, string>> {
     return baseEnv;
   }
+}
 
-  async getModelOptions(
-    _agentId: string,
-    _userId: string
-  ): Promise<ModelOption[]> {
-    return [];
-  }
+/**
+ * The deployment's system credential for a provider module, or undefined.
+ *
+ * Uses the module's `injectSystemKeyFallback`, which may inject into a
+ * different env var than `credentialEnvVarName` (e.g. Claude injects
+ * ANTHROPIC_API_KEY, not CLAUDE_CODE_OAUTH_TOKEN), so every secret env var
+ * name is checked. The kind is classified by the SOURCE env var, not the
+ * destination: a fallback may re-home a Bearer/OAuth token into an api-key var
+ * (Claude copies ANTHROPIC_AUTH_TOKEN into ANTHROPIC_API_KEY), so the resolved
+ * value is matched back to a declared bearer var to keep presenting it as
+ * Bearer rather than x-api-key.
+ */
+export function resolveSystemCredential(
+  mod: ModelProviderModule
+): ModelListingCredential | undefined {
+  const testEnv: Record<string, string> = {};
+  mod.injectSystemKeyFallback(testEnv);
+  const value =
+    mod
+      .getSecretEnvVarNames()
+      .map((v) => testEnv[v])
+      .find(Boolean) ?? testEnv[mod.getCredentialEnvVarName()];
+  if (!value) return undefined;
+  const isBearer = (mod.getBearerCredentialEnvVarNames?.() ?? []).some((v) => {
+    const raw = resolveEnv(v);
+    return !!raw && raw === value;
+  });
+  return { value, kind: isBearer ? "oauth" : "api-key" };
 }
 
 export function getOrchestratorModules(): OrchestratorModule[] {

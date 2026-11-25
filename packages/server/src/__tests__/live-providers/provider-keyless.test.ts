@@ -1,17 +1,12 @@
 /**
  * Keyless provider validation — network-gated, but needs NO API keys.
  *
- * The oracle is each provider's own live API, exploited through two facts:
- *   1. An unauthenticated request to the protocol-correct path is rejected
- *      before inference. A 404/405 catches an upstream route that disappeared.
- *      Exact protocol serialization is covered deterministically by the worker
- *      adapter E2E; this network check only detects upstream drift.
- *   2. Some providers serve their model catalog publicly. When the models
- *      endpoint answers 200 with a non-empty list, the configured
- *      defaultModel must be in it — which catches model deprecations (this
- *      check found nvidia's kimi-k2.5 and opencode-zen's
- *      anthropic/claude-sonnet-4 already dead upstream). Auth-gated catalogs
- *      are skipped automatically, so nothing here is hardcoded per provider.
+ * The oracle is each provider's own live API: an unauthenticated request to
+ * the protocol-correct completion or models path is rejected before inference,
+ * so a 404/405 catches an upstream route that disappeared. Exact protocol
+ * serialization is covered deterministically by the worker adapter E2E; this
+ * network check only detects upstream drift. Model ids are never pinned here —
+ * every model list comes live from the provider's own listing.
  *
  * Everything is derived from config/providers.json, mirroring production
  * composition: completion path comes from the production adapter protocol;
@@ -19,8 +14,8 @@
  * `upstreamBaseUrl + modelsEndpoint` (fetchModelsGeneric).
  *
  * Runs as part of `make test-providers-live` (this directory) — so even a
- * zero-key invocation validates every endpoint and every publicly listed
- * defaultModel. Excluded from the default CI gates (needs network).
+ * zero-key invocation validates every endpoint. Excluded from the default CI
+ * gates (needs network).
  */
 
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -36,7 +31,6 @@ const repoRoot = resolve(thisDir, "../../../../..");
 interface ProviderEntry {
 	displayName: string;
 	upstreamBaseUrl: string;
-	defaultModel?: string;
 	modelsEndpoint?: string;
 	sdkCompat?: SdkCompat;
 }
@@ -91,37 +85,15 @@ for (const { id, provider } of flattened) {
 		);
 
 		test.skipIf(!provider.modelsEndpoint)(
-			"models endpoint exists; public catalogs must contain defaultModel",
+			"models endpoint exists (route must not 404)",
 			async () => {
 				const url = `${base}${provider.modelsEndpoint}`;
-				const { status, body } = await probe(url);
+				const { status } = await probe(url);
 				expect(
 					[404, 405].includes(status),
 					`${id} models route ${url} answered ${status} — ` +
 						"the composed URL does not exist upstream",
 				).toBe(false);
-
-				// Auth-gated catalogs (401/403) tell us nothing more — done.
-				if (status !== 200) return;
-				const ids = ((body as { data?: Array<{ id?: string }> }).data ?? [])
-					.map((m) => m.id)
-					.filter((x): x is string => !!x);
-				// Some providers answer 200 with an empty list when unauthenticated
-				// (e.g. perplexity) — an empty catalog proves nothing, skip.
-				if (ids.length === 0 || !provider.defaultModel) return;
-
-				// Mirror resolveModelRef: a leading "<provider-id>/" self-prefix is
-				// stripped before the model id goes on the wire. Some providers
-				// namespace their public catalog with their own prefix (perplexity
-				// lists "perplexity/sonar" for wire id "sonar"), so accept either.
-				const wireModel = provider.defaultModel.startsWith(`${id}/`)
-					? provider.defaultModel.slice(id.length + 1)
-					: provider.defaultModel;
-				expect(
-					ids.includes(wireModel) || ids.includes(`${id}/${wireModel}`),
-					`${id}: defaultModel "${wireModel}" is not in the provider's ` +
-						`public catalog (${ids.length} models) — likely deprecated`,
-				).toBe(true);
 			},
 		);
 	});

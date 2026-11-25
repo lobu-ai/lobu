@@ -77,6 +77,10 @@ app:
     # Bounded wait for in-flight HTTP responses (incl. SSE/MCP streams) to drain
     # before process exit. Keep below the remaining grace-period budget.
     HTTP_CLOSE_TIMEOUT_MS: "10000"
+    # Model for agents served by the deployment's environment provider keys,
+    # as `<provider>/<model id>`. No model id ships in the provider registry,
+    # so without this an env-key agent has no model until one is chosen.
+    AGENT_DEFAULT_MODEL: "claude/claude-sonnet-5"
 
   # Graceful-shutdown budget. Must comfortably exceed the sum of the readiness
   # drain + in-flight HTTP close + gateway/worker teardown, or the kubelet

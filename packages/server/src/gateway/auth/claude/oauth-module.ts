@@ -1,4 +1,8 @@
-import { createLogger, type ModelOption } from "@lobu/core";
+import { createLogger } from "@lobu/core";
+import type {
+  ModelListingCredential,
+  ProviderModel,
+} from "../../modules/module-system.js";
 import { BaseProviderModule } from "../base-provider-module.js";
 import { resolveEnv } from "../mcp/string-substitution.js";
 import type { OAuthCredentials } from "../oauth/credentials.js";
@@ -6,21 +10,16 @@ import {
   type AuthProfilesManager,
   createAuthProfileLabel,
 } from "../settings/auth-profiles-manager.js";
-import type { ModelPreferenceStore } from "../settings/model-preference-store.js";
+import { fetchProviderModels } from "../utils/fetch-provider-models.js";
 
 const logger = createLogger("claude-oauth-module");
 
 /**
- * Claude OAuth Module - Handles credential injection and model preferences for Claude.
+ * Claude OAuth Module - Handles credential injection and live model listing for Claude.
  * OAuth login/logout is handled by the generic settings web page routes.
  */
 export class ClaudeOAuthModule extends BaseProviderModule {
-  private modelPreferenceStore: ModelPreferenceStore;
-
-  constructor(
-    authProfilesManager: AuthProfilesManager,
-    modelPreferenceStore: ModelPreferenceStore
-  ) {
+  constructor(authProfilesManager: AuthProfilesManager, modelsDevId?: string) {
     super(
       {
         providerId: "claude",
@@ -54,15 +53,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
           'Enter your <a href="https://console.anthropic.com/settings/keys" target="_blank" class="text-blue-600 underline">Anthropic API key</a>:',
         apiKeyPlaceholder: "sk-ant-...",
         catalogDescription: "Anthropic's Claude AI with OAuth authentication",
-        // Static shortlist for the model picker — Claude has no
-        // config/providers.json entry (it's this OAuth module), so its models
-        // are declared here. Current Claude 5 family + Opus 4.8.
-        catalogModels: [
-          "claude-opus-4-8",
-          "claude-sonnet-5",
-          "claude-haiku-4-5-20251001",
-          "claude-fable-5",
-        ],
+        modelsDevId,
         // Claude speaks the Anthropic Messages protocol, so an org Claude
         // provider routes via the anthropic-messages adapter.
         sdkCompat: "anthropic",
@@ -71,7 +62,6 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     );
     // Preserve existing module name
     this.name = "claude-oauth";
-    this.modelPreferenceStore = modelPreferenceStore;
   }
 
   // ---- Overrides for multi-env-var logic ----
@@ -133,47 +123,36 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     return envVars;
   }
 
-  async getModelOptions(
-    agentId: string,
-    userId: string
-  ): Promise<ModelOption[]> {
-    const availableModels = await this.fetchClaudeModels(agentId);
-    if (availableModels.length === 0) return [];
-
-    const preferredModel =
-      await this.modelPreferenceStore.getModelPreference(userId);
-    logger.debug("Building Claude model options", {
-      agentId,
-      userId,
-      preferredModel,
+  /**
+   * Anthropic's live model listing. An OAuth sign-in rides Bearer; an API key
+   * rides `x-api-key`. No credential → `null` (connect one to list).
+   */
+  async listModels(
+    credential: ModelListingCredential | null,
+    signal: AbortSignal
+  ): Promise<ProviderModel[] | null> {
+    if (!credential) return null;
+    const upstream = this.getUpstreamConfig();
+    if (!upstream) return [];
+    return fetchProviderModels<{
+      data?: Array<{ id?: string; display_name?: string }>;
+    }>({
+      url: `${upstream.upstreamBaseUrl.replace(/\/+$/, "")}/v1/models?limit=1000`,
+      headers: {
+        "anthropic-version": "2023-06-01",
+        ...(credential.kind === "oauth"
+          ? { Authorization: `Bearer ${credential.value}` }
+          : { "x-api-key": credential.value }),
+      },
+      signal,
+      pick: (payload) => {
+        if (!Array.isArray(payload.data)) throw new Error("Invalid model listing");
+        return payload.data.map((item) => {
+          const id = item?.id?.trim();
+          return id ? { id, label: item.display_name } : null;
+        });
+      },
     });
-    // No hardcoded default model: when nothing is pinned, default to the
-    // provider's newest live model (Anthropic's /v1/models is newest-first).
-    // This keeps the default current automatically instead of rotting to a
-    // retired snapshot.
-    const defaultModel =
-      preferredModel ||
-      process.env.AGENT_DEFAULT_MODEL ||
-      availableModels[0]?.id;
-    const options: ModelOption[] = [];
-    const seen = new Set<string>();
-
-    const addOption = (value: string, label: string) => {
-      if (seen.has(value)) return;
-      seen.add(value);
-      options.push({ value, label });
-    };
-
-    const defaultEntry = availableModels.find((m) => m.id === defaultModel);
-    if (defaultEntry && defaultModel) {
-      addOption(defaultModel, defaultEntry.display_name || defaultModel);
-    }
-
-    for (const model of availableModels) {
-      addOption(model.id, model.display_name || model.id);
-    }
-
-    return options;
   }
 
   async setCredentials(
@@ -217,117 +196,5 @@ export class ClaudeOAuthModule extends BaseProviderModule {
       },
       makePrimary: true,
     });
-  }
-
-  private static readonly MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
-  private readonly modelsCache = new Map<
-    string,
-    {
-      at: number;
-      models: Array<{ id: string; display_name: string; type: string }>;
-    }
-  >();
-
-  /**
-   * Fetch the live Claude model list (newest-first) for the agent's
-   * credentials. Returns `[]` when the provider has no credentials yet or the
-   * API call fails — callers treat empty as "no catalog / no default" rather
-   * than substituting a hardcoded snapshot that can silently go stale.
-   * Successful results are cached per agent for a few minutes so resolving the
-   * default model doesn't hit the API on every turn.
-   */
-  private async fetchClaudeModels(
-    agentId: string
-  ): Promise<Array<{ id: string; display_name: string; type: string }>> {
-    const cached = this.modelsCache.get(agentId);
-    if (
-      cached &&
-      Date.now() - cached.at < ClaudeOAuthModule.MODELS_CACHE_TTL_MS
-    ) {
-      return cached.models;
-    }
-
-    const profile = await this.authProfilesManager.getBestProfile(
-      agentId,
-      this.providerId
-    );
-
-    // A per-agent profile wins entirely; only when none exists do we fall back
-    // to the system env key. Without that env fallback, an env-configured key
-    // (no auth profile) produced no credential here, so getDefaultModel
-    // returned undefined and an auto-mode agent got "No model configured".
-    // ANTHROPIC_AUTH_TOKEN is a Bearer token (preferred, matches the secret
-    // proxy); ANTHROPIC_API_KEY is presented as x-api-key.
-    let oauthToken: string | undefined;
-    let apiKey: string | undefined;
-    if (profile?.credential) {
-      if (profile.authType === "oauth") oauthToken = profile.credential;
-      else apiKey = profile.credential;
-    } else {
-      oauthToken = resolveEnv("ANTHROPIC_AUTH_TOKEN");
-      if (!oauthToken) apiKey = resolveEnv("ANTHROPIC_API_KEY");
-    }
-
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      "anthropic-version": "2023-06-01",
-    };
-    if (oauthToken) {
-      headers.Authorization = `Bearer ${oauthToken}`;
-    } else if (apiKey) {
-      headers["x-api-key"] = apiKey;
-    } else {
-      // No credentials → can't enumerate models. Surface empty so the model
-      // picker / default resolution shows "connect a provider" instead of a
-      // stale hardcoded list.
-      return [];
-    }
-
-    const response = await fetch("https://api.anthropic.com/v1/models", {
-      headers,
-    }).catch((err) => {
-      logger.warn(
-        { error: err?.message, agentId },
-        "fetchClaudeModels: fetch failed"
-      );
-      return null;
-    });
-
-    if (!response?.ok) {
-      logger.warn(
-        {
-          agentId,
-          status: response?.status,
-          hasOauth: !!oauthToken,
-          hasApiKey: !!apiKey,
-        },
-        "fetchClaudeModels: non-ok response"
-      );
-      return [];
-    }
-
-    const payload = (await response.json().catch(() => ({}))) as {
-      data?: Array<{ id?: string; display_name?: string; type?: string }>;
-    };
-
-    const models = (payload.data || [])
-      .map((item) => {
-        const id = item.id?.trim();
-        if (!id) return null;
-        return {
-          id,
-          display_name: item.display_name || id,
-          type: item.type || "model",
-        };
-      })
-      .filter(
-        (item): item is { id: string; display_name: string; type: string } =>
-          Boolean(item)
-      );
-
-    if (models.length > 0) {
-      this.modelsCache.set(agentId, { at: Date.now(), models });
-    }
-    return models;
   }
 }
