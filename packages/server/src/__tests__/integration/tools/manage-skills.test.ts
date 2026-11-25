@@ -174,4 +174,28 @@ describe("manage_skills", () => {
 		// The default skill_config read effect is Auto: an agent without a rule reads.
 		await expect(executeTool("manage_skills", { action: "list" }, TEST_ENV, agentCtx)).resolves.toBeDefined();
 	});
+
+	it.each([
+		{ tokenType: "oauth" as const, appPrincipalId: "web:skills-reader.test" },
+		{ tokenType: "pat" as const, appPrincipalId: "pat:9001" },
+	])("enforces app-specific skill read restrictions for an unbound $tokenType caller", async ({ tokenType, appPrincipalId }) => {
+		const appCtx: AuthContext = { ...memberCtx, tokenType, appPrincipalId };
+		await expect(executeTool("manage_skills", { action: "list" }, TEST_ENV, appCtx)).resolves.toBeDefined();
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "skill_config",
+			principalKind: "app",
+			principalId: appPrincipalId,
+			effects: { read: "deny" },
+		});
+		for (const args of [{ action: "list" }, { action: "get", name: "triage" }]) {
+			await expect(executeTool("manage_skills", args, TEST_ENV, appCtx))
+				.rejects.toMatchObject({ httpStatus: 403 });
+		}
+		await expect(executeTool("manage_skills", { action: "list" }, TEST_ENV, {
+			...appCtx, appPrincipalId: "web:other-skills-reader.test",
+		})).resolves.toBeDefined();
+		await expect(executeTool("manage_skills", { action: "list" }, TEST_ENV, {
+			...memberCtx, tokenType: "session",
+		})).resolves.toBeDefined();
+	});
 });

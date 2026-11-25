@@ -14,6 +14,7 @@ export async function skillConfigReadAllowed(ctx: ToolContext): Promise<boolean>
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
+		appId: ctx.appPrincipalId,
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 	});
 	return skillConfigReadAllowedFor(ctx.organizationId, principal);
