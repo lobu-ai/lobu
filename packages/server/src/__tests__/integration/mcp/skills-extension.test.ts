@@ -95,8 +95,8 @@ describe('MCP Skills extension', () => {
     await initWorkspaceProvider();
     await cleanupTestDatabase();
     orgA = await createTestOrganization({ slug: 'skills-ext-a' });
-    orgB = await createTestOrganization({ slug: 'skills-ext-b' });
-    orgC = await createTestOrganization({ slug: 'skills-ext-c' });
+    orgB = await createTestOrganization({ slug: 'skills-ext-b', visibility: 'public' });
+    orgC = await createTestOrganization({ slug: 'skills-ext-c', visibility: 'public' });
     const user = await createTestUser({ email: 'skills-ext@example.test' });
     userId = user.id;
     await addUserToOrganization(userId, orgA.id, 'owner');
@@ -117,6 +117,7 @@ describe('MCP Skills extension', () => {
     await createTestWorkspaceSkill({ organizationId: orgA.id, name: 'disabled-guide', enabled: false });
     await createTestWorkspaceSkill({ organizationId: orgB.id, name: 'b-guide' });
     await createTestWorkspaceSkill({ organizationId: orgC.id, name: 'c-guide' });
+    await createTestWorkspaceSkill({ organizationId: orgC.id, name: 'c-all-apps', appliesTo: [{ kind: 'app', id: null }] });
     await upsertEntityApprovalPolicy(orgA.id, {
       resourceClass: 'skill_config',
       principalKind: 'app',
@@ -195,6 +196,27 @@ describe('MCP Skills extension', () => {
     expect(await listUris(connection)).toEqual([LOBU_URI]);
     await expectUnknown(connection, 'skill://skills-ext-a/everyone-guide/SKILL.md');
     await expectUnknown(connection, 'skill://skills-ext-a/all-apps/SKILL.md');
+  });
+
+  it.each(['skills/list', 'skills/get', 'resources/read'])('keeps public workspace skills private from scoped OAuth nonmembers through %s', async (method) => {
+    const connection = await scoped(reader, orgC);
+    if (method === 'skills/list') {
+      expect(await listUris(connection)).toEqual([LOBU_URI]);
+      return;
+    }
+    for (const name of ['c-guide', 'c-all-apps']) {
+      const response = await mcpRequest(method, { uri: `skill://${orgC.slug}/${name}/SKILL.md` }, connection);
+      expect(response.result).toBeUndefined();
+      expect(response.error?.code).toBe(-32602);
+    }
+  });
+
+  it('serves public workspace skills to a scoped OAuth member', async () => {
+    const connection = await scoped(reader, orgB);
+    const uri = `skill://${orgB.slug}/b-guide/SKILL.md`;
+    expect(await listUris(connection)).toEqual([LOBU_URI, uri]);
+    expect((await mcpRequest('skills/get', { uri }, connection)).result.skill.uri).toBe(uri);
+    expect((await mcpRequest('resources/read', { uri }, connection)).result.contents[0].text).toContain('Follow the b-guide procedure.');
   });
 
   it('serves only the workspaces this connection reaches', async () => {

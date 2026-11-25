@@ -6,10 +6,10 @@
  * `skill://lobu/SKILL.md` (`skill://lobu` stays readable as an alias). Each
  * workspace library skill lives at `skill://<org-slug>/<name>/SKILL.md`.
  * A caller sees a library skill only when the workspace is reachable on this
- * connection, the `skill_config` read policy admits the acting principal, the
- * skill is enabled and one of its subjects matches that principal. The same
- * check answers list, get and read, so a skill missing from the list is unknown
- * to get and read as well.
+ * connection, the caller is a workspace member, the `skill_config` read policy
+ * admits the acting principal, the skill is enabled and one of its subjects
+ * matches that principal. The same check answers list, get and read, so a skill
+ * missing from the list is unknown to get and read as well.
  */
 import { createHash } from "node:crypto";
 import { isLibrarySkillName } from "@lobu/core/agent-tooling";
@@ -123,6 +123,7 @@ async function workspaceSkills(ctx: AccountToolContext, workspace: ReachableWork
 		if (error instanceof ToolUserError && error.httpStatus === 403) return [];
 		throw error;
 	}
+	if (!target.memberRole) return [];
 	const principal = await skillConfigReader(target);
 	if (!principal) return [];
 	const skills = await librarySkillsApplyingTo(getDb(), target.organizationId, principal, { enabledOnly: true });
