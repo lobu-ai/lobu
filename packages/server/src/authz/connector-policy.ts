@@ -3,6 +3,7 @@ import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
 import type { ActingPrincipal, EntityApprovalPolicy, EntityPolicyPrincipalKind } from "./entity-policy";
+import { principalMatches } from "./principal-matches";
 import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
 export const CONNECTOR_POLICY_CATEGORIES = [
@@ -255,17 +256,8 @@ export function evaluateConnectorPolicy(args: {
 	const decisive = orgRules.filter((rule) => !orgRules.some((other) => moreSpecific(other, rule)));
 	// With no matching rule the action runs: holds come from rules, never from silence.
 	let effect: ConnectorPolicyResult["effect"] = "auto";
-	const namesActor = (rule: EntityApprovalPolicy) =>
-		rule.principalKind === null ||
-		(rule.principalKind === args.actor.kind &&
-			(rule.principalId === null || rule.principalId === args.actor.id)) ||
-		(args.actor.kind === "automation" &&
-			args.actor.ownerAgentId !== null &&
-			rule.principalKind === "agent" &&
-			(rule.principalId === null ||
-				rule.principalId === args.actor.ownerAgentId));
 	const restrictions = grants.filter(
-		(rule) => rule.principalKind !== null && namesActor(rule),
+		(rule) => rule.principalKind !== null && principalMatches(rule, args.actor),
 	);
 	// The caller's own Auto rule for this exact action on this exact connection
 	// lifts every Ask first for it. Only a rule naming this caller (or an
@@ -289,7 +281,7 @@ export function evaluateConnectorPolicy(args: {
 	// log, check, hold or block: a stored `auto` (rejected on write) or any
 	// unrecognised effect fails closed to deny.
 	const guardrails = matches.filter(
-		(rule) => rule.kind !== "grant" && namesActor(rule),
+		(rule) => rule.kind !== "grant" && principalMatches(rule, args.actor),
 	);
 	let contributors: EntityApprovalPolicy[] = [];
 	const fold = (rule: EntityApprovalPolicy, candidate: ConnectorPolicyResult["effect"]) => {
