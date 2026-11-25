@@ -35,7 +35,10 @@ let proxyServer: http.Server;
  */
 class FakeJudgeClient implements JudgeClient {
   calls = 0;
-  impl: (args: { userPrompt: string }) => Promise<JudgeVerdict> = async () => ({
+  impl: (args: {
+    model: string;
+    userPrompt: string;
+  }) => Promise<JudgeVerdict> = async () => ({
     verdict: "deny",
     reason: "default",
   });
@@ -332,6 +335,57 @@ describe("HTTP Proxy — egress judge integration", () => {
       );
       expect(res.statusCode).toBe(403);
       expect(res.body).toContain("broad-judge-refused");
+      expect(fakeClient.calls).toBe(2);
+    } finally {
+      await saveGuardrails(BASE_GUARDRAILS);
+    }
+  });
+
+  // Two DISTINCT guardrails must stay two judges, however their fields line
+  // up. A cache key that joined name and policy with a space made
+  // ("owner check", "Only allow reads.") and ("owner", "check Only allow
+  // reads.") one judge, and a key without the model collapsed the same
+  // name+policy on two models; either collapse dropped a judge and its deny.
+  test.each([
+    {
+      label: "a name/policy split that reads the same once joined",
+      host: "split.collide.test",
+      guardrails: [
+        { name: "owner check", policy: "Only allow reads." },
+        { name: "owner", policy: "check Only allow reads." },
+      ],
+      denies: ({ userPrompt }: { model: string; userPrompt: string }) =>
+        !userPrompt.includes("check Only allow reads."),
+    },
+    {
+      label: "the same name and policy on two different models",
+      host: "model.collide.test",
+      guardrails: [
+        { name: "owner", policy: "Only allow reads.", model: "model-strict" },
+        { name: "owner", policy: "Only allow reads.", model: "model-lenient" },
+      ],
+      denies: ({ model }: { model: string; userPrompt: string }) =>
+        model === "model-strict",
+    },
+  ])("two distinct judges stay two judges: $label", async ({ host, guardrails, denies }) => {
+    await saveGuardrails([
+      ...BASE_GUARDRAILS,
+      ...guardrails.map((g) => ({
+        ...g,
+        enabled: true,
+        stage: "egress" as const,
+        domains: [host],
+      })),
+    ]);
+    try {
+      fakeClient.calls = 0;
+      fakeClient.impl = async (args) =>
+        denies(args)
+          ? { verdict: "deny", reason: "colliding-judge-refused" }
+          : { verdict: "allow", reason: "colliding-judge-allowed" };
+      const res = await rawProxyRequest(`http://${host}/collide`, auth());
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain("colliding-judge-refused");
       expect(fakeClient.calls).toBe(2);
     } finally {
       await saveGuardrails(BASE_GUARDRAILS);

@@ -83,14 +83,12 @@ export class PolicyStore {
   ): Promise<ResolvedJudgeRule[]> {
     const rules = await this.load(organizationId, agentId);
     const host = hostname.toLowerCase();
-    // Two guardrails with the same name and policy are one judge: same
-    // verdict-cache key, same answer, so ask it once.
-    const matched = new Map<string, ResolvedJudgeRule>();
-    for (const rule of rules) {
-      if (!matchesDomainPattern(host, rule.domains)) continue;
-      matched.set(rule.resolved.policyHash, rule.resolved);
-    }
-    return [...matched.values()];
+    // One entry per covering guardrail, never collapsed: every judge is
+    // evaluated, so dropping one would drop its deny. Identical guardrails
+    // share a verdict-cache key, so the runner still asks the model once.
+    return rules
+      .filter((rule) => matchesDomainPattern(host, rule.domains))
+      .map((rule) => rule.resolved);
   }
 
   private async load(
@@ -126,12 +124,7 @@ export class PolicyStore {
       resolved: {
         judgeName: rule.judgeName,
         policy: rule.policy,
-        policyHash: hashPolicy(
-          organizationId,
-          agentId,
-          rule.judgeName,
-          rule.policy
-        ),
+        policyHash: hashPolicy(organizationId, agentId, rule),
         ...(rule.model ? { judgeModel: rule.model } : {}),
       },
     }));
@@ -264,15 +257,28 @@ export function findSuppressedJudgedDomains(
   return suppressed;
 }
 
+/**
+ * Verdict-cache and circuit-breaker key for one judge. Every field that can
+ * change the verdict is hashed as one JSON tuple, so no two distinct judges can
+ * share a key: a delimiter-joined string let a name/policy split that reads the
+ * same once joined ("owner check" + "Only…" vs "owner" + "check Only…") collide,
+ * and two judges sharing a key share one cached verdict.
+ */
 function hashPolicy(
   organizationId: string,
   agentId: string,
-  judgeName: string,
-  policy: string
+  rule: EgressJudgeRule
 ): string {
   return crypto
     .createHash("sha256")
-    .update(`${organizationId} ${agentId} ${judgeName} ${policy}`)
-    .digest("hex")
-    .slice(0, 16);
+    .update(
+      JSON.stringify([
+        organizationId,
+        agentId,
+        rule.judgeName,
+        rule.policy,
+        rule.model ?? null,
+      ])
+    )
+    .digest("hex");
 }

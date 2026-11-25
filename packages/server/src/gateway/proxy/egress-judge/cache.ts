@@ -30,13 +30,15 @@ export class VerdictCache {
     method?: string;
     path?: string;
   }): string {
-    return [
+    // A JSON tuple, not a delimiter join: no field's content can bleed into
+    // its neighbour, so two different requests can never share a verdict.
+    return JSON.stringify([
       parts.orgId,
       parts.policyHash,
       parts.hostname.toLowerCase(),
       parts.method?.toUpperCase() ?? "",
       parts.path ?? "",
-    ].join("|");
+    ]);
   }
 
   get(key: string): JudgeVerdict | undefined {

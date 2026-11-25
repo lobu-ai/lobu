@@ -96,14 +96,30 @@ describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
     expect(rules.map((r) => r.judgeName).sort()).toEqual(["exact", "long", "short"]);
   });
 
-  test("two guardrails sharing a name are two judges unless their policy is identical", async () => {
+  test("every covering guardrail is its own judge, even an exact duplicate", async () => {
     await storeGuardrails([
       guardrail({ name: "dup", policy: "first", domains: ["x.com"] }),
       guardrail({ name: "dup", policy: "second", domains: ["x.com"] }),
       guardrail({ name: "dup", policy: "first", domains: [".x.com"] }),
     ]);
     const rules = await new PolicyStore().resolve("org-a", "agent-a", "x.com");
-    expect(rules.map((r) => r.policy).sort()).toEqual(["first", "second"]);
+    expect(rules.map((r) => r.policy)).toEqual(["first", "second", "first"]);
+    // The duplicate shares the first one's verdict-cache key (same verdict).
+    expect(rules[2]?.policyHash).toBe(rules[0]?.policyHash as string);
+  });
+
+  test("distinct judges never share a verdict-cache key", async () => {
+    await storeGuardrails([
+      // Reads the same as the next one once name and policy are space-joined.
+      guardrail({ name: "owner check", policy: "Only allow reads.", domains: ["x.com"] }),
+      guardrail({ name: "owner", policy: "check Only allow reads.", domains: ["x.com"] }),
+      // Same name and policy, different model: the verdict can differ.
+      guardrail({ name: "owner", policy: "Only allow reads.", model: "m-1", domains: ["x.com"] }),
+      guardrail({ name: "owner", policy: "Only allow reads.", model: "m-2", domains: ["x.com"] }),
+    ]);
+    const rules = await new PolicyStore().resolve("org-a", "agent-a", "x.com");
+    expect(rules).toHaveLength(4);
+    expect(new Set(rules.map((r) => r.policyHash)).size).toBe(4);
   });
 
   test("ignores disabled, non-egress and policy-less guardrails", async () => {
