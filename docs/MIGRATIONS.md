@@ -18,7 +18,9 @@ The rules below are what we wish #765 had followed.
 
 ## The deploy window (`-- lobu:no-quiesce` / `-- lobu:quiesce`)
 
-Unless every pending migration declares `-- lobu:no-quiesce`, the pre-upgrade hook scales the app and workers **to zero** before migrating. This stops old replicas from accessing the changed schema. The ingress answers with 503 until replacement pods are ready; the window includes migration execution and pod startup.
+An app configured with `RollingUpdate` and an explicit `maxUnavailable: 0` (or `0%`) keeps serving during upgrades. If any pending migration would require quiescence, the pre-upgrade hook refuses the release before changing the database or stopping a pod. Use separate compatible releases to retire schema dependencies before removing the schema.
+
+With other rollout strategies, the pre-upgrade hook scales the app and workers **to zero** when a pending migration lacks `-- lobu:no-quiesce`. This stops old replicas from accessing the changed schema. The ingress answers with 503 until replacement pods are ready, including migration execution and pod startup.
 
 **Every new migration declares its window**, and `make pre-pr` / CI fail one that doesn't (`scripts/check-migration-quiesce.mjs`). The check applies from version `20261015120001`; earlier migrations remain unchanged. Declare exactly one:
 

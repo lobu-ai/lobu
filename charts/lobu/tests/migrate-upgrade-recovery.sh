@@ -310,4 +310,33 @@ if [ -s "$command_log" ]; then
   exit 1
 fi
 
+# A zero-unavailable upgrade may run a compatible migration, but it must
+# reject an incompatible one before either Kubernetes or the database changes.
+for pending_code in 0 1 3 4; do
+  : >"$command_log"
+  : >"$migration_log"
+  upgrade_status=0
+  COMMAND_LOG="$command_log" MIGRATION_LOG="$migration_log" \
+  KUBECTL_BIN="$test_dir/kubectl" NAMESPACE=lobu \
+  APP_DEPLOYMENT=lobu-app APP_SELECTOR=component=api \
+  WORKER_DEPLOYMENT=lobu-worker WORKER_SELECTOR=component=worker \
+  MIGRATION_ALLOW_QUIESCE=false PENDING_EXIT_CODE="$pending_code" \
+    sh "$orchestrator" "$test_dir/migrate" >"$test_dir/online-output" 2>&1 || upgrade_status=$?
+  if [ -s "$command_log" ]; then
+    echo "zero-unavailable upgrade with pending status $pending_code touched Kubernetes:" >&2
+    cat "$command_log" >&2
+    exit 1
+  fi
+  case "$pending_code" in
+    0|1)
+      test "$upgrade_status" -eq 1
+      test ! -s "$migration_log"
+      ;;
+    3|4)
+      test "$upgrade_status" -eq 0
+      grep -Fxq 'migrate' "$migration_log"
+      ;;
+  esac
+done
+
 echo 'migration upgrade failure recovery passed'
