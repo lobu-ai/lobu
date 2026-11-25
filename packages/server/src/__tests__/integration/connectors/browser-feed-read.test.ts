@@ -45,6 +45,7 @@ import { runAutomationScriptTask } from '../../../automations/script-task';
 const SOURCE_KEY = 'browser-read-fixture';
 const VERSION = '0.0.1';
 const WORKER_ID = 'browser-source-read-worker';
+const PROBE_URL = 'https://source.example/account';
 const SOURCE = `
   import { defineConnector } from '@lobu/connector-sdk';
   export default defineConnector({
@@ -72,7 +73,10 @@ const SOURCE = `
             if (!ctx.config.synthetic_host_cleanup) await dispatcher.dispatch('close_tab', { tab_id: tab.tab_id });
           }
         }
-        const page = await dispatcher.dispatch('evaluate', { expression: ctx.query });
+        const tab = ctx.config.navigate_to_account === true
+          ? await dispatcher.dispatch('navigate', { url: '${PROBE_URL}', persistent: true, wait_for_load: true })
+          : undefined;
+        const page = await dispatcher.dispatch('evaluate', { ...(tab ? { tab_id: tab.tab_id } : {}), expression: ctx.query });
         return { rows: page.rows, hasMore: false };
       },
     } },
@@ -611,7 +615,7 @@ describe('compiled browser source reads', () => {
   async function liveDefinition() {
     const sql = getTestDb();
     await sql`UPDATE connector_definitions SET auth_schema = ${sql.json({methods:[{type:'browser',mode:'live'}]})},
-      browser = ${sql.json({origins:['https://source.example'],accountProbe:{url:'https://source.example/account',expression:'self_probe'}})}, supports_execute = true
+      browser = ${sql.json({origins:['https://source.example'],accountProbe:{url:PROBE_URL,expression:'self_probe'}})}, supports_execute = true
       WHERE organization_id = ${orgId} AND key = ${SOURCE_KEY}`;
     await upsertEntityApprovalPolicy(orgId, { resourceClass:'connector_action',connectorKey:SOURCE_KEY,effects:{execute:'auto'} });
   }
@@ -1084,6 +1088,8 @@ describe('compiled browser source reads', () => {
   }
   async function serveRecovery(reading: Promise<unknown>, options: {
     navigationFails?: boolean;
+    duplicateNavigationFails?: boolean;
+    firstNavigationLandsAt?: string;
     missingTabIdentity?: boolean;
     challenge?: 'probe' | 'late';
     changedAccount?: boolean;
@@ -1096,13 +1102,16 @@ describe('compiled browser source reads', () => {
     afterCleanup?: () => void;
   } = {}) {
     let probes = 0;
+    let navigations = 0;
     const jobs: Record<string, any>[] = [];
     await serveWorkerJobs({ until: reading, deadlineMs: READ_TIMEOUT_MS, poll: () => pollBrowser(options.appVersion), handle: async (job) => {
       jobs.push(job);
       const probe = job.operation_key === 'evaluate' && job.action_input.expression === 'self_probe';
       if (probe) probes++;
       const challenge = (options.challenge === 'probe' && probe) || (options.challenge === 'late' && job.operation_key === 'evaluate' && !probe);
+      if (job.operation_key === 'navigate') navigations++;
       const output = job.operation_key === 'navigate' ? { tab_id: 77,
+        current_url: (navigations === 1 ? options.firstNavigationLandsAt : undefined) ?? job.action_input.url,
         ...(!options.missingTabIdentity ? { browser_tab: { tab_id: 77, target_id: 'synthetic-target', window_id: 3 } } : {}) }
         : challenge ? { value: { __lobu_browser_interruption: { reason: 'challenge_required', message: 'Synthetic visible verification' } } }
         : probe ? { value: options.missingIdentityAfter !== undefined && probes > options.missingIdentityAfter ? null
@@ -1110,7 +1119,8 @@ describe('compiled browser source reads', () => {
         : job.operation_key === 'close_tab' ? { cleanup_ack: !options.cleanupFails, closed: true,
           ...(options.cleanupMarker ? { value: { __lobu_browser_interruption: { reason: 'account_mismatch', message: 'Synthetic cleanup mismatch' } } } : {}) }
         : { rows: ROWS };
-      const navigationFailed = options.navigationFails && job.operation_key === 'navigate';
+      const navigationFailed = job.operation_key === 'navigate'
+        && (options.navigationFails || (options.duplicateNavigationFails && navigations > 1));
       if (navigationFailed) Object.assign(output, { value: { __lobu_browser_interruption: { reason: 'loading_failure', message: 'Synthetic navigation failure' } } });
       if (options.loseOwnershipOnCleanup && job.operation_key === 'close_tab') {
         const sql = getTestDb();
@@ -1169,6 +1179,25 @@ describe('compiled browser source reads', () => {
         .metadata.browser_recovery).toBeUndefined();
     }
   });
+  it.each([
+    { name: 'already on the requested page', firstNavigationLandsAt: PROBE_URL, navigations: 1 },
+    { name: 'redirected to another page', firstNavigationLandsAt: 'https://source.example/other', navigations: 2 },
+  ])('reads from the account-checked tab with the required navigation when $name', async ({ firstNavigationLandsAt, navigations }) => {
+    await recoverySetup();
+    await getTestDb()`UPDATE feeds SET config = '{"navigate_to_account":true}'::jsonb WHERE id = ${feedId}`;
+    const reading = recoveryRead();
+    const jobs = await serveRecovery(reading, {
+      appVersion: '0.9.9', firstNavigationLandsAt, duplicateNavigationFails: navigations === 1,
+    });
+    expect((await reading).results[0]).toMatchObject({ ok: true, rows: ROWS });
+    expect(jobs.map(job => job.operation_key)).toEqual(
+      navigations === 1 ? ['navigate', 'evaluate', 'evaluate'] : ['navigate', 'evaluate', 'navigate', 'evaluate'],
+    );
+    expect(jobs[1].action_input).toMatchObject({ expression: 'self_probe', tab_id: 77 });
+    expect(jobs.at(-1)?.action_input).toMatchObject({ expression: 'private query', tab_id: 77 });
+    await expectScrubbed();
+  });
+
   it('preserves structured navigation failure during the account probe and closes its exact created target', async () => {
     await recoverySetup(); const reading = recoveryRead(); const jobs = await serveRecovery(reading, { navigationFails: true });
     const failure = (await reading).results[0];
