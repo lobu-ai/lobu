@@ -210,10 +210,20 @@ describe("issue creation gate", () => {
       action: "create",
       alert: { kind: "new_high", key: `issue-new:${FP(1)}` },
     });
-    expect(high?.alert?.body).toContain("2 users and 1 workspace affected");
+    expect(high?.alert?.body).toContain(
+      `${RULES.highMinUsers} users and 1 workspace affected`
+    );
     const [medium] = plan([occ({ max_users: 0, max_orgs: 0 })], []);
     expect(medium).toMatchObject({ action: "create" });
     expect(medium).not.toHaveProperty("alert");
+  });
+
+  test("two callers each hitting their own failure in one hour do not page", () => {
+    // Two unrelated people whose shell commands outran their own time limits
+    // in the same hour paged on-call, though nothing was down for anyone.
+    const [pair] = plan([occ({ max_users: 2, max_orgs: 2 })], []);
+    expect(pair).toMatchObject({ action: "create" });
+    expect(pair).not.toHaveProperty("alert");
   });
 
   test("an anonymous burst with no user or workspace never alerts", () => {
