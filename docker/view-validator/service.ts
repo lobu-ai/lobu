@@ -9,7 +9,9 @@ import { validateCandidate } from "./validate";
 /** Internal-only, credential-free endpoint. Deploy behind the supplied
  * NetworkPolicy; never expose it through the public ingress. */
 export function createValidatorServer() {
-  let busy = false;
+  // One validation at a time; concurrent requests wait their turn in arrival
+  // order. Each caller bounds its own wait with its request deadline.
+  let queue: Promise<void> = Promise.resolve();
   return createServer(async (req, res) => {
     if (req.url === "/health" && req.method === "GET") {
       res.end("ok");
@@ -19,12 +21,15 @@ export function createValidatorServer() {
       res.writeHead(404).end();
       return;
     }
-    if (busy) {
-      res.writeHead(503).end();
-      return;
-    }
-    busy = true;
+    const turn = queue;
+    let release!: () => void;
+    queue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     try {
+      await turn;
+      // The caller gave up while waiting; do not spend a browser run on it.
+      if (req.destroyed || res.destroyed) return;
       const chunks: Buffer[] = [];
       let size = 0;
       for await (const chunk of req) {
@@ -71,7 +76,7 @@ export function createValidatorServer() {
       // Infrastructure failure is never a validation pass (or a client error).
       res.writeHead(503).end();
     } finally {
-      busy = false;
+      release();
     }
   });
 }
