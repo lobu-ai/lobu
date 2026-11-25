@@ -1,9 +1,11 @@
 /**
  * Keyless provider validation — network-gated, but needs NO API keys.
  *
- * The oracle is each provider's own live API: an unauthenticated request to
- * the protocol-correct completion or models path is rejected before inference,
- * so a 404/405 catches an upstream route that disappeared. Exact protocol
+ * The oracle is each provider's own live API: a request carrying a placeholder
+ * credential to the protocol-correct completion or models path is rejected
+ * before inference, so a 404/405 catches an upstream route that disappeared.
+ * The placeholder matters: Google answers a request with no credential at all
+ * with 404, which would read as a missing route. Exact protocol
  * serialization is covered deterministically by the worker adapter E2E; this
  * network check only detects upstream drift. Model ids are never pinned here —
  * every model list comes live from the provider's own listing.
@@ -52,6 +54,10 @@ async function probe(
 ): Promise<{ status: number; body: unknown }> {
 	const res = await fetch(url, {
 		...init,
+		headers: {
+			...init?.headers,
+			authorization: "Bearer keyless-probe-placeholder",
+		},
 		signal: AbortSignal.timeout(TIMEOUT_MS),
 	});
 	let body: unknown = await res.text();
