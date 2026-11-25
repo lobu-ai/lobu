@@ -5,11 +5,19 @@ import { type ActingPrincipal, resolveActingPrincipal, resolveWritePolicyDecisio
 
 /**
  * Whether the caller may read the workspace skill library. Every library read
- * (manage_skills list/get, the catalog's installed view) goes through this one
- * check. Humans keep their org read access; the `skill_config` read policy
- * narrows agent, Automation and app principals.
+ * (manage_skills list/get, the catalog's installed view, the MCP Skills
+ * extension) goes through this one check. Humans keep their org read access;
+ * the `skill_config` read policy narrows agent, Automation and app principals.
  */
 export async function skillConfigReadAllowed(ctx: ToolContext): Promise<boolean> {
+	return (await skillConfigReader(ctx)) !== null;
+}
+
+/**
+ * The caller's acting principal when it may read the library, else null. The
+ * MCP Skills extension matches skill subjects against this same principal.
+ */
+export async function skillConfigReader(ctx: ToolContext): Promise<ActingPrincipal | null> {
 	const principal = await resolveActingPrincipal(getDb(), {
 		organizationId: ctx.organizationId,
 		userId: ctx.userId,
@@ -17,7 +25,7 @@ export async function skillConfigReadAllowed(ctx: ToolContext): Promise<boolean>
 		appId: ctx.appPrincipalId,
 		sessionAutomationId: ctx.actingAutomationId ?? null,
 	});
-	return skillConfigReadAllowedFor(ctx.organizationId, principal);
+	return (await skillConfigReadAllowedFor(ctx.organizationId, principal)) ? principal : null;
 }
 
 /** The same check for an already-resolved principal (an approval's original requester). */

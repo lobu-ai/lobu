@@ -312,6 +312,20 @@ describe("manage_skills", () => {
 			.toMatchObject({ skill: { archived: true } });
 	});
 
+	it("stores app subjects named by their connected-app key", async () => {
+		const appliesTo = [
+			{ principal_kind: "app", principal_id: "web:reader.example.test" },
+			{ principal_kind: "app", principal_id: null },
+			{ principal_kind: "app", principal_id: "web:reader.example.test" },
+		];
+		const { skill } = (await put(ownerCtx, { expected_revision: 0, skill: body("app-scoped", { applies_to: appliesTo }) })) as SkillResult;
+		expect(skill.applies_to).toHaveLength(2);
+		expect(skill.applies_to).toEqual(expect.arrayContaining([
+			{ principal_kind: "app", principal_id: "web:reader.example.test" },
+			{ principal_kind: "app", principal_id: null },
+		]));
+	});
+
 	it("answers 422 for a rename, a bad revision pairing and an unaccepted subject", async () => {
 		const { skill } = (await put(ownerCtx, { expected_revision: 0, skill: body("fixed-name") })) as SkillResult;
 		for (const args of [
@@ -319,7 +333,7 @@ describe("manage_skills", () => {
 			{ expected_revision: 1, skill: body("no-id") },
 			{ id: skill.id, expected_revision: 0, skill: body("fixed-name") },
 			{ expected_revision: 0, skill: body("Bad Name") },
-			{ expected_revision: 0, skill: body("app-scoped", { applies_to: [{ principal_kind: "app", principal_id: "app-1" }] }) },
+			{ expected_revision: 0, skill: body("bad-app-key", { applies_to: [{ principal_kind: "app", principal_id: "app-1" }] }) },
 			{ expected_revision: 0, skill: body("ghost", { applies_to: [{ principal_kind: "agent", principal_id: "no-such-agent" }] }) },
 		]) {
 			await expect(put(ownerCtx, args)).rejects.toMatchObject({ httpStatus: 422 });
