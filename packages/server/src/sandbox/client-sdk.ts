@@ -10,6 +10,7 @@ import { entityReadRestrictions } from "../authz/entity-read-policy";
 import { validateAndScopeQuery } from "../utils/execute-data-sources";
 import { resolveWindowQueryContext } from "../automations/window-read-context";
 import { canReadWorkspaceIdentity, CrossOrgAccessDenied, isAdminOrOwnerRole, memberReadRole, requireWorkspaceContext } from "../tools/access-control";
+import { accessRemedyOf, withAccessRemedy } from "../tools/access-fix";
 import {
 	ADMIN_ONLY_QUERYABLE_TABLES,
 	SAFE_COLUMN_DEFS,
@@ -187,10 +188,13 @@ export async function resolveCrossOrgToolContext(
 				slugOrId,
 			});
 			if (ungranted) {
-				throw new CrossOrgAccessDenied(formatUngrantedMemberMessage(ungranted.slug), {
-					reason: "ungranted_member",
-					workspaceSlug: ungranted.slug,
-				});
+				throw withAccessRemedy(
+					new CrossOrgAccessDenied(formatUngrantedMemberMessage(ungranted.slug), {
+						reason: "ungranted_member",
+						workspaceSlug: ungranted.slug,
+					}),
+					{ kind: "grant_workspace", workspace: ungranted.slug },
+				);
 			}
 		}
 		throw new CrossOrgAccessDenied(
@@ -237,7 +241,9 @@ export async function resolveToolWorkspaceTarget(
 		return await resolveCrossOrgToolContext(target, ctx);
 	} catch (error) {
 		if (error instanceof CrossOrgAccessDenied) {
-			throw new ToolUserError(error.message, 403, "PERMISSION");
+			const denied = new ToolUserError(error.message, 403, "PERMISSION");
+			const remedy = accessRemedyOf(error);
+			throw remedy ? withAccessRemedy(denied, remedy) : denied;
 		}
 		throw error;
 	}

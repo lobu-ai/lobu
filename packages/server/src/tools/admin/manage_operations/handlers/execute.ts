@@ -65,6 +65,7 @@ import {
 import { insertEvent } from "../../../../utils/insert-event";
 import { stripNul, stripNulDeep } from "../../../../utils/strip-nul";
 import { buildResourcePermalink } from "../../../../utils/url-builder";
+import { appendAccessFix, buildPolicyFix } from "../../../access-fix";
 import { trackAutomationReaction } from "../../../../utils/automation-reactions";
 import { executeConnectorOperation } from "../../../../operations/connector-delegation";
 import { dispatchChromeActionToExtension } from "../../../../worker-api/dispatch-chrome-action";
@@ -1008,11 +1009,28 @@ export async function handleExecute(
 		resolvePolicyPrincipal(sql, ctx.organizationId, actor),
 	]);
 	if (policy.effect === "deny") {
+		const refusal = policy.reason === "allowlist"
+			? allowlistRefusal(operation.operation_key)
+			: `Policy blocks '${operation.operation_key}' for this principal${connectorPolicyNoteSuffix(policy) || "."}`;
+		// A rule or allowed-actions list is lifted on the Policies page; an
+		// unresolved caller or unavailable operation is not a rule to edit.
+		const fix =
+			policy.reason === "allowlist" || policy.reason === "matched_rule" || policy.reason === "guardrail"
+				? await buildPolicyFix(
+					{
+						reason: policy.reason,
+						organizationId: ctx.organizationId,
+						connectionId: connection.id,
+						appPrincipalId: ctx.appPrincipalId ?? null,
+						memberRole: ctx.memberRole,
+					},
+					ctx,
+				)
+				: null;
 		return withFailureCode({
-			error: policy.reason === "allowlist"
-				? allowlistRefusal(operation.operation_key)
-				: `Policy blocks '${operation.operation_key}' for this principal${connectorPolicyNoteSuffix(policy) || "."}`,
+			error: appendAccessFix(refusal, fix),
 			policy: explainConnectorPolicy(policy, principal),
+			...(fix ? { fix } : {}),
 		}, "PERMISSION");
 	}
 	// A device-pinned connection runs on one member's own machine

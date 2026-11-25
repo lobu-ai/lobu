@@ -1109,9 +1109,22 @@ describe("operations.execute backend lifecycle", () => {
 				input: { value: "guardrail-blocked" },
 			}, {} as Env, ctx);
 			const requester = { kind: "user", id: null, label: null };
+			// An owner gets the Policies page narrowed to this connection; a member
+			// is told to ask an admin, since only admins manage rules.
+			const [{ slug }] = await sql`SELECT slug FROM organization WHERE id = ${orgId}`;
+			const rulesUrl = `https://gateway.test/lobu/${slug}/settings/policies?connection=${localConnectionId}`;
 			expect(blocked).toEqual({
-				error: `Policy blocks 'echo' for this principal: ${note}`,
+				error: `Policy blocks 'echo' for this principal: ${note}. To change the rule in ${slug}, open ${rulesUrl}`,
 				policy: { reason: "guardrail", rules: [{ id: guardrail.id, kind: "guardrail", note }], principal: requester },
+				fix: { action: "edit_rule", url: rulesUrl, who: "you", workspace: slug },
+			});
+			const memberBlocked = await manageOperations({
+				action: "execute", connection_id: localConnectionId, operation_key: "echo",
+				input: { value: "guardrail-blocked" },
+			}, {} as Env, { ...ctx, memberRole: "member" } as ToolContext);
+			expect(memberBlocked).toMatchObject({
+				error: `Policy blocks 'echo' for this principal: ${note}`,
+				fix: { action: "ask_admin", who: "workspace_admin", workspace: slug },
 			});
 			// A person in the web app is not stopped by a rule, and the run records
 			// it so every later recheck agrees.

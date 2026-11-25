@@ -31,6 +31,7 @@ import { METHOD_METADATA, type MethodAccess } from "./method-metadata";
 import type { ToolAccessLevel } from "../auth/tool-access";
 import { enumerateSDKManifest, type SDKMode } from "./sdk-manifest";
 import { AccessDeniedError, CrossOrgAccessDenied, McpScopeRequiredError } from "../tools/access-control";
+import { type AccessRemedy, accessRemedyOf } from "../tools/access-fix";
 import { getSdkPreflight } from "./sdk-preflight";
 import type { SourceCompileDiagnostic } from "../utils/compiler-core";
 import { ToolUserError } from "../utils/errors";
@@ -174,6 +175,8 @@ interface RunScriptResult {
 	startedSideEffects: Array<{ path: string; access: MethodAccess; count: number }>;
 	/** Token scopes requested by post-role-check SDK denials during this run. */
 	requiredMcpScopes: Array<"mcp:admin">;
+	/** What would lift the first access denial an SDK call hit during this run. */
+	accessRemedy: AccessRemedy | null;
 	sideEffectPreview: SdkCallTraceEntry[];
 	error?: {
 		name: string;
@@ -1184,6 +1187,7 @@ export async function runScript(
 	 */
 	const startedSideEffects = new Map<string, { access: MethodAccess; count: number }>();
 	const requiredMcpScopes = new Set<"mcp:admin">();
+	let accessRemedy: AccessRemedy | null = null;
 	const trustedErrorClassifications = new Map<
 		string,
 		TrustedErrorClassification
@@ -1358,6 +1362,7 @@ export async function runScript(
 	// typed SDK errors in envelopes, including failures during workspace lookup.
 	function sdkErrorEnvelope(error: unknown): string | null {
 		if (terminated) return terminalEnvelope();
+		accessRemedy ??= accessRemedyOf(error);
 		if (error instanceof SandboxRuntimeFailure) {
 			const json = JSON.stringify({
 				__lobu_sdk_dispatch: 1,
@@ -1575,6 +1580,7 @@ export async function runScript(
 				([path, { access, count }]) => ({ path, access, count }),
 			),
 			requiredMcpScopes: [...requiredMcpScopes],
+			accessRemedy,
 			sideEffectPreview,
 		};
 	}
@@ -1894,6 +1900,7 @@ export async function runScript(
 						([path, { access, count }]) => ({ path, access, count }),
 					),
 					requiredMcpScopes: [...requiredMcpScopes],
+					accessRemedy,
 					sideEffectPreview,
 				};
 			}
@@ -1943,6 +1950,7 @@ export async function runScript(
 				([path, { access, count }]) => ({ path, access, count }),
 			),
 			requiredMcpScopes: [...requiredMcpScopes],
+			accessRemedy,
 			sideEffectPreview,
 		};
 	} catch (err) {
@@ -1973,6 +1981,7 @@ export async function runScript(
 				([path, { access, count }]) => ({ path, access, count }),
 			),
 			requiredMcpScopes: [...requiredMcpScopes],
+			accessRemedy,
 			sideEffectPreview,
 		};
 	} finally {

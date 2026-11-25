@@ -44,7 +44,7 @@ export function canonicalizeGrantedOrganizationIds(
 	return unique;
 }
 
-/** Decode the immutable stored grant; missing snapshots grant no workspaces. */
+/** Decode the stored grant (widened only by its owner, `OAuthClientsStore.widenLogin`); missing snapshots grant no workspaces. */
 export function normalizeStoredGrantedOrganizationIds(value: unknown): string[] {
 	let parsed: string[] = [];
 	if (Array.isArray(value)) {
@@ -96,7 +96,7 @@ export async function listLiveGrantedMemberWorkspaces({
 }
 
 /**
- * Resolve one target through both the immutable grant snapshot and a fresh
+ * Resolve one target through both the stored grant snapshot and a fresh
  * membership join. Unknown, ungranted, and removed targets all return null so
  * callers can expose one indistinguishable authorization error.
  */

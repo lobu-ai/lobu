@@ -36,6 +36,7 @@ import {
 import { viewWorkspaceUrl } from "./utils/url-builder";
 import { getOperationsSummary } from "./operations/connector-operations";
 import { AccessDeniedError } from "./tools/access-control";
+import { type AccessFix, accessRemedyOf, appendAccessFix, buildAccessFix } from "./tools/access-fix";
 import { manageClassifiers } from "./tools/admin/manage_classifiers";
 import { manageAutomations } from "./tools/admin/manage_automations";
 import {
@@ -201,9 +202,13 @@ function isCallerCancellation(c: Context<{ Bindings: Env }>): boolean {
 
 function restErrorResponse(
 	c: Context<{ Bindings: Env }>,
-	thrown: unknown
+	thrown: unknown,
+	fix: AccessFix | null = null
 ): Response {
 	const error = asReadTimeout(thrown);
+	// What would lift a denial, beside the message (as on MCP), and in its text.
+	const withFix = (body: Record<string, unknown>, message: string) =>
+		fix ? { ...body, error: appendAccessFix(message, fix), fix } : body;
 	if (error instanceof ToolUserError) {
 		// Standard HTTP field for the structured wait, so a client (and any
 		// proxy) reads the delay instead of parsing "Try again in 26s".
@@ -211,7 +216,7 @@ function restErrorResponse(
 			c.header("Retry-After", String(error.retryAfterSeconds));
 		}
 		const response = c.json(
-			toolUserErrorBody(error),
+			withFix(toolUserErrorBody(error), error.message),
 			error.httpStatus as ContentfulStatusCode
 		);
 		// A 5xx answer (an upstream timeout or outage) is still a failure to
@@ -220,7 +225,7 @@ function restErrorResponse(
 		throw routeFailure(c, response, error);
 	}
 	if (error instanceof AccessDeniedError) {
-		return c.json({ error: error.message }, 403);
+		return c.json(withFix({ error: error.message }, error.message), 403);
 	}
 	if (error instanceof ToolNotRegisteredError) {
 		return c.json({ error: error.message }, 400);
@@ -393,6 +398,7 @@ export async function restToolProxy(
 	explicitToolName?: string,
 	explicitArgs?: Record<string, unknown>
 ) {
+	let authCtx: Awaited<ReturnType<typeof resolveRestToolAuthContext>> | undefined;
 	try {
 		const toolName = explicitToolName ?? c.req.param("toolName");
 		if (!toolName) {
@@ -403,7 +409,7 @@ export async function restToolProxy(
 		}
 		const args = explicitArgs ?? (await parseRestJsonObject<Record<string, unknown>>(c));
 		if (args instanceof Response) return args;
-		const authCtx = await resolveRestToolAuthContext(c);
+		authCtx = await resolveRestToolAuthContext(c);
 		const result = await executeTool(toolName, args, c.env, authCtx, c.req.raw.signal);
 		return c.json(toJsonSafe(toRestPublicToolResult(toolName, result)));
 	} catch (error) {
@@ -413,7 +419,9 @@ export async function restToolProxy(
 		// The tool boundary already logged this failure with its call id and
 		// issue fingerprint; the 5xx it becomes here is the same issue.
 		if (isToolFailureLogged(error)) markErrorReported(c);
-		return restErrorResponse(c, error);
+		const remedy = authCtx ? accessRemedyOf(error) : null;
+		const fix = remedy && authCtx ? await buildAccessFix(remedy, authCtx) : null;
+		return restErrorResponse(c, error, fix);
 	}
 }
 

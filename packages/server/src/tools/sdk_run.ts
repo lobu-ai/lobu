@@ -10,6 +10,7 @@ import { captureEffect } from "../gateway/routes/internal/capture-mode";
 import { buildMcpBearerChallenge } from "../auth/oauth/resource-indicator";
 import { DISCOVERY_SCOPES } from "../auth/oauth/scopes";
 import { isAdminOrOwnerRole } from "./access-control";
+import { appendAccessFix, buildAccessFix } from "./access-fix";
 import type { Env } from "../index";
 import { buildClientSDK, type SDKMode } from "../sandbox/client-sdk";
 import {
@@ -503,10 +504,18 @@ async function runSandbox(
   // transient upstream failure (worth re-running) from a permanent script fault.
   // run_sdk is never auto-retried by the wrapper (arbitrary side effects), so this
   // is purely advisory.
+  // A failed run that hit an access denial carries the fix that would lift
+  // it, in the message too for clients that only show text.
+  const fix =
+    result.error && result.accessRemedy ? await buildAccessFix(result.accessRemedy, ctx) : null;
   const error = result.error
     ? (() => {
         const classification = classifySdkScriptError(result.error);
-        return { ...result.error, ...classification };
+        return {
+          ...result.error,
+          ...classification,
+          ...(fix ? { message: appendAccessFix(result.error.message, fix), fix } : {}),
+        };
       })()
     : result.error;
   const title = args.title?.trim() || undefined;

@@ -9,8 +9,49 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { DbClient } from '../../db/client';
 import { pgTextArray, parsePgTextArray } from '../../db/client';
 import { recordLifecycleEvent } from '../../utils/insert-event';
+import { canonicalizeOAuthScopeGrant } from './scopes';
 import type { OAuthClient, OAuthClientMetadata, StoredOAuthClient } from './types';
 import { generateClientId, generateClientSecret } from './utils';
+
+export type OAuthMcpLevel = 'read' | 'write' | 'admin';
+
+const MCP_LEVELS: readonly OAuthMcpLevel[] = ['read', 'write', 'admin'];
+
+export type WidenLoginResult =
+  | { status: 'ok'; updatedTokens: number; level: OAuthMcpLevel | null }
+  | { status: 'not_found' }
+  | { status: 'too_many_workspaces'; limit: number };
+
+export interface LiveLogin {
+  clientId: string;
+  clientName: string | null;
+  redirectUris: string[];
+  authorizationGrantType: 'authorization_code' | 'device_code' | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  level: OAuthMcpLevel | null;
+  grantedOrganizationIds: string[];
+}
+
+/** The highest MCP level a stored scope string carries. */
+export function mcpLevelOf(scope: string | null | undefined): OAuthMcpLevel | null {
+  const scopes = new Set((scope ?? '').split(/\s+/).filter(Boolean));
+  for (const level of [...MCP_LEVELS].reverse()) {
+    if (scopes.has(`mcp:${level}`)) return level;
+  }
+  return null;
+}
+
+/**
+ * Raise a stored scope's MCP level, never lower it, in the cumulative form
+ * consent persists (`canonicalizeOAuthScopeGrant`). Other scopes are kept.
+ */
+function raiseMcpScope(scope: string | null | undefined, level: OAuthMcpLevel | null): string | null {
+  if (!level) return scope ?? null;
+  const current = mcpLevelOf(scope);
+  if (current && MCP_LEVELS.indexOf(current) >= MCP_LEVELS.indexOf(level)) return scope ?? null;
+  return canonicalizeOAuthScopeGrant(`${scope ?? ''} mcp:${level}`);
+}
 
 /**
  * Hash a client secret using scrypt (similar security to bcrypt)
@@ -412,6 +453,150 @@ export class OAuthClientsStore {
   }
 
   /**
+   * Widen one person's live login for a client: add a workspace to its grant
+   * and, when `level` is higher, raise its MCP scope. The mirror of
+   * {@link revokeClientForOrganization}: it edits the live token rows (and any
+   * unexpired code still in flight) in place, so the app's next request sees
+   * the wider grant with no reconnect. It never lowers access and never
+   * touches non-MCP scopes. Membership and role checks belong to the caller.
+   */
+  async widenLogin(params: {
+    clientId: string;
+    userId: string;
+    organizationId: string;
+    level: OAuthMcpLevel | null;
+    maxWorkspaces: number;
+  }): Promise<WidenLoginResult> {
+    const { clientId, userId, organizationId, level, maxWorkspaces } = params;
+    return this.sql.begin(async (tx) => {
+      // Same mutex as revoke, refresh, and code exchange.
+      const clientLock = await tx`
+        SELECT id FROM oauth_clients WHERE id = ${clientId} FOR UPDATE
+      `;
+      if (clientLock.length === 0) return { status: 'not_found' as const };
+
+      const live = await tx`
+        SELECT id, scope, granted_organization_ids
+        FROM oauth_tokens
+        WHERE client_id = ${clientId}
+          AND user_id = ${userId}
+          AND revoked_at IS NULL
+          AND expires_at > NOW()
+      `;
+      if (live.length === 0) return { status: 'not_found' as const };
+
+      const workspaces = new Set<string>([organizationId]);
+      for (const row of live) {
+        for (const id of parsePgTextArray(row.granted_organization_ids as string | null)) workspaces.add(id);
+      }
+      if (workspaces.size > maxWorkspaces) {
+        return { status: 'too_many_workspaces' as const, limit: maxWorkspaces };
+      }
+
+      let updatedTokens = 0;
+      for (const row of live) {
+        const scope = raiseMcpScope(row.scope as string | null, level);
+        const updated = await tx`
+          UPDATE oauth_tokens
+          SET
+            granted_organization_ids = CASE
+              WHEN COALESCE(granted_organization_ids, '{}'::text[]) @> ${pgTextArray([organizationId])}::text[]
+                THEN granted_organization_ids
+              ELSE array_append(COALESCE(granted_organization_ids, '{}'::text[]), ${organizationId})
+            END,
+            scope = ${scope}
+          WHERE id = ${row.id as string}
+          RETURNING id
+        `;
+        updatedTokens += updated.length;
+      }
+
+      // A code still in flight must not mint a narrower token afterwards.
+      const authorizationCodes = await tx`
+        SELECT code, scope FROM oauth_authorization_codes
+        WHERE client_id = ${clientId}
+          AND user_id = ${userId}
+          AND used_at IS NULL
+          AND expires_at > NOW()
+          AND granted_organization_ids IS NOT NULL
+      `;
+      for (const code of authorizationCodes) {
+        await tx`
+          UPDATE oauth_authorization_codes
+          SET
+            granted_organization_ids = CASE
+              WHEN granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
+                THEN granted_organization_ids
+              ELSE array_append(granted_organization_ids, ${organizationId})
+            END,
+            scope = ${raiseMcpScope(code.scope as string | null, level)}
+          WHERE code = ${code.code as string}
+        `;
+      }
+      const deviceCodes = await tx`
+        SELECT device_code, scope FROM oauth_device_codes
+        WHERE client_id = ${clientId}
+          AND user_id = ${userId}
+          AND expires_at > NOW()
+          AND granted_organization_ids IS NOT NULL
+      `;
+      for (const code of deviceCodes) {
+        await tx`
+          UPDATE oauth_device_codes
+          SET
+            granted_organization_ids = CASE
+              WHEN granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
+                THEN granted_organization_ids
+              ELSE array_append(granted_organization_ids, ${organizationId})
+            END,
+            scope = ${raiseMcpScope(code.scope as string | null, level)}
+          WHERE device_code = ${code.device_code as string}
+        `;
+      }
+
+      return {
+        status: 'ok' as const,
+        updatedTokens,
+        level: mcpLevelOf(raiseMcpScope(live[0]?.scope as string | null, level)),
+      };
+    });
+  }
+
+  /**
+   * One person's live login for a client: the newest live token's scope and
+   * grant, plus the client's registration. Null when the person holds no live
+   * token for it, so callers never confirm that someone else's login exists.
+   */
+  async getLiveLogin(clientId: string, userId: string): Promise<LiveLogin | null> {
+    const rows = await this.sql`
+      SELECT
+        t.scope, t.granted_organization_ids, t.authorization_grant_type,
+        c.client_name, c.redirect_uris, c.created_at, c.metadata
+      FROM oauth_tokens t
+      JOIN oauth_clients c ON c.id = t.client_id
+      WHERE t.client_id = ${clientId}
+        AND t.user_id = ${userId}
+        AND t.revoked_at IS NULL
+        AND t.expires_at > NOW()
+      ORDER BY t.created_at DESC
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    const metadata = (row.metadata ?? {}) as Record<string, unknown>;
+    return {
+      clientId,
+      clientName: (row.client_name as string | null) ?? null,
+      redirectUris: parsePgTextArray(row.redirect_uris as string | null),
+      authorizationGrantType: (row.authorization_grant_type as LiveLogin['authorizationGrantType']) ?? null,
+      createdAt: new Date(row.created_at as string | Date).toISOString(),
+      lastUsedAt: typeof metadata.last_seen_at === 'number' ? new Date(metadata.last_seen_at).toISOString() : null,
+      level: mcpLevelOf(row.scope as string | null),
+      grantedOrganizationIds: parsePgTextArray(row.granted_organization_ids as string | null),
+    };
+  }
+
+  /**
    * List clients for a user
    */
   async listClientsByUser(userId: string): Promise<OAuthClient[]> {
@@ -437,6 +622,8 @@ export class OAuthClientsStore {
       user_email?: string;
       owner_user_id: string | null;
       active_token_count: number;
+      /** How the newest grant to this workspace was issued; keys the app's policy principal. */
+      authorization_grant_type: 'authorization_code' | 'device_code' | null;
     })[]
   > {
     const result = await this.sql`
@@ -445,13 +632,18 @@ export class OAuthClientsStore {
         COALESCE(token_owner.user_name, code_owner.user_name) AS user_name,
         COALESCE(token_owner.user_email, code_owner.user_email) AS user_email,
         COALESCE(token_owner.token_user_id, code_owner.code_user_id) AS owner_user_id,
-        COALESCE(token_counts.active_token_count, 0)::int AS active_token_count
+        COALESCE(token_counts.active_token_count, 0)::int AS active_token_count,
+        CASE WHEN token_owner.token_user_id IS NOT NULL
+          THEN token_owner.authorization_grant_type
+          ELSE code_owner.authorization_grant_type
+        END AS authorization_grant_type
       FROM oauth_clients oc
       LEFT JOIN LATERAL (
         -- Prefer a live grant so a connected row names the person whose access
         -- the revoke action can actually remove. Fall back to the newest stale
         -- grant for disconnected registrations.
-        SELECT u.name AS user_name, u.email AS user_email, ot.user_id AS token_user_id
+        SELECT u.name AS user_name, u.email AS user_email, ot.user_id AS token_user_id,
+          ot.authorization_grant_type
         FROM oauth_tokens ot
         LEFT JOIN "user" u ON u.id = ot.user_id
         WHERE ot.client_id = oc.id
@@ -466,9 +658,10 @@ export class OAuthClientsStore {
         LIMIT 1
       ) token_owner ON true
       LEFT JOIN LATERAL (
-        SELECT u.name AS user_name, u.email AS user_email, grant_row.user_id AS code_user_id
+        SELECT u.name AS user_name, u.email AS user_email, grant_row.user_id AS code_user_id,
+          grant_row.authorization_grant_type
         FROM (
-          SELECT ac.user_id, ac.created_at, ac.code AS grant_id
+          SELECT ac.user_id, ac.created_at, ac.code AS grant_id, 'authorization_code' AS authorization_grant_type
           FROM oauth_authorization_codes ac
           WHERE ac.client_id = oc.id
             AND ac.expires_at > NOW()
@@ -477,7 +670,7 @@ export class OAuthClientsStore {
               OR ac.granted_organization_ids @> ${pgTextArray([organizationId])}::text[]
             )
           UNION ALL
-          SELECT dc.user_id, dc.created_at, dc.device_code AS grant_id
+          SELECT dc.user_id, dc.created_at, dc.device_code AS grant_id, 'device_code' AS authorization_grant_type
           FROM oauth_device_codes dc
           WHERE dc.client_id = oc.id
             AND dc.user_id IS NOT NULL
@@ -526,6 +719,11 @@ export class OAuthClientsStore {
         owner_user_id:
           ((row as Record<string, unknown>).owner_user_id as string | null) ?? null,
         active_token_count: (row as Record<string, unknown>).active_token_count as number,
+        authorization_grant_type:
+          ((row as Record<string, unknown>).authorization_grant_type as
+            | 'authorization_code'
+            | 'device_code'
+            | null) ?? null,
       };
     });
   }

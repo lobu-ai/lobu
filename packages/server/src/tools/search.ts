@@ -53,7 +53,8 @@ import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
-import { CrossOrgAccessDenied, requireWorkspaceContext, workspaceScopeDenialMessage } from './access-control';
+import { CrossOrgAccessDenied, requireWorkspaceContext, scopeRemedy, workspaceScopeDenialMessage } from './access-control';
+import { withAccessRemedy } from './access-fix';
 import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
 import { resolveCrossOrgToolContext } from '../sandbox/client-sdk';
 import { getContent } from './get_content';
@@ -507,7 +508,12 @@ async function resolveFederatedTargets(
           userId: ctx.userId,
           slugOrId: args.workspace,
         });
-        if (ungranted) throw new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403);
+        if (ungranted) {
+          throw withAccessRemedy(new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403), {
+            kind: 'grant_workspace',
+            workspace: ungranted.slug,
+          });
+        }
       }
       throw workspaceUnavailable();
     }
@@ -2261,7 +2267,10 @@ async function searchWorkspaceImpl(
   // not-applicable sentinel otherwise.
   const isMcpTokenCaller = ctx.tokenType === 'oauth' || ctx.tokenType === 'pat';
   if (isMcpTokenCaller && !hasRequiredMcpScope('read', ctx.scopes)) {
-    throw new ToolUserError(await workspaceScopeDenialMessage(ctx, 'search_memory', 'read'), 403);
+    throw withAccessRemedy(
+      new ToolUserError(await workspaceScopeDenialMessage(ctx, 'search_memory', 'read'), 403),
+      scopeRemedy(ctx, 'read')
+    );
   }
 
   const title = args.title?.trim() || undefined;

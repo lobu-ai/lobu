@@ -51,7 +51,8 @@ import {
 } from '../utils/entity-name-references';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { trackAutomationReaction } from '../utils/automation-reactions';
-import { isSystemContext, workspaceScopeDenialMessage } from './access-control';
+import { isSystemContext, scopeRemedy, workspaceScopeDenialMessage } from './access-control';
+import { withAccessRemedy } from './access-fix';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
 import { withTurnIdempotencyKey } from './turn-write-idempotency';
@@ -256,7 +257,10 @@ async function saveContentImpl(
       throw new ToolUserError('save_memory requires workspace membership with write access.', 403);
     }
     if (!hasRequiredMcpScope('write', ctx.scopes)) {
-      throw new ToolUserError(await workspaceScopeDenialMessage(ctx, 'save_memory', 'write'), 403);
+      throw withAccessRemedy(
+        new ToolUserError(await workspaceScopeDenialMessage(ctx, 'save_memory', 'write'), 403),
+        scopeRemedy(ctx, 'write')
+      );
     }
   }
 

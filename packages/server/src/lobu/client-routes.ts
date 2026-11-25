@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { deriveAppPrincipalId } from "../auth/app-principal";
 import { mcpAuth } from "../auth/middleware";
 import { OAuthClientsStore } from "../auth/oauth/clients";
 import { getDb, pgTextArray } from "../db/client";
@@ -261,6 +262,14 @@ routes.get("/", mcpAuth, async (c) => {
 					kind: "mcp" as const,
 					title,
 					drivenBy,
+					// The key this app's own policy rules are stored under.
+					appKey: deriveAppPrincipalId({
+						kind: "oauth",
+						clientId: client.client_id,
+						clientName: client.client_name,
+						authorizationGrantType: client.authorization_grant_type,
+						redirectUris: client.redirect_uris,
+					}),
 					registrationGroupKey:
 						client.client_name && client.owner_user_id
 							? JSON.stringify([

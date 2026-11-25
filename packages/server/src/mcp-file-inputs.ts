@@ -2,6 +2,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import type { AccountToolContext } from './tools/registry';
 import { resolveCrossOrgToolContext } from './sandbox/client-sdk';
 import { CrossOrgAccessDenied } from './tools/access-control';
+import { accessRemedyOf, withAccessRemedy } from './tools/access-fix';
 import { resolveGrantedWorkspaceTarget, findUngrantedMemberWorkspace } from './auth/oauth/workspace-grants';
 import { getLobuCoreServices } from './lobu/gateway';
 import { attachmentFromUrl, ingestInputFiles, MAX_INPUT_FILES } from './gateway/files/input-files';
@@ -40,7 +41,9 @@ export async function ingestMcpFiles(
         owner = await resolveCrossOrgToolContext(organization, ctx);
       } catch (err) {
         if (err instanceof CrossOrgAccessDenied) {
-          throw new ToolUserError(err.message, 403);
+          const denied = new ToolUserError(err.message, 403);
+          const remedy = accessRemedyOf(err);
+          throw remedy ? withAccessRemedy(denied, remedy) : denied;
         }
         throw err;
       }
