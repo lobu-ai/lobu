@@ -10,6 +10,12 @@ import type {
   TDataShape,
 } from "./client/index.js";
 import type {
+  ArchiveGuardrailData,
+  ArchiveGuardrailErrors,
+  ArchiveGuardrailResponses,
+  CreateGuardrailData,
+  CreateGuardrailErrors,
+  CreateGuardrailResponses,
   DeleteApiV1AgentsByAgentIdData,
   DeleteApiV1AgentsByAgentIdErrors,
   DeleteApiV1AgentsByAgentIdResponses,
@@ -56,6 +62,12 @@ import type {
   GetGithubAppInstallCallbackResponses,
   GetGithubAppInstallData,
   GetGithubAppInstallResponses,
+  GetGuardrailData,
+  GetGuardrailErrors,
+  GetGuardrailResponses,
+  ListGuardrailsData,
+  ListGuardrailsErrors,
+  ListGuardrailsResponses,
   ListMetricsData,
   ListMetricsErrors,
   ListMetricsResponses,
@@ -144,6 +156,9 @@ import type {
   ReadKnowledgeData,
   ReadKnowledgeErrors,
   ReadKnowledgeResponses,
+  ReplaceGuardrailData,
+  ReplaceGuardrailErrors,
+  ReplaceGuardrailResponses,
   ResolvePathData,
   ResolvePathErrors,
   ResolvePathResponses,
@@ -834,6 +849,102 @@ export const resolvePath = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/api/{orgSlug}/resolve_path",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * List the workspace guardrail library
+ *
+ * Built-in checks and custom judge/require-tool checks, ordered by name, with who each applies to.
+ */
+export const listGuardrails = <ThrowOnError extends boolean = false>(
+  options: Options<ListGuardrailsData, ThrowOnError>,
+): RequestResult<ListGuardrailsResponses, ListGuardrailsErrors, ThrowOnError> =>
+  (options.client ?? client).get<
+    ListGuardrailsResponses,
+    ListGuardrailsErrors,
+    ThrowOnError
+  >({ url: "/api/{orgSlug}/guardrails", ...options });
+
+/**
+ * Create a guardrail
+ *
+ * Creates a guardrail with expected_revision 0. Needs an owner/admin web session or a guardrails:write PAT.
+ */
+export const createGuardrail = <ThrowOnError extends boolean = false>(
+  options: Options<CreateGuardrailData, ThrowOnError>,
+): RequestResult<
+  CreateGuardrailResponses,
+  CreateGuardrailErrors,
+  ThrowOnError
+> =>
+  (options.client ?? client).put<
+    CreateGuardrailResponses,
+    CreateGuardrailErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/guardrails",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Archive a guardrail
+ *
+ * Archives the guardrail at its current revision; it stops applying at once. Needs an owner/admin web session or a guardrails:write PAT.
+ */
+export const archiveGuardrail = <ThrowOnError extends boolean = false>(
+  options: Options<ArchiveGuardrailData, ThrowOnError>,
+): RequestResult<
+  ArchiveGuardrailResponses,
+  ArchiveGuardrailErrors,
+  ThrowOnError
+> =>
+  (options.client ?? client).delete<
+    ArchiveGuardrailResponses,
+    ArchiveGuardrailErrors,
+    ThrowOnError
+  >({ url: "/api/{orgSlug}/guardrails/{id}", ...options });
+
+/**
+ * Get a guardrail
+ *
+ * One guardrail by id, archived included.
+ */
+export const getGuardrail = <ThrowOnError extends boolean = false>(
+  options: Options<GetGuardrailData, ThrowOnError>,
+): RequestResult<GetGuardrailResponses, GetGuardrailErrors, ThrowOnError> =>
+  (options.client ?? client).get<
+    GetGuardrailResponses,
+    GetGuardrailErrors,
+    ThrowOnError
+  >({ url: "/api/{orgSlug}/guardrails/{id}", ...options });
+
+/**
+ * Replace a guardrail
+ *
+ * Full replace at the current revision; the name is fixed. Needs an owner/admin web session or a guardrails:write PAT.
+ */
+export const replaceGuardrail = <ThrowOnError extends boolean = false>(
+  options: Options<ReplaceGuardrailData, ThrowOnError>,
+): RequestResult<
+  ReplaceGuardrailResponses,
+  ReplaceGuardrailErrors,
+  ThrowOnError
+> =>
+  (options.client ?? client).put<
+    ReplaceGuardrailResponses,
+    ReplaceGuardrailErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/guardrails/{id}",
     ...options,
     headers: {
       "Content-Type": "application/json",
