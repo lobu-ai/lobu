@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   canonicalizeHostname,
   decideEgress,
-  findLongestMatchingPattern,
   isUnrestrictedMode,
   matchesDomainPattern,
   patternReaches,
@@ -103,26 +102,6 @@ describe('wildcardParentPatterns', () => {
   test('the apex has no wildcard parent', () => {
     expect(wildcardParentPatterns('example.com')).toEqual([]);
     expect(wildcardParentPatterns('localhost')).toEqual([]);
-  });
-});
-
-describe('findLongestMatchingPattern', () => {
-  const rules = [{ domain: '.example.com' }, { domain: '.api.example.com' }, { domain: 'v2.api.example.com' }];
-  const byDomain = (rule: { domain: string }) => rule.domain;
-
-  test('an exact pattern beats any wildcard', () => {
-    expect(findLongestMatchingPattern('v2.api.example.com', rules, byDomain)?.domain).toBe('v2.api.example.com');
-  });
-
-  test('a longer wildcard beats a shorter one', () => {
-    expect(findLongestMatchingPattern('v3.api.example.com', rules, byDomain)?.domain).toBe('.api.example.com');
-    expect(findLongestMatchingPattern('www.example.com', rules, byDomain)?.domain).toBe('.example.com');
-  });
-
-  test('wildcards cover their apex; unrelated hosts match nothing', () => {
-    expect(findLongestMatchingPattern('example.com', rules, byDomain)?.domain).toBe('.example.com');
-    expect(findLongestMatchingPattern('Api.Example.com', rules, byDomain)?.domain).toBe('.api.example.com');
-    expect(findLongestMatchingPattern('other.com', rules, byDomain)).toBeUndefined();
   });
 });
 

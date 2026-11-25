@@ -146,7 +146,6 @@ describe("agent PATCH/GET /config — models surface", () => {
     expect((await sdk.get(AGENT)).settings).toMatchObject({ identityMd: "Triage identity", soulMd: "REST persona" });
     for (const settings of [
       { networkConfig: { allowedDomains: ["invalid host"] } },
-      { guardrailsInline: [{ name: "missing-policy", enabled: true, stage: "input" }] },
       { models: ["unknown-provider/model"] },
     ]) {
       const before = await sdk.get(AGENT);

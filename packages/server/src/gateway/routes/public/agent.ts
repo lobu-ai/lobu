@@ -1662,7 +1662,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
 
       const {
         networkConfig: settingsNetwork,
-        guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
         ...remainingOptions
       } = agentOptions;
@@ -1807,7 +1806,6 @@ export function createAgentApi(config: AgentApiConfig): Hono {
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,
-        guardrailsInline: settingsGuardrailsInline,
         nixConfig: resolvedNixConfig,
       }, humanMember ? { initiator: resolveRunInitiator({ userId: humanMember.userId }) } : undefined);
 

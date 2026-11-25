@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-  createRequireToolGuardrail,
-  createRequireToolGuardrailFromEntry,
-  isRequireToolEntry,
-} from "../../gateway/guardrails/require-tool";
-import type { AgentInlineGuardrail, OutputGuardrailContext } from "@lobu/core";
+import { createRequireToolGuardrail } from "../../gateway/guardrails/require-tool";
+import type { OutputGuardrailContext } from "@lobu/core";
 
 function ctx(
   over: Partial<OutputGuardrailContext> = {}
@@ -80,35 +76,3 @@ describe("createRequireToolGuardrail", () => {
   });
 });
 
-describe("from entry", () => {
-  test("isRequireToolEntry", () => {
-    expect(
-      isRequireToolEntry({
-        name: "x",
-        enabled: true,
-        stage: "output",
-        kind: "require-tool",
-        tools: ["send_message"],
-      })
-    ).toBe(true);
-    expect(
-      isRequireToolEntry({
-        name: "y",
-        enabled: true,
-        stage: "output",
-        policy: "no secrets",
-      })
-    ).toBe(false);
-  });
-
-  test("createRequireToolGuardrailFromEntry null when empty tools", () => {
-    const entry: AgentInlineGuardrail = {
-      name: "x",
-      enabled: true,
-      stage: "output",
-      kind: "require-tool",
-      tools: [],
-    };
-    expect(createRequireToolGuardrailFromEntry(entry)).toBeNull();
-  });
-});

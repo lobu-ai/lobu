@@ -13,7 +13,7 @@
  *   - Finding 3: `PolicyStore` was keyed by `agentId` alone, so the last
  *     `set()` across orgs won. Cache scoping became theatre because the
  *     policy fed into the verdict was already wrong. (The store now reads
- *     `agents.guardrails_inline` with an explicit org predicate; the
+ *     the workspace guardrail library with an explicit org predicate; the
  *     reproducers drive that read.)
  *   - Finding 6 — peek-before-consume — is covered by `slack-routes.test.ts`
  *     ("rejects when callback session org differs from install state"
@@ -32,6 +32,7 @@ import {
   generateWorkerTokenPair,
   verifyWorkerToken,
 } from "@lobu/core";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
 import { GrantStore } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
@@ -54,20 +55,12 @@ import { withFreePortRetry } from "../../__tests__/setup/free-port.js";
 describe("[finding 3] PolicyStore is keyed by (orgId, agentId)", () => {
   async function storePolicy(orgId: string, agentId: string, policy: string) {
     await seedAgentRow(agentId, { organizationId: orgId });
-    const sql = getDb();
-    const guardrails = [
-      {
-        name: "default",
-        enabled: true,
-        stage: "egress",
-        policy,
-        domains: ["api.example.com"],
-      },
-    ];
-    await sql`
-      UPDATE agents SET guardrails_inline = ${sql.json(guardrails)}
-      WHERE organization_id = ${orgId} AND id = ${agentId}
-    `;
+    await createTestWorkspaceGuardrail({
+      organizationId: orgId,
+      name: "default",
+      config: { kind: "judge", stage: "egress", policy, domains: ["api.example.com"] },
+      appliesTo: [{ kind: "agent", id: agentId }],
+    });
   }
 
   beforeAll(async () => {
@@ -108,10 +101,7 @@ describe("[finding 3] PolicyStore is keyed by (orgId, agentId)", () => {
     await store.resolve("org-a", "shared", "api.example.com");
     await store.resolve("org-b", "shared", "api.example.com");
 
-    await getDb()`
-      UPDATE agents SET guardrails_inline = '[]'
-      WHERE organization_id = 'org-a' AND id = 'shared'
-    `;
+    await getDb()`DELETE FROM workspace_guardrails WHERE organization_id = 'org-a'`;
     expect(await store.resolve("org-a", "shared", "api.example.com")).toEqual([]);
     const [b] = await store.resolve("org-b", "shared", "api.example.com");
     expect(b?.policy).toBe("B");

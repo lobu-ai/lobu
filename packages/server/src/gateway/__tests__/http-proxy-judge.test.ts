@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type * as http from "node:http";
 import * as net from "node:net";
-import type { AgentInlineGuardrail } from "@lobu/core";
 import { generateWorkerTokenPair } from "@lobu/core";
-import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
-import { orgContext } from "../../lobu/stores/org-context.js";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
+import { getDb } from "../../db/client.js";
 import type { GrantStore } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
 import { EgressJudge } from "../proxy/egress-judge/judge.js";
@@ -57,7 +56,17 @@ const fakeClient = new FakeJudgeClient();
 // `example.com` is used for the allow-path HTTP tests because its real server
 // closes the socket after responding — tests that use hosts with keep-alive
 // (api.github.com, etc.) hang the raw socket reader.
-const BASE_GUARDRAILS: AgentInlineGuardrail[] = [
+/** An egress judge as the tests declare it; saved as a library guardrail. */
+interface EgressJudgeSpec {
+  name: string;
+  enabled: boolean;
+  stage: "egress";
+  policy: string;
+  model?: string;
+  domains: string[];
+}
+
+const BASE_GUARDRAILS: EgressJudgeSpec[] = [
   {
     name: "default",
     enabled: true,
@@ -75,19 +84,24 @@ const BASE_GUARDRAILS: AgentInlineGuardrail[] = [
 ];
 
 /**
- * Save the agent's guardrails through the real settings store — the same
- * write the config route and `manage_agents` make — so the proxy's view of the
- * policy is exactly what a save leaves in Postgres.
+ * Replace the org's workspace guardrail library with `judges`, each applying
+ * to agent-a, so the proxy's view of the policy is exactly what the library
+ * holds in Postgres.
  */
 async function saveGuardrails(
-  guardrailsInline: AgentInlineGuardrail[],
+  judges: EgressJudgeSpec[],
   organizationId = "org-a"
 ): Promise<void> {
-  await orgContext.run({ organizationId }, () =>
-    createPostgresAgentConfigStore().updateSettings("agent-a", {
-      guardrailsInline,
-    })
-  );
+  await getDb()`DELETE FROM workspace_guardrails WHERE organization_id = ${organizationId}`;
+  for (const { name, enabled, stage, ...rest } of judges) {
+    await createTestWorkspaceGuardrail({
+      organizationId,
+      name,
+      enabled,
+      config: { kind: "judge", stage, ...rest },
+      appliesTo: [{ kind: "agent", id: "agent-a" }],
+    });
+  }
 }
 
 beforeAll(async () => {
@@ -343,26 +357,26 @@ describe("HTTP Proxy — egress judge integration", () => {
 
   // Two DISTINCT guardrails must stay two judges, however their fields line
   // up. A cache key that joined name and policy with a space made
-  // ("owner check", "Only allow reads.") and ("owner", "check Only allow
-  // reads.") one judge, and a key without the model collapsed the same
-  // name+policy on two models; either collapse dropped a judge and its deny.
+  // ("owner-check", "Only allow reads.") and ("owner", "-check Only allow
+  // reads.") one judge, and a key without the model collapsed the same policy
+  // on two models; either collapse dropped a judge and its deny.
   test.each([
     {
       label: "a name/policy split that reads the same once joined",
       host: "split.collide.test",
       guardrails: [
-        { name: "owner check", policy: "Only allow reads." },
-        { name: "owner", policy: "check Only allow reads." },
+        { name: "owner-check", policy: "Only allow reads." },
+        { name: "owner", policy: "-check Only allow reads." },
       ],
       denies: ({ userPrompt }: { model: string; userPrompt: string }) =>
-        !userPrompt.includes("check Only allow reads."),
+        !userPrompt.includes("-check Only allow reads."),
     },
     {
-      label: "the same name and policy on two different models",
+      label: "the same policy on two different models",
       host: "model.collide.test",
       guardrails: [
-        { name: "owner", policy: "Only allow reads.", model: "model-strict" },
-        { name: "owner", policy: "Only allow reads.", model: "model-lenient" },
+        { name: "owner-strict", policy: "Only allow reads.", model: "model-strict" },
+        { name: "owner-lenient", policy: "Only allow reads.", model: "model-lenient" },
       ],
       denies: ({ model }: { model: string; userPrompt: string }) =>
         model === "model-strict",

@@ -18,14 +18,30 @@ import {
 	type GuardrailRegistry,
 	runGuardrailInstances,
 } from "@lobu/core";
-import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { getDb } from "../../db/client.js";
+import { resolveOrgId } from "../../lobu/stores/org-context.js";
 import {
-  enabledInlineGuardrails,
-  resolveAgentGuardrails,
-} from "./aggregator.js";
+  agentGuardrailPrincipal,
+  resolveGuardrails,
+} from "../../guardrails/workspace-guardrails.js";
+import { buildGuardrailsByStage } from "./aggregator.js";
 import { recordGuardrailTrip } from "./audit.js";
 
 const logger = createLogger("output-guardrail");
+
+/** The output-stage guardrails the library applies to this agent. */
+async function outputGuardrailsFor(
+  registry: GuardrailRegistry,
+  agentId: string,
+  organizationId: string
+) {
+  const guardrails = await resolveGuardrails(
+    getDb(),
+    organizationId,
+    agentGuardrailPrincipal(agentId)
+  );
+  return buildGuardrailsByStage(guardrails, registry, organizationId).output;
+}
 
 export interface OutputScanContext {
   agentId: string;
@@ -46,35 +62,27 @@ export interface OutputGuardrailTrip {
  * Run output-stage guardrails for `scanText`. Returns the trip outcome
  * (already audited via `recordGuardrailTrip`) on block, or `null` when safe to
  * send. Returns `null` (pass) when guardrails aren't wired, the text is empty,
- * no agent is resolved, the agent has no output guardrails, or the runner
- * throws — guardrails fail open.
+ * no agent or organization (explicit or ambient) is resolved, the agent has no output guardrails,
+ * or the runner throws — guardrails fail open.
  */
 export async function runOutputGuardrailScan(
   registry: GuardrailRegistry | undefined,
-  settingsStore: AgentSettingsStore | undefined,
   scanText: string,
   ctx: OutputScanContext
 ): Promise<OutputGuardrailTrip | null> {
-  if (!registry || !settingsStore) return null;
+  if (!registry) return null;
   if (!scanText) return null;
-  if (!ctx.agentId) return null;
+  // A payload without an organization (the agent-threads/messaging-api
+  // dispatch paths) still resolves through the ambient org context.
+  const organizationId = resolveOrgId(ctx.organizationId);
+  if (!ctx.agentId || !organizationId) return null;
 
   try {
-    // Org-scope the read (see resolveAgentOptions): a shared agent id lives in
-    // multiple orgs and this runs without ambient orgContext, so an unscoped
-    // read can resolve another org's guardrails. ctx carries the org already.
-    const settings = await settingsStore.getSettings(ctx.agentId, {
-      organizationId: ctx.organizationId,
-    });
-    const resolved = resolveAgentGuardrails(
-      settings ?? { guardrails: [] },
+    const list = await outputGuardrailsFor(
       registry,
-      {
-        inline: enabledInlineGuardrails(settings),
-        organizationId: ctx.organizationId,
-      }
+      ctx.agentId,
+      organizationId
     );
-    const list = resolved.byStage.output;
     if (list.length === 0) return null;
 
     const outcome = await runGuardrailInstances("output", list, {
@@ -128,46 +136,32 @@ export async function runOutputGuardrailScan(
  */
 export class OutputGuardrailScanner {
   private registry?: GuardrailRegistry;
-  private settingsStore?: AgentSettingsStore;
 
-  setGuardrails(
-    registry?: GuardrailRegistry,
-    settingsStore?: AgentSettingsStore
-  ): void {
+  setGuardrails(registry?: GuardrailRegistry): void {
     this.registry = registry;
-    this.settingsStore = settingsStore;
   }
 
   get enabled(): boolean {
-    return !!(this.registry && this.settingsStore);
+    return !!this.registry;
   }
 
   /**
    * Whether `agentId` has ANY output-stage guardrail configured. When true the
    * consumer withholds streaming deltas and delivers only the scanned
    * `finalText`. Fails open (returns false) on a lookup error — consistent with
-   * guardrails never blocking on infra failure. Resolution rides the
-   * AgentSettingsStore's own memoization (the chat bridge resolves per-delta the
-   * same way), so no extra cache is kept here (avoids config-edit staleness).
-   * Pass `organizationId` so the read is org-scoped: a shared agent id exists in
-   * multiple orgs and the worker path has no ambient orgContext, so an unscoped
-   * read could resolve another org's guardrail config.
+   * guardrails never blocking on infra failure. Each call reads the library,
+   * so no cache is kept here (avoids config-edit staleness). The read is
+   * org-scoped: agent ids are only unique per org.
    */
   async hasOutputGuardrails(
     agentId: string,
     organizationId?: string
   ): Promise<boolean> {
-    if (!this.enabled || !agentId) return false;
+    const orgId = resolveOrgId(organizationId);
+    if (!this.registry || !agentId || !orgId) return false;
     try {
-      const settings = await this.settingsStore!.getSettings(agentId, {
-        organizationId,
-      });
-      const resolved = resolveAgentGuardrails(
-        settings ?? { guardrails: [] },
-        this.registry!,
-        { inline: enabledInlineGuardrails(settings) }
-      );
-      return resolved.byStage.output.length > 0;
+      const list = await outputGuardrailsFor(this.registry, agentId, orgId);
+      return list.length > 0;
     } catch {
       return false;
     }
@@ -182,6 +176,6 @@ export class OutputGuardrailScanner {
     text: string,
     ctx: OutputScanContext
   ): Promise<OutputGuardrailTrip | null> {
-    return runOutputGuardrailScan(this.registry, this.settingsStore, text, ctx);
+    return runOutputGuardrailScan(this.registry, text, ctx);
   }
 }

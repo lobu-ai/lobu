@@ -101,7 +101,6 @@ function fullOrgRoutes(): Record<
         allowedDomains: ["github.com", ".github.com"],
         deniedDomains: ["evil.com"],
       },
-      guardrails: ["secret-scan"],
       nixConfig: { packages: ["jq", "ffmpeg"] },
       soulMd: "Be concise.",
       identityMd: "You are sales.",
@@ -437,7 +436,6 @@ describe("lobu init --from-org", () => {
       credentialMode: "byo",
       config: { botToken: "xoxb-test", mode: "socket" },
     });
-    expect(agent?.settings.guardrails).toEqual(["secret-scan"]);
     expect(agent?.settings.nixConfig?.packages).toEqual(["jq", "ffmpeg"]);
     expect(agent?.settings).not.toHaveProperty("skillsConfig");
     expect(agent?.settings.soulMd).toBe("Be concise.");

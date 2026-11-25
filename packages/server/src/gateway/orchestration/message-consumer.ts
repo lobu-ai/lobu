@@ -15,10 +15,12 @@ import {
 	runInSpanContext,
 	SpanStatusCode,
 } from "@lobu/core";
+import { buildGuardrailsByStage } from "../guardrails/aggregator.js";
+import { getDb } from "../../db/client.js";
 import {
-  enabledInlineGuardrails,
-  resolveAgentGuardrails,
-} from "../guardrails/aggregator.js";
+  agentGuardrailPrincipal,
+  resolveGuardrails,
+} from "../../guardrails/workspace-guardrails.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
@@ -474,24 +476,21 @@ export class MessageConsumer {
       let inputTrip: { reason: string; guardrail: string } | null = null;
       if (
         this.guardrailRegistry &&
-        this.agentSettingsStore &&
+        data.organizationId &&
         data.agentId &&
         data.messageText
       ) {
         try {
-          const settings = await this.agentSettingsStore.getSettings(
-            data.agentId,
-            { organizationId: data.organizationId }
+          const guardrails = await resolveGuardrails(
+            getDb(),
+            data.organizationId,
+            agentGuardrailPrincipal(data.agentId)
           );
-          const resolved = resolveAgentGuardrails(
-            settings ?? { guardrails: [] },
+          const list = buildGuardrailsByStage(
+            guardrails,
             this.guardrailRegistry,
-            {
-              inline: enabledInlineGuardrails(settings),
-              organizationId: data.organizationId,
-            }
-          );
-          const list = resolved.byStage.input;
+            data.organizationId
+          ).input;
           if (list.length > 0) {
             const outcome = await runGuardrailInstances("input", list, {
               agentId: data.agentId,

@@ -1,4 +1,4 @@
-export { resolveAgentGuardrails } from "./aggregator.js";
+export { buildGuardrailsByStage } from "./aggregator.js";
 export {
   createPiiScanGuardrail,
   luhnValid,

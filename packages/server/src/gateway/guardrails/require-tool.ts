@@ -10,28 +10,18 @@
  *   - toolsUsed **present**, all required present → **pass**
  *   - toolsUsed **[]** counts as present → miss trips
  *
- * Config: `guardrailsInline` with `kind: "require-tool"` and a manual
+ * Config: a workspace guardrail with `kind: "require-tool"` and a manual
  * `tools` array (e.g. `["send_message"]`). No model call.
  *
- * Server-side only: materialised by the aggregator per agent.
+ * Server-side only: materialised by the aggregator per principal.
  */
 
-import type {
-  AgentInlineGuardrail,
-  Guardrail,
-  OutputGuardrailContext,
-} from "@lobu/core";
+import type { Guardrail, OutputGuardrailContext } from "@lobu/core";
 
 export interface RequireToolOptions {
   name: string;
   /** Tool names that must appear in `ctx.toolsUsed` this turn. */
   tools: readonly string[];
-}
-
-export function isRequireToolEntry(
-  entry: AgentInlineGuardrail
-): entry is AgentInlineGuardrail & { kind: "require-tool" } {
-  return entry.kind === "require-tool";
 }
 
 /**
@@ -87,17 +77,4 @@ export function createRequireToolGuardrail(
       };
     },
   };
-}
-
-/** Build from a validated inline settings entry. */
-export function createRequireToolGuardrailFromEntry(
-  entry: AgentInlineGuardrail
-): Guardrail<"output"> | null {
-  if (!isRequireToolEntry(entry)) return null;
-  const tools = entry.tools ?? [];
-  if (tools.length === 0) return null;
-  return createRequireToolGuardrail({
-    name: entry.name,
-    tools,
-  });
 }

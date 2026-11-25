@@ -92,8 +92,6 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
 		verboseLogging: row.verbose_logging ?? undefined,
 		showToolCalls: row.show_tool_calls ?? undefined,
 		starters: row.starters ?? undefined,
-		guardrails: row.guardrails ?? undefined,
-		guardrailsInline: row.guardrails_inline ?? undefined,
 		sandboxId: row.sandbox_id ?? undefined,
 		updatedAt: tsTime(row.updated_at),
 	};
@@ -150,7 +148,6 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
                  network_config, nix_config,
                  soul_md, user_md, identity_md,
                  verbose_logging, show_tool_calls, starters,
-                 guardrails, guardrails_inline,
                  sandbox_id, updated_at
           FROM agents
           WHERE id = ${agentId} AND organization_id = ${orgId}
@@ -173,8 +170,6 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
           verbose_logging = ${settings.verboseLogging ?? false},
           show_tool_calls = ${settings.showToolCalls ?? false},
           starters = ${sql.json(settings.starters ?? [])},
-          guardrails = ${sql.json(settings.guardrails ?? [])},
-          guardrails_inline = ${sql.json(settings.guardrailsInline ?? [])},
           sandbox_id = ${settings.sandboxId ?? null},
           updated_at = ${now}
         WHERE id = ${agentId} AND organization_id = ${orgId}
@@ -200,7 +195,6 @@ export function createPostgresAgentConfigStore(transaction?: DbClient): AgentCon
           verbose_logging = false,
           show_tool_calls = false,
           starters = '[]',
-          guardrails = '[]', guardrails_inline = '[]',
           sandbox_id = NULL,
           updated_at = now()
         WHERE id = ${agentId} AND organization_id = ${orgId}

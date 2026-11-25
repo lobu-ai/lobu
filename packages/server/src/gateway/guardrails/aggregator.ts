@@ -1,183 +1,101 @@
 import {
-  type AgentInlineGuardrail,
-  type AgentSettings,
   type Guardrail,
   type GuardrailRegistry,
   type GuardrailStage,
   createLogger,
 } from "@lobu/core";
+import { isBuiltinGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
+import type { ApplyingGuardrail } from "../../guardrails/workspace-guardrails.js";
 import { createJudgeGuardrail } from "./judge-factory.js";
-import {
-  createRequireToolGuardrailFromEntry,
-  isRequireToolEntry,
-} from "./require-tool.js";
+import { createRequireToolGuardrail } from "./require-tool.js";
 
 const logger = createLogger("guardrail-aggregator");
 
-interface AgentGuardrailExtras {
-  /**
-   * Operator-authored custom guardrails (`AgentSettings.guardrailsInline`).
-   * Each materializes into a judge guardrail under its operator-given `name`.
-   * Callers pass only the entries they want active (filter on `enabled`).
-   */
-  inline?: AgentInlineGuardrail[];
-  /**
-   * Authenticated org of the caller. Judge guardrails with no model of their
-   * own run on this org's default provider model; absent = they fail closed.
-   */
-  organizationId?: string;
-  /**
-   * Operator's exclude list — names matched against the resolved guardrails'
-   * `.name` (including synthesized inline names). Applied last.
-   */
-  disabled?: string[];
-}
+const MESSAGE_STAGES = ["input", "output", "pre-tool"] as const;
 
 /**
- * The agent's active custom guardrails, shaped for `extras.inline`. Disabled
- * entries are kept in settings (so the operator can flip them back on) but
- * never resolved into a run — every resolve call site filters through here so
- * the input/output/pre-tool paths stay consistent.
+ * Materialize the message-pipeline guardrails (input, output, pre-tool) from
+ * the library rows `resolveGuardrails` returned for a principal.
+ *
+ * Guardrails accumulate: every row runs, under its own library name, and any
+ * trip wins. Nothing is deduplicated or shadowed by name.
+ *
+ * - A built-in row runs the registered built-in at every stage it implements.
+ * - A custom `judge` row runs at its stage; `require-tool` runs at output.
+ * - `egress` rows are enforced in the http-proxy plane (the policy store and
+ *   EgressJudge), never here.
+ *
+ * A row that cannot run (an unknown built-in, a judge without a policy, a
+ * require-tool without tools or off the output stage) is logged and skipped,
+ * the same posture as `GuardrailRegistry.resolve()`.
  */
-export function enabledInlineGuardrails(
-  settings: Pick<AgentSettings, "guardrailsInline"> | null | undefined
-): AgentInlineGuardrail[] {
-  return (settings?.guardrailsInline ?? []).filter((g) => g.enabled);
-}
-
-interface ResolvedAgentGuardrails {
-  /**
-   * Effective per-stage guardrail instances, after merge + dedup + exclude.
-   * Inline judges are NOT registered on the shared registry — the aggregator
-   * constructs them in-place and returns them already-resolved so the gateway
-   * can run them directly.
-   */
-  byStage: Record<GuardrailStage, Guardrail[]>;
-}
-
-function emptyByStage(): Record<GuardrailStage, Guardrail[]> {
-  // `egress` is part of the stage taxonomy but is never resolved/run by the
-  // message pipeline — enforcement lives in the http-proxy egress plane. The
-  // slot stays empty here; the resolution loops below iterate only the three
-  // message-pipeline stages so nothing is ever pushed into it.
-  return { input: [], output: [], "pre-tool": [], egress: [] };
-}
-/**
- * Resolve the full set of guardrails to run for an agent. Combines:
- *   1. `agentSettings.guardrails` — built-in / globally-registered names.
- *   2. `extras.inline` — agent-declared inline judges (`guardrails_inline`).
- * Then subtracts `extras.disabled` (matched against the final `.name`).
- *
- * Dedup is name-keyed within a stage: a name that resolves twice runs once.
- *
- * Inline judges are NOT registered on the shared registry — the aggregator
- * constructs them in-place and returns them so the runner can include them
- * alongside registry-resolved entries.
- *
- * Unknown built-in names are logged and skipped — same posture as
- * `GuardrailRegistry.resolve()`.
- */
-export function resolveAgentGuardrails(
-  agentSettings: Pick<AgentSettings, "guardrails">,
+export function buildGuardrailsByStage(
+  guardrails: readonly ApplyingGuardrail[],
   registry: GuardrailRegistry,
-  extras: AgentGuardrailExtras = {}
-): ResolvedAgentGuardrails {
-  const byStage = emptyByStage();
-  // Per-stage name -> Guardrail map, used for dedup.
-  const seen: Record<GuardrailStage, Map<string, Guardrail>> = {
-    input: new Map(),
-    output: new Map(),
-    "pre-tool": new Map(),
-    // Never populated — egress is enforced in the http-proxy plane, not here.
-    egress: new Map(),
+  organizationId: string
+): Record<GuardrailStage, Guardrail[]> {
+  const byStage: Record<GuardrailStage, Guardrail[]> = {
+    input: [],
+    output: [],
+    "pre-tool": [],
+    egress: [],
   };
 
-  // ── 1. Agent's enabled built-ins (all stages) ──────────────────────────
-  const agentEnabled = agentSettings.guardrails ?? [];
-  if (agentEnabled.length > 0) {
-    for (const stage of ["input", "output", "pre-tool"] as const) {
-      const resolved = registry.resolve(stage, agentEnabled);
-      for (const g of resolved) {
-        if (!seen[stage].has(g.name)) {
-          seen[stage].set(g.name, g);
-        }
+  for (const row of guardrails) {
+    const config = row.config;
+    if (isBuiltinGuardrailConfig(config)) {
+      let found = false;
+      for (const stage of MESSAGE_STAGES) {
+        const builtin = registry.get(stage, config.builtin);
+        if (!builtin) continue;
+        found = true;
+        byStage[stage].push({ ...builtin, name: row.name });
       }
+      if (!found) {
+        logger.warn(
+          { name: row.name, builtin: config.builtin },
+          "Guardrail names an unregistered built-in; skipping"
+        );
+      }
+      continue;
     }
-  }
 
-  // ── 2. Agent-declared inline guardrails ────────────────────────────────
-  // Built-ins (step 1) are seen first, so a custom guardrail whose name
-  // collides with a built-in at the same stage is dropped here — the create/
-  // edit UI rejects such names up front so this stays a defensive guard.
-  for (const entry of extras.inline ?? []) {
-    if (entry.enabled === false) continue;
-    // `egress` guardrails are enforced in the http-proxy plane (the policy
-    // store + EgressJudge), never the message pipeline — skip them here so
-    // they are not materialized into a stage that's never run.
-    if (entry.stage === "egress") continue;
-    // Defensive: a malformed persisted row can carry an invalid `stage`
-    // (the write path validates, but older rows or out-of-band writes might
-    // not). Indexing `seen[bad]` would be `undefined` and throw mid-message —
-    // skip and log instead of crashing the whole message handler.
-    if (!seen[entry.stage]) {
+    if (config.stage === "egress") continue;
+    if (!(MESSAGE_STAGES as readonly string[]).includes(config.stage)) {
       logger.warn(
-        { name: entry.name, stage: entry.stage },
-        "Inline guardrail has an invalid stage; skipping"
+        { name: row.name, stage: config.stage },
+        "Guardrail has an invalid stage; skipping"
       );
       continue;
     }
 
-    // require-tool is output-only (turn-scoped toolsUsed). Wrong stage → skip.
-    if (isRequireToolEntry(entry)) {
-      if (entry.stage !== "output") {
+    if (config.kind === "require-tool") {
+      const tools = config.tools ?? [];
+      if (config.stage !== "output" || tools.length === 0) {
         logger.warn(
-          { name: entry.name, stage: entry.stage },
-          "require-tool guardrail only runs at output stage; skipping"
+          { name: row.name, stage: config.stage },
+          "require-tool guardrail needs stage output and at least one tool; skipping"
         );
         continue;
       }
-      const g = createRequireToolGuardrailFromEntry(entry);
-      if (!g) {
-        logger.warn(
-          { name: entry.name },
-          "require-tool guardrail has empty tools; skipping"
-        );
-        continue;
-      }
-      if (!seen.output.has(g.name)) {
-        seen.output.set(g.name, g);
-      }
+      byStage.output.push(createRequireToolGuardrail({ name: row.name, tools }));
       continue;
     }
 
-    // Default / kind: "judge" — needs a non-empty policy.
-    const policy = entry.policy?.trim();
+    const policy = config.policy?.trim();
     if (!policy) {
-      logger.warn(
-        { name: entry.name },
-        "Inline judge guardrail missing policy; skipping"
-      );
+      logger.warn({ name: row.name }, "Judge guardrail missing policy; skipping");
       continue;
     }
-    const g = createJudgeGuardrail(entry.stage, policy, {
-      name: entry.name,
-      model: entry.model,
-      tools: entry.tools,
-      orgId: extras.organizationId,
-    });
-    if (!seen[entry.stage].has(g.name)) {
-      seen[entry.stage].set(g.name, g);
-    }
+    byStage[config.stage].push(
+      createJudgeGuardrail(config.stage, policy, {
+        name: row.name,
+        model: config.model,
+        tools: config.tools,
+        orgId: organizationId,
+      })
+    );
   }
 
-  // ── 3. Apply operator exclude list ─────────────────────────────────────
-  const disabled = new Set(extras.disabled ?? []);
-  for (const stage of ["input", "output", "pre-tool"] as const) {
-    for (const [name, g] of seen[stage]) {
-      if (disabled.has(name)) continue;
-      byStage[stage].push(g);
-    }
-  }
-
-  return { byStage };
+  return byStage;
 }

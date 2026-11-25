@@ -110,7 +110,7 @@ import type digestReaction from "./reactions/digest.reaction.ts";
 
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
-  settings: { verboseLogging: false, showToolCalls: false, guardrailsInline: [], nixConfig: { packages: [] } },
+  settings: { verboseLogging: false, showToolCalls: false, nixConfig: { packages: [] } },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // Apply writes its skill into the workspace skill library, applied to this

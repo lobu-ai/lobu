@@ -16,8 +16,8 @@
  *                  pipeline; it exists so egress denials share the guardrail
  *                  stage taxonomy and audit trail (`guardrail-trip` events).
  *
- * Register guardrails in a {@link GuardrailRegistry} and enable them per-agent
- * via `defineAgent({ guardrails: ["name-a", "name-b"] })` in `lobu.config.ts`.
+ * Built-ins are registered in a {@link GuardrailRegistry}; which ones run for a
+ * principal comes from the workspace guardrail library (`workspace_guardrails`).
  */
 
 export type GuardrailStage = "input" | "output" | "pre-tool" | "egress";

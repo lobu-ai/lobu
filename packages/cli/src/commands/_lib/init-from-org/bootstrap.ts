@@ -350,11 +350,6 @@ function emitAgent(
     }
   }
 
-  // guardrails ← guardrails[].
-  if (settings?.guardrails?.length) {
-    fields.push(`guardrails: ${emitValue(settings.guardrails, 1)}`);
-  }
-
   // nixPackages ← nixConfig.packages.
   if (settings?.nixConfig?.packages?.length) {
     fields.push(`nixPackages: ${emitValue(settings.nixConfig.packages, 1)}`);

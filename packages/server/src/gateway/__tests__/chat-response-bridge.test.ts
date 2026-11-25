@@ -2,7 +2,13 @@ import { describe, expect, mock, test } from "bun:test";
 import { GuardrailRegistry } from "@lobu/core";
 import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
+import {
+  ensureDbForGatewayTests,
+  resetTestDatabase,
+  seedAgentRow,
+} from "./helpers/db-setup.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 /**
@@ -377,13 +383,25 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
     },
   };
 
+  /** agent-1 in org-1 runs the library's secret-scan built-in. */
+  async function seedSecretScan() {
+    await ensureDbForGatewayTests();
+    await resetTestDatabase();
+    await seedAgentRow("agent-1", { organizationId: "org-1" });
+    await createTestWorkspaceGuardrail({
+      organizationId: "org-1",
+      name: "secret-scan",
+      config: { builtin: "secret-scan" },
+      appliesTo: [{ kind: "agent", id: "agent-1" }],
+    });
+  }
+
   test("blocks secrets contained only in follow-up chips", async () => {
+    await seedSecretScan();
     const { bridge, postSuggestion } = chipsHarness();
     const registry = new GuardrailRegistry();
     registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry, {
-      getSettings: async () => ({ guardrails: ["secret-scan"] }),
-    } as any);
+    bridge.setGuardrails(registry);
     await bridge.handleCompletion({
       ...chipsPayload,
       suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
@@ -392,12 +410,11 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
   });
 
   test("posts no chips for a reply an output guardrail blocked", async () => {
+    await seedSecretScan();
     const { bridge, postSuggestion } = chipsHarness();
     const registry = new GuardrailRegistry();
     registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry, {
-      getSettings: async () => ({ guardrails: ["secret-scan"] }),
-    } as any);
+    bridge.setGuardrails(registry);
     await bridge.handleCompletion(
       { ...chipsPayload, finalText: "here is the key AKIAIOSFODNN7EXAMPLE" },
       "s"

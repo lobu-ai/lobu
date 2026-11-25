@@ -113,6 +113,8 @@ import {
 	publicRestGetViewShell,
 	publicRestSearchKnowledge,
 	restGetAutomations,
+	restGetGuardrail,
+	restListGuardrails,
 	restGetViewShell,
 	restHealth,
 	restInvokeEventAction,
@@ -1081,6 +1083,8 @@ app.patch(
 	restUpdateContentClassification,
 );
 app.get("/api/:orgSlug/automations", mcpAuth, restGetAutomations);
+app.get("/api/:orgSlug/guardrails", mcpAuth, restListGuardrails);
+app.get("/api/:orgSlug/guardrails/:id", mcpAuth, restGetGuardrail);
 app.get("/api/:orgSlug/public/automations", publicRestGetAutomations);
 
 async function handleContentDistribution(c: Context<{ Bindings: Env }>) {

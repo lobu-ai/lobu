@@ -3,6 +3,7 @@ import { mcpAuth } from "../auth/middleware";
 import { extractAuthContext, toToolContext } from "../tools/execute";
 import type { Env } from "../index";
 import { orgContext } from "../lobu/stores/org-context";
+import { restErrorResponse } from "../rest-api";
 import {
 	listAgentInstalled,
 	listOrgInstalled,
@@ -20,7 +21,11 @@ import {
 	type OrgInstalledKind,
 } from "./types";
 
-const globalCatalogRoutes = new Hono();
+// A handler's error is answered as every REST route answers it: a caller's
+// ToolUserError (such as a policy denial) at its own status, anything
+// else as a reported 500.
+const globalCatalogRoutes = new Hono<{ Bindings: Env }>();
+globalCatalogRoutes.onError((error, c) => restErrorResponse(c, error));
 
 globalCatalogRoutes.get("/", async (c) => {
 	const kinds = parseKindsParam(c.req.query("kinds"), CATALOG_KINDS);
@@ -29,6 +34,7 @@ globalCatalogRoutes.get("/", async (c) => {
 });
 
 const orgInstalledRoutes = new Hono<{ Bindings: Env }>();
+orgInstalledRoutes.onError((error, c) => restErrorResponse(c, error));
 
 orgInstalledRoutes.use("*", mcpAuth);
 orgInstalledRoutes.use("*", async (c, next) => {

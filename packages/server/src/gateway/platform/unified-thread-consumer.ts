@@ -13,7 +13,6 @@ import {
   type GuardrailRegistry,
   type SuggestedPrompt,
 } from "@lobu/core";
-import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { readPlatformMetadata } from "../connections/platform-metadata.js";
 import { OutputGuardrailScanner } from "../guardrails/output-scan.js";
@@ -133,15 +132,12 @@ export class UnifiedThreadResponseConsumer {
   }
 
   /**
-   * Wire output-stage guardrails for the API/SSE path. Both args must be set
-   * for guardrails to run; with neither, the API path behaves as before. Chat
-   * rows are unaffected — the ChatResponseBridge owns their output scanning.
+   * Wire output-stage guardrails for the API/SSE path. Without a registry the
+   * API path behaves as before. Chat rows are unaffected — the
+   * ChatResponseBridge owns their output scanning.
    */
-  setOutputGuardrails(
-    registry?: GuardrailRegistry,
-    settingsStore?: AgentSettingsStore
-  ): void {
-    this.outputGuardrail.setGuardrails(registry, settingsStore);
+  setOutputGuardrails(registry?: GuardrailRegistry): void {
+    this.outputGuardrail.setGuardrails(registry);
   }
 
   /**

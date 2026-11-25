@@ -1,65 +1,62 @@
 /**
- * Regression: the output-guardrail scan must read agent settings scoped to the
+ * Regression: the output-guardrail scan must resolve the library scoped to the
  * caller's org. A shared agent id (e.g. "lobu-builder") exists in multiple orgs
  * and this runs on the worker path without ambient orgContext, so an unscoped
  * read could resolve another org's guardrails — enforcing (or skipping) the
  * wrong tenant's policy on a reply.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { GuardrailRegistry } from "@lobu/core";
+import { createTestWorkspaceGuardrail } from "../../../__tests__/setup/test-fixtures.js";
+import {
+  ensureDbForGatewayTests,
+  resetTestDatabase,
+  seedAgentRow,
+} from "../../__tests__/helpers/db-setup.js";
+import { registerBuiltinGuardrails } from "../builtins.js";
 import { OutputGuardrailScanner, runOutputGuardrailScan } from "../output-scan.js";
-import type { AgentSettingsStore } from "../../auth/settings/agent-settings-store.js";
 
-describe("runOutputGuardrailScan org scoping", () => {
-  test("passes the caller's org into getSettings", async () => {
-    const seen: Array<{ agentId: string; organizationId?: string }> = [];
-    const settingsStore = {
-      getSettings: async (
-        agentId: string,
-        context?: { organizationId?: string },
-      ) => {
-        seen.push({ agentId, organizationId: context?.organizationId });
-        return { guardrails: [] } as any;
-      },
-    } as unknown as AgentSettingsStore;
+const SECRET_REPLY = "your key is sk-abcdefghij0123456789AB";
 
-    await runOutputGuardrailScan(
-      new GuardrailRegistry(),
-      settingsStore,
-      "some reply text",
-      {
-        agentId: "lobu-builder",
-        organizationId: "org-b",
-        userId: "U1",
-        platform: "slack",
-      },
-    );
+describe("output guardrail scan org scoping", () => {
+  const registry = new GuardrailRegistry();
+  registerBuiltinGuardrails(registry);
 
-    expect(seen).toEqual([
-      { agentId: "lobu-builder", organizationId: "org-b" },
-    ]);
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  }, 60_000);
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedAgentRow("lobu-builder", { organizationId: "org-a" });
+    await seedAgentRow("lobu-builder", { organizationId: "org-b" });
+    await createTestWorkspaceGuardrail({
+      organizationId: "org-a",
+      name: "secret-scan",
+      config: { builtin: "secret-scan" },
+      appliesTo: [{ kind: "agent", id: "lobu-builder" }],
+    });
   });
 
-  test("hasOutputGuardrails passes the caller's org into getSettings", async () => {
-    const seen: Array<{ agentId: string; organizationId?: string }> = [];
-    const settingsStore = {
-      getSettings: async (
-        agentId: string,
-        context?: { organizationId?: string },
-      ) => {
-        seen.push({ agentId, organizationId: context?.organizationId });
-        return { guardrails: [] } as any;
-      },
-    } as unknown as AgentSettingsStore;
+  test("only the caller's org's library decides the scan", async () => {
+    const scan = (organizationId: string) =>
+      runOutputGuardrailScan(registry, SECRET_REPLY, {
+        agentId: "lobu-builder",
+        organizationId,
+        userId: "U1",
+        platform: "slack",
+      });
 
+    expect(await scan("org-a")).toMatchObject({ guardrail: "secret-scan" });
+    expect(await scan("org-b")).toBeNull();
+  });
+
+  test("hasOutputGuardrails reads the caller's org", async () => {
     const scanner = new OutputGuardrailScanner();
-    scanner.setGuardrails(new GuardrailRegistry(), settingsStore);
+    scanner.setGuardrails(registry);
 
-    await scanner.hasOutputGuardrails("lobu-builder", "org-b");
-
-    expect(seen).toEqual([
-      { agentId: "lobu-builder", organizationId: "org-b" },
-    ]);
+    expect(await scanner.hasOutputGuardrails("lobu-builder", "org-a")).toBe(true);
+    expect(await scanner.hasOutputGuardrails("lobu-builder", "org-b")).toBe(false);
   });
 });

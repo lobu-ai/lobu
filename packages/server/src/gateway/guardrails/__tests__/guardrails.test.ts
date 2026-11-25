@@ -4,7 +4,7 @@
  *  - `safeStringify` helper (BigInt, circular refs)
  *  - `TextJudge` with a fake LLM client (cache hit, fail closed)
  *  - `createJudgeGuardrail` factory across stages + tool narrowing
- *  - `resolveAgentGuardrails` merge / dedup / exclude semantics
+ *  - `buildGuardrailsByStage` over workspace guardrail library rows
  */
 
 import { describe, expect, test } from "bun:test";
@@ -13,12 +13,13 @@ import {
   GuardrailRegistry,
   type GuardrailStage,
 } from "@lobu/core";
+import type { ApplyingGuardrail } from "../../../guardrails/workspace-guardrails.js";
 import {
+  buildGuardrailsByStage,
   createJudgeGuardrail,
   createPiiScanGuardrail,
   inlineJudgeHash,
   luhnValid,
-  resolveAgentGuardrails,
   safeStringify,
   TextJudge,
 } from "../index.js";
@@ -566,158 +567,76 @@ describe("createJudgeGuardrail", () => {
   });
 });
 
-// --- resolveAgentGuardrails ------------------------------------------------
+// --- buildGuardrailsByStage ------------------------------------------------
 
-describe("resolveAgentGuardrails (aggregator)", () => {
+describe("buildGuardrailsByStage (aggregator)", () => {
   function setupRegistry(): GuardrailRegistry {
     const reg = new GuardrailRegistry();
     reg.register(createPiiScanGuardrail("input"));
     reg.register(createPiiScanGuardrail("output"));
     reg.register(createPiiScanGuardrail("pre-tool"));
     reg.register(createNoopGuardrail("pre-tool", "secret-scan"));
-    reg.register(createNoopGuardrail("input", "prompt-injection"));
     return reg;
   }
+  let seq = 0;
+  function row(
+    name: string,
+    config: ApplyingGuardrail["config"],
+    enabled = true
+  ): ApplyingGuardrail {
+    seq += 1;
+    return { id: `guardrail-${seq}`, name, config, enabled, revision: 1 };
+  }
+  const names = (list: { name: string }[]) => list.map((g) => g.name);
 
-  test("disabled inline guardrail is not resolved", () => {
-    const reg = setupRegistry();
-    const out = resolveAgentGuardrails(
-      { guardrails: [] },
-      reg,
-      {
-      inline: [
-        {
-          name: "off-rail",
-          enabled: false,
-          stage: "input",
-          policy: "block everything",
-        },
-      ],
-    });
-    expect(out.byStage.input.map((g) => g.name)).not.toContain("off-rail");
+  test("a built-in row runs at every stage the built-in implements, under the row name", () => {
+    const out = buildGuardrailsByStage(
+      [row("pii", { builtin: "pii-scan" }), row("secrets", { builtin: "secret-scan" })],
+      setupRegistry(),
+      "org-a"
+    );
+    expect(names(out.input)).toEqual(["pii"]);
+    expect(names(out.output)).toEqual(["pii"]);
+    expect(names(out["pre-tool"])).toEqual(["pii", "secrets"]);
+    expect(out.egress).toEqual([]);
   });
 
-  test("inline guardrail with an invalid stage is skipped, not thrown", () => {
-    const reg = setupRegistry();
-    // A malformed persisted row (out-of-band write, or pre-validation data)
-    // carries a stage outside {input,output,pre-tool}. Resolution must skip it,
-    // not crash the whole message handler by indexing `seen[badStage]`.
-    let out!: ReturnType<typeof resolveAgentGuardrails>;
+  test("custom checks accumulate: same policy under two names both run", () => {
+    const out = buildGuardrailsByStage(
+      [
+        row("no-fs-write", { kind: "judge", stage: "pre-tool", policy: "p", tools: ["fs.write"] }),
+        row("no-fs-delete", { kind: "judge", stage: "pre-tool", policy: "p", tools: ["fs.delete"] }),
+        row("tone", { kind: "judge", stage: "output", policy: "no profanity" }),
+        row("must-reply", { kind: "require-tool", stage: "output", tools: ["send_message"] }),
+      ],
+      setupRegistry(),
+      "org-a"
+    );
+    expect(names(out["pre-tool"])).toEqual(["no-fs-write", "no-fs-delete"]);
+    expect(names(out.output)).toEqual(["tone", "must-reply"]);
+    expect(out.output[0]?.stage).toBe("output");
+  });
+
+  test("egress rows and rows that cannot run are skipped, not thrown", () => {
+    let out!: ReturnType<typeof buildGuardrailsByStage>;
     expect(() => {
-      out = resolveAgentGuardrails(
-      { guardrails: [] },
-      reg,
-      {
-        inline: [
-          {
-            name: "bad-stage",
-            enabled: true,
-            stage: "outupt" as GuardrailStage,
-            policy: "block everything",
-          },
+      out = buildGuardrailsByStage(
+        [
+          row("egress-check", { kind: "judge", stage: "egress", policy: "p", domains: [".x.com"] }),
+          row("bad-stage", { kind: "judge", stage: "outupt" as GuardrailStage, policy: "p" }),
+          row("no-policy", { kind: "judge", stage: "input" }),
+          row("rt-input", { kind: "require-tool", stage: "input", tools: ["x"] }),
+          row("rt-empty", { kind: "require-tool", stage: "output", tools: [] }),
+          row("unknown", { builtin: "forbidden-tools" }),
         ],
-      });
+        setupRegistry(),
+        "org-a"
+      );
     }).not.toThrow();
-    expect(out.byStage.input.map((g) => g.name)).not.toContain("bad-stage");
-    expect(out.byStage.output.map((g) => g.name)).not.toContain("bad-stage");
-    expect(out.byStage["pre-tool"].map((g) => g.name)).not.toContain(
-      "bad-stage"
-    );
-  });
-
-  test("inline judge carries the operator name + stage onto the instance", () => {
-    const reg = setupRegistry();
-    const out = resolveAgentGuardrails(
-      { guardrails: [] },
-      reg,
-      {
-      inline: [
-        {
-          name: "tone-check",
-          enabled: true,
-          stage: "output",
-          policy: "no profanity",
-          model: "anthropic/claude-haiku-4-5",
-        },
-      ],
-    });
-    const g = out.byStage.output.find((x) => x.name === "tone-check");
-    expect(g).toBeDefined();
-    expect(g?.stage).toBe("output");
-  });
-
-  test("inline name colliding with a built-in is dropped (built-in wins)", () => {
-    const reg = setupRegistry();
-    // pii-scan is registered as an output built-in; an inline judge that
-    // reuses the name at the same stage must not shadow it.
-    const out = resolveAgentGuardrails(
-      { guardrails: ["pii-scan"] },
-      reg,
-      {
-      inline: [
-        {
-          name: "pii-scan",
-          enabled: true,
-          stage: "output",
-          policy: "totally different",
-        },
-      ],
-    });
-    expect(out.byStage.output.map((g) => g.name).filter((n) => n === "pii-scan").length).toBe(1);
-  });
-
-  test("agent inline judge resolves under its operator name and respects exclude", () => {
-    const reg = setupRegistry();
-    const entry = {
-      name: "no-passwords",
-      enabled: true,
-      stage: "output" as const,
-      policy: "Never say `password`",
-    };
-    const out = resolveAgentGuardrails(
-      {},
-      reg,
-      { inline: [entry] }
-    );
-    expect(out.byStage.output.map((g) => g.name)).toContain("no-passwords");
-
-    const excluded = resolveAgentGuardrails(
-      {},
-      reg,
-      {
-      inline: [entry],
-      disabled: ["no-passwords"],
-    });
-    expect(excluded.byStage.output.map((g) => g.name)).not.toContain("no-passwords");
-  });
-
-  test("agent inline judges: distinct operator names -> distinct guardrails", () => {
-    const reg = setupRegistry();
-    const policy = "Block destructive ops";
-    const out = resolveAgentGuardrails(
-      {},
-      reg,
-      {
-      inline: [
-        {
-          name: "no-fs-write",
-          enabled: true,
-          stage: "pre-tool",
-          policy,
-          tools: ["fs.write"],
-        },
-        {
-          name: "no-fs-delete",
-          enabled: true,
-          stage: "pre-tool",
-          policy,
-          tools: ["fs.delete"],
-        },
-      ],
-    });
-    const preToolNames = out.byStage["pre-tool"].map((g) => g.name);
-    expect(preToolNames).toContain("no-fs-write");
-    expect(preToolNames).toContain("no-fs-delete");
+    expect(out.input).toEqual([]);
+    expect(out.output).toEqual([]);
+    expect(out["pre-tool"]).toEqual([]);
+    expect(out.egress).toEqual([]);
   });
 });
 

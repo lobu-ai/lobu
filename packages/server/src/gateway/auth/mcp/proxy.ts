@@ -7,10 +7,12 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { getDb } from "../../../db/client.js";
 import {
-  enabledInlineGuardrails,
-  resolveAgentGuardrails,
-} from "../../guardrails/aggregator.js";
+	agentGuardrailPrincipal,
+	resolveGuardrails,
+} from "../../../guardrails/workspace-guardrails.js";
+import { buildGuardrailsByStage } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
 import { parseJsonRpcResponse } from "../../../mcp-proxy/http-response.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
@@ -304,23 +306,29 @@ export class McpProxy {
 		toolName: string,
 		toolArgs: Record<string, unknown>,
 	): Promise<boolean> {
-		if (!this.guardrailRegistry || !this.agentSettingsStore) return false;
+		if (!this.guardrailRegistry) return false;
 		try {
-			// Org-scope the read (see resolveAgentOptions): a shared agent id spans
-			// orgs and this runs without ambient orgContext, so pass the org from
-			// tokenData to avoid resolving another org's guardrails.
-			const settings = await this.agentSettingsStore.getSettings(agentId, {
-				organizationId: tokenData.organizationId,
-			});
-			const resolved = resolveAgentGuardrails(
-				settings ?? { guardrails: [] },
+			// The library is per workspace. Per-job tokens carry the org; legacy
+			// deployment-lifetime tokens may not, so fall back to the agent's org.
+			const organizationId =
+				tokenData.organizationId ??
+				(await this.agentSettingsStore?.getMetadata(agentId))?.organizationId;
+			if (!organizationId) {
+				logger.warn(
+					{ agentId, toolName },
+					"Pre-tool guardrail check skipped: no organization for the agent",
+				);
+				return false;
+			}
+			const list = buildGuardrailsByStage(
+				await resolveGuardrails(
+					getDb(),
+					organizationId,
+					agentGuardrailPrincipal(agentId),
+				),
 				this.guardrailRegistry,
-				{
-					inline: enabledInlineGuardrails(settings),
-					organizationId: tokenData.organizationId,
-				},
-			);
-			const list = resolved.byStage["pre-tool"];
+				organizationId,
+			)["pre-tool"];
 			if (list.length === 0) return false;
 			const outcome = await runGuardrailInstances("pre-tool", list, {
 				agentId,
@@ -330,29 +338,8 @@ export class McpProxy {
 				conversationId: tokenData.conversationId,
 			});
 			if (!outcome.tripped) return false;
-			// Resolve org id with a metadata fallback — per-job tokens carry it, but
-			// legacy deployment-lifetime tokens may not, and an unaudited trip is a
-			// security log gap.
-			let resolvedOrgId = tokenData.organizationId;
-			if (!resolvedOrgId) {
-				try {
-					const md = await this.agentSettingsStore.getMetadata(agentId);
-					resolvedOrgId = md?.organizationId;
-				} catch (lookupErr) {
-					logger.warn(
-						{
-							agentId,
-							err:
-								lookupErr instanceof Error
-									? lookupErr.message
-									: String(lookupErr),
-						},
-						"Pre-tool guardrail trip: orgId metadata lookup failed (audit may be skipped)",
-					);
-				}
-			}
 			void recordGuardrailTrip({
-				organizationId: resolvedOrgId,
+				organizationId,
 				agentId,
 				userId: tokenData.userId,
 				conversationId: tokenData.conversationId,

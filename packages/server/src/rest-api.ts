@@ -46,6 +46,7 @@ import {
 } from "./tools/execute";
 import { getContent } from "./tools/get_content";
 import { getAutomation } from "./tools/get_automation";
+import { getGuardrail, listGuardrails } from "./guardrails/guardrail-reads";
 import { toMcpPublicSdkScriptResult } from "./tools/sdk_run";
 import { isToolFailureLogged } from "./tools/tool-error-log";
 import {
@@ -200,7 +201,7 @@ function isCallerCancellation(c: Context<{ Bindings: Env }>): boolean {
 	return c.req.raw.signal.aborted && !isErrorReported(c);
 }
 
-function restErrorResponse(
+export function restErrorResponse(
 	c: Context<{ Bindings: Env }>,
 	thrown: unknown,
 	fix: AccessFix | null = null
@@ -291,6 +292,43 @@ export async function restGetAutomations(c: Context<{ Bindings: Env }>) {
 
 		const ctx = toToolContext(extractAuthContext(c));
 		const result = await getAutomation(params, c.env, ctx);
+		return c.json(toJsonSafe(result));
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * GET /api/:orgSlug/guardrails
+ * The workspace guardrail library, read-only (`client.guardrails.list`).
+ */
+export async function restListGuardrails(c: Context<{ Bindings: Env }>) {
+	try {
+		const rawLimit = c.req.query("limit");
+		const result = await listGuardrails(
+			{
+				include_archived: c.req.query("include_archived") === "true",
+				cursor: c.req.query("cursor") || undefined,
+				limit: rawLimit === undefined ? undefined : Number(rawLimit),
+			},
+			toToolContext(extractAuthContext(c))
+		);
+		return c.json(toJsonSafe(result));
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * GET /api/:orgSlug/guardrails/:id
+ * One workspace guardrail, read-only (`client.guardrails.get`).
+ */
+export async function restGetGuardrail(c: Context<{ Bindings: Env }>) {
+	try {
+		const result = await getGuardrail(
+			{ id: c.req.param("id") ?? "" },
+			toToolContext(extractAuthContext(c))
+		);
 		return c.json(toJsonSafe(result));
 	} catch (error) {
 		return restErrorResponse(c, error);

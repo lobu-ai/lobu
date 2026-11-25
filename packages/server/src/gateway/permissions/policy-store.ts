@@ -1,11 +1,16 @@
 import crypto from "node:crypto";
-import type { AgentInlineGuardrail } from "@lobu/core";
 import { createLogger, normalizeDomainPattern } from "@lobu/core";
+import { isBuiltinGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
 import {
   matchesDomainPattern,
   patternReaches,
 } from "@lobu/connector-sdk/egress-policy";
 import { getDb } from "../../db/client.js";
+import {
+  type ApplyingGuardrail,
+  agentGuardrailPrincipal,
+  resolveEgressGuardrails,
+} from "../../guardrails/workspace-guardrails.js";
 
 const logger = createLogger("policy-store");
 
@@ -41,27 +46,26 @@ interface PreparedRule {
 }
 
 interface CachedPolicy {
-  /** `md5(agents.guardrails_inline::text)` the rules were prepared from. */
+  /** Content revision of the agent's applying egress guardrails. */
   revision: string;
   rules: PreparedRule[];
 }
 
 /**
- * The agent's egress judge policy, read from Postgres (`agents.guardrails_inline`,
- * the one copy every replica agrees on) on each judged request.
+ * The agent's egress judge policy, read from Postgres (the workspace guardrail
+ * library, the one copy every replica agrees on) on each judged request.
  *
  * The per-instance Map is a revision-checked cache, never a source of truth:
- * every lookup reads the stored revision of the agent's guardrail column, and
- * a cached entry is reused only while that revision is unchanged. The column
- * itself crosses the wire only when the revision moved, so the steady-state
- * cost is one primary-key read with no JSON transfer and no re-hashing. A
- * policy saved through any replica is visible to every replica on its next
- * judged request, with no deploy-time sync and no warm-up.
+ * every lookup reads the content revision of the egress guardrails applying to
+ * the agent, and a cached entry is reused only while that revision is
+ * unchanged. The guardrail rows cross the wire only when the revision moved,
+ * so the steady-state cost is one indexed read with no JSON transfer and no
+ * re-hashing. A guardrail saved through any replica is visible to every
+ * replica on its next judged request, with no deploy-time sync and no warm-up.
  *
- * The revision is a content hash of the stored column rather than
- * `agents.updated_at`: saves stamp `updated_at` with a millisecond JS clock, so
- * two saves inside one millisecond would share a timestamp and a stale entry
- * would survive. A content hash moves exactly when the policy does.
+ * The revision is a content hash of the applying set rather than a timestamp:
+ * it moves exactly when a guardrail's config, name, enabled flag or subjects
+ * change which rules apply.
  *
  * Keyed by `(organizationId, agentId)` and read with an explicit
  * `organization_id` predicate: agent ids are only unique per org, and the raw
@@ -84,8 +88,7 @@ export class PolicyStore {
     const rules = await this.load(organizationId, agentId);
     const host = hostname.toLowerCase();
     // One entry per covering guardrail, never collapsed: every judge is
-    // evaluated, so dropping one would drop its deny. Identical guardrails
-    // share a verdict-cache key, so the runner still asks the model once.
+    // evaluated, so dropping one would drop its deny.
     return rules
       .filter((rule) => matchesDomainPattern(host, rule.domains))
       .map((rule) => rule.resolved);
@@ -97,29 +100,15 @@ export class PolicyStore {
   ): Promise<PreparedRule[]> {
     const key = `${organizationId}|${agentId}`;
     const cached = this.cache.get(key);
-    const sql = getDb();
-    const rows = (await sql`
-      SELECT revision,
-             CASE WHEN revision IS DISTINCT FROM ${cached?.revision ?? null}::text
-                  THEN guardrails_inline END AS guardrails_inline
-      FROM (
-        SELECT md5(guardrails_inline::text) AS revision, guardrails_inline
-        FROM agents
-        WHERE organization_id = ${organizationId} AND id = ${agentId}
-      ) agent
-    `) as Array<{ revision: string | null; guardrails_inline: unknown }>;
+    const { revision, rows } = await resolveEgressGuardrails(
+      getDb(),
+      organizationId,
+      agentGuardrailPrincipal(agentId),
+      cached?.revision ?? null
+    );
+    if (cached && rows === null) return cached.rules;
 
-    const row = rows[0];
-    if (!row?.revision) {
-      this.cache.delete(key);
-      return [];
-    }
-    if (cached && cached.revision === row.revision) return cached.rules;
-
-    const inline = Array.isArray(row.guardrails_inline)
-      ? (row.guardrails_inline as AgentInlineGuardrail[])
-      : [];
-    const rules = egressJudgeRules(inline).map((rule) => ({
+    const rules = egressJudgeRules(rows ?? []).map((rule) => ({
       domains: rule.domains,
       resolved: {
         judgeName: rule.judgeName,
@@ -128,7 +117,7 @@ export class PolicyStore {
         ...(rule.model ? { judgeModel: rule.model } : {}),
       },
     }));
-    this.cache.set(key, { revision: row.revision, rules });
+    this.cache.set(key, { revision, rules });
     logger.debug("Loaded egress judge policy", {
       organizationId,
       agentId,
@@ -139,9 +128,9 @@ export class PolicyStore {
 }
 
 /**
- * Translate an agent's inline guardrails into the egress judge rules the proxy
- * evaluates: one rule per enabled `egress`-stage guardrail that has a policy and
- * at least one domain. Rules are kept per guardrail and never merged by domain,
+ * Translate library guardrails into the egress judge rules the proxy
+ * evaluates: one rule per enabled custom `egress`-stage judge that has a
+ * policy and at least one domain. Rules are kept per guardrail and never merged by domain,
  * because every matching judge runs (two guardrails on the same domain are two
  * judges, both of which must allow).
  *
@@ -149,11 +138,13 @@ export class PolicyStore {
  * guards, so they cannot disagree about which domains are judged.
  */
 export function egressJudgeRules(
-  guardrails: AgentInlineGuardrail[]
+  guardrails: readonly ApplyingGuardrail[]
 ): EgressJudgeRule[] {
   const rules: EgressJudgeRule[] = [];
-  for (const g of guardrails) {
-    if (!g?.enabled || g.stage !== "egress") continue;
+  for (const guardrail of guardrails) {
+    const g = guardrail.config;
+    if (!guardrail.enabled || isBuiltinGuardrailConfig(g)) continue;
+    if (g.kind !== "judge" || g.stage !== "egress") continue;
     if (typeof g.policy !== "string" || g.policy.trim() === "") continue;
     const domains = new Set<string>();
     for (const domain of g.domains ?? []) {
@@ -162,7 +153,7 @@ export function egressJudgeRules(
     }
     if (domains.size === 0) continue;
     rules.push({
-      judgeName: g.name,
+      judgeName: guardrail.name,
       domains: [...domains],
       policy: g.policy.trim(),
       ...(g.model ? { model: g.model } : {}),
@@ -173,11 +164,34 @@ export function egressJudgeRules(
 
 /** Every domain pattern at least one egress judge governs, deduplicated. */
 export function judgedEgressDomains(
-  guardrails: AgentInlineGuardrail[]
+  guardrails: readonly ApplyingGuardrail[]
 ): string[] {
   return [
     ...new Set(egressJudgeRules(guardrails).flatMap((rule) => rule.domains)),
   ];
+}
+
+/**
+ * The agent's judged egress domains, read from the workspace guardrail library
+ * (the one source every replica agrees on, and the one {@link PolicyStore}
+ * reads too) through {@link judgedEgressDomains}, so the grant guards, the
+ * dispatch reconcile and the write-time shadow check filter and normalize
+ * exactly like the runtime.
+ *
+ * Errors PROPAGATE. If a caller cannot tell whether a domain is judged,
+ * granting it risks silently disabling a policy control.
+ */
+export async function readJudgedEgressDomains(
+  organizationId: string,
+  agentId: string
+): Promise<string[]> {
+  const { rows } = await resolveEgressGuardrails(
+    getDb(),
+    organizationId,
+    agentGuardrailPrincipal(agentId),
+    null
+  );
+  return judgedEgressDomains(rows ?? []);
 }
 
 /**
@@ -230,7 +244,7 @@ interface SuppressedJudgedDomainOptions {
  * host out of it. Each is a narrower hole, but still a hole.
  */
 export function findSuppressedJudgedDomains(
-  guardrails: AgentInlineGuardrail[],
+  guardrails: readonly ApplyingGuardrail[],
   allowedDomains: string[] | undefined,
   options: SuppressedJudgedDomainOptions = {}
 ): SuppressedJudgedDomain[] {

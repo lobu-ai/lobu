@@ -462,7 +462,7 @@ export async function applyUpdate(
         updatedFields.push(`settings.${key}`);
       }
 
-      await assertSettingsValid(ctx, agentId, settings, before);
+      await assertSettingsValid(ctx, agentId, settings);
       const audit = agentConfigAudit(ctx);
       if (Object.keys(settings).length) {
         await persistAgentSettingsPatch(tx, agentId, settings, before, audit);
@@ -494,11 +494,9 @@ async function assertSettingsValid(
   ctx: ToolContext,
   agentId: string,
   settings: Partial<AgentSettings>,
-  before: AgentSettings | null,
 ): Promise<void> {
   const error = await validateAgentSettingsUpdate(
     settings,
-    before,
     ctx.organizationId,
     agentId,
   );
@@ -686,7 +684,6 @@ async function queueWriteForApproval(
         ctx,
         proposal.agent_id,
         { ...proposal.settings },
-        settings,
       );
       const base: NonNullable<ManageAgentsProposal['base']> = {};
       for (const field of AGENT_FIELDS) {

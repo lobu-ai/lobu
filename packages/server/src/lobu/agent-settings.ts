@@ -13,13 +13,16 @@ import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
 import { AgentSettingsStoredSchema } from "@lobu/core/contracts/agent-settings";
 import { Value } from "@sinclair/typebox/value";
 import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
-import type { DbClient } from "../db/client";
+import { type DbClient, getDb } from "../db/client";
 import { loadAllowedDomains } from "../gateway/config/network-allowlist";
-import { resolveSystemJudgeTarget } from "../gateway/inference/system-judge-target";
 import {
 	findSuppressedJudgedDomains,
 	judgedEgressDomains,
 } from "../gateway/permissions/policy-store";
+import {
+	agentGuardrailPrincipal,
+	resolveEgressGuardrails,
+} from "../guardrails/workspace-guardrails";
 import {
 	type ConfigChangeEventParams,
 	insertConfigChangeEventInTransaction,
@@ -30,7 +33,6 @@ import {
 	validateModelRefsAgainstOrg,
 } from "./model-config";
 import { createPostgresAgentConfigStore } from "./stores/postgres-stores";
-import { getOrgDefaultModel } from "./stores/provider-secrets";
 
 /** Caller holds a shared/read or update lock on this agent for a consistent snapshot. */
 export async function agentConfigRevision(
@@ -80,90 +82,6 @@ export function validateAgentConfigRevision(expected: string | undefined, actual
 	return null;
 }
 
-const GUARDRAIL_STAGES = new Set(["input", "output", "pre-tool", "egress"]);
-
-/**
- * Validate a `guardrailsInline` payload before it is persisted to agent
- * settings. Returns a human-readable error string on the first invalid entry,
- * or `null` when the payload is absent or fully valid. Persisting an entry with
- * an invalid `stage` would crash the guardrail aggregator at message time, so
- * we reject malformed input at the write boundary instead.
- */
-export function validateGuardrailsInline(value: unknown): string | null {
-	if (value === undefined) return null;
-	if (!Array.isArray(value)) return "guardrailsInline must be an array";
-	for (let i = 0; i < value.length; i++) {
-		const entry = value[i];
-		if (typeof entry !== "object" || entry === null) {
-			return `guardrailsInline[${i}] must be an object`;
-		}
-		const g = entry as Record<string, unknown>;
-		if (typeof g.name !== "string" || g.name.trim() === "") {
-			return `guardrailsInline[${i}].name must be a non-empty string`;
-		}
-		if (typeof g.enabled !== "boolean") {
-			return `guardrailsInline[${i}].enabled must be a boolean`;
-		}
-		if (typeof g.stage !== "string" || !GUARDRAIL_STAGES.has(g.stage)) {
-			return `guardrailsInline[${i}].stage must be one of: input, output, pre-tool, egress`;
-		}
-		// Only `undefined` defaults to "judge" (backward compatible with rows
-		// written before `kind` existed). `null` is not a valid value in the
-		// Core `AgentInlineGuardrailSchema`, so reject it rather than coercing.
-		if (
-			g.kind !== undefined &&
-			g.kind !== "judge" &&
-			g.kind !== "require-tool"
-		) {
-			return `guardrailsInline[${i}].kind must be "judge" or "require-tool"`;
-		}
-		const kind = g.kind === undefined ? "judge" : g.kind;
-		// Common optional fields are typed the same way for every kind in the
-		// Core schema, so validate them whenever present regardless of kind.
-		// Otherwise a malformed `require-tool` row (e.g. `model: 42`) would be
-		// persisted here yet rejected by `AgentInlineGuardrailSchema`.
-		if (g.model !== undefined && typeof g.model !== "string") {
-			return `guardrailsInline[${i}].model must be a string`;
-		}
-		if (
-			g.domains !== undefined &&
-			(!Array.isArray(g.domains) ||
-				g.domains.some((d) => typeof d !== "string"))
-		) {
-			return `guardrailsInline[${i}].domains must be an array of strings`;
-		}
-		if (kind === "require-tool") {
-			if (g.stage !== "output") {
-				return `guardrailsInline[${i}]: require-tool only supports stage "output"`;
-			}
-			if (
-				!Array.isArray(g.tools) ||
-				g.tools.length === 0 ||
-				g.tools.some((t) => typeof t !== "string" || t.trim() === "")
-			) {
-				return `guardrailsInline[${i}].tools must be a non-empty array of tool names for require-tool`;
-			}
-			// `policy` is ignored for require-tool, but must still match the
-			// schema's type when the operator supplies it.
-			if (g.policy !== undefined && typeof g.policy !== "string") {
-				return `guardrailsInline[${i}].policy must be a string`;
-			}
-		} else {
-			// judge (default)
-			if (typeof g.policy !== "string" || g.policy.trim() === "") {
-				return `guardrailsInline[${i}].policy must be a non-empty string`;
-			}
-			if (
-				g.tools !== undefined &&
-				(!Array.isArray(g.tools) || g.tools.some((t) => typeof t !== "string"))
-			) {
-				return `guardrailsInline[${i}].tools must be an array of strings`;
-			}
-		}
-	}
-	return null;
-}
-
 /**
  * Write-boundary check for `networkConfig` domain lists. Agent network settings
  * are deliberately looser than connector declarations (an operator may list
@@ -206,6 +124,10 @@ export function validateNetworkConfig(updates: unknown): string | null {
 const MOVED_SETTINGS: Record<string, string> = {
 	skillsConfig:
 		"skillsConfig was removed from agent settings: skills live in the workspace skill library. Read them with manage_skills.",
+	guardrails:
+		"guardrails was removed from agent settings: guardrails live in the workspace guardrail library. Read them with GET /api/:org/guardrails or client.guardrails; they are listed in Settings → Policies.",
+	guardrailsInline:
+		"guardrailsInline was removed from agent settings: custom checks live in the workspace guardrail library. Read them with GET /api/:org/guardrails or client.guardrails; they are listed in Settings → Policies.",
 };
 
 /** The 422 message for the first moved key in `updates`, or null. */
@@ -227,10 +149,10 @@ export function movedSettingError(updates: unknown): string | null {
  * schema, so this cannot drift from the type the readers rely on. Unknown keys
  * (`authProfiles` and the legacy model fields, which the PATCH route handles
  * itself) and `null` (an explicit clear) keep their existing handling. `models`
- * is skipped here, as is `guardrailsInline`: each has a stricter validator of
- * its own with its own error code.
+ * is skipped here: it has a stricter validator of its own with its own error
+ * code.
  */
-const OWN_VALIDATED_SETTINGS_KEYS = new Set(["models", "guardrailsInline"]);
+const OWN_VALIDATED_SETTINGS_KEYS = new Set(["models"]);
 
 export function validateSettingsPatch(updates: unknown): string | null {
 	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
@@ -264,15 +186,13 @@ interface AgentSettingsValidationError {
 }
 
 /**
- * Validate a settings patch against the agent's current settings. The caller
- * holds the agent row lock, so `storedSettings` is the snapshot the patch will
- * merge into. Returns `null` when the patch may be persisted, otherwise the
- * error envelope; a `models` error also carries the structured `modelError` so
- * the HTTP route can enrich it with request-derived URLs.
+ * Validate a settings patch for an agent. Returns `null` when the patch may be
+ * persisted, otherwise the error envelope; a `models` error also carries the
+ * structured `modelError` so the HTTP route can enrich it with
+ * request-derived URLs.
  */
 export async function validateAgentSettingsUpdate(
 	updates: unknown,
-	storedSettings: AgentSettings | null,
 	organizationId: string,
 	agentId: string
 ): Promise<
@@ -293,16 +213,6 @@ export async function validateAgentSettingsUpdate(
 		};
 	}
 
-	// Validate inline guardrail shape before it is persisted. An invalid `stage`
-	// (or missing name/policy) would otherwise be written verbatim and then crash
-	// the guardrail aggregator mid-message (it indexes `seen[stage]`).
-	const guardrailError = validateGuardrailsInline(
-		(updates as { guardrailsInline?: unknown }).guardrailsInline
-	);
-	if (guardrailError) {
-		return { error: "invalid_guardrail", error_description: guardrailError };
-	}
-
 	const networkConfigError = validateNetworkConfig(updates);
 	if (networkConfigError) {
 		return {
@@ -313,71 +223,6 @@ export async function validateAgentSettingsUpdate(
 
 	const patch = updates as Partial<AgentSettings>;
 
-	// Judge-kind custom guardrails need a model. With no org default provider
-	// model, every judge entry must carry its own `model` — otherwise it would
-	// fail closed at runtime with no model to call. require-tool entries never
-	// call a model.
-	const judgeDefault = (
-		await getOrgDefaultModel(organizationId).catch(() => null)
-	)?.trim();
-	const inline = patch.guardrailsInline;
-	if (Array.isArray(inline)) {
-		if (!judgeDefault) {
-			const missing = inline.find((g) => {
-				if (g?.kind === "require-tool") return false;
-				return typeof g?.model !== "string" || g.model.trim() === "";
-			});
-			if (missing) {
-				return {
-					error: "guardrail_model_required",
-					error_description: `Custom guardrail "${missing.name ?? "(unnamed)"}" needs a model: this organization has no default provider model.`,
-				};
-			}
-		}
-
-		// A judge model that cannot resolve is worse than a missing one: the
-		// guardrail SAVES, then denies every request it covers at runtime with
-		// only a log line to say why. Resolve it here, through the exact
-		// function the judge uses, so write-time acceptance and runtime
-		// resolution cannot drift. Applies whether or not a default exists —
-		// an explicitly named bad model is bad either way.
-		//
-		// Only NEW or CHANGED models are checked. Rejecting an already-stored
-		// value would lock the agent out of its own config: every PATCH carries
-		// the full `guardrailsInline` array, so an agent holding a
-		// now-unrunnable model could not be edited at all — not even to remove
-		// the offending guardrail. Grandfathering the stored value keeps the
-		// repair path open while still refusing to accept a new bad one.
-		const storedModels = new Map<string, string>();
-		const storedInline = storedSettings?.guardrailsInline;
-		if (Array.isArray(storedInline)) {
-			for (const g of storedInline) {
-				// require-tool entries never ran a judge, so they grandfather nothing:
-				// converting one into a model-less judge is a NEW judge to validate.
-				if (g?.kind === "require-tool") continue;
-				if (g?.name) storedModels.set(g.name, (g.model ?? "").trim());
-			}
-		}
-
-		for (const g of inline) {
-			if (g?.kind === "require-tool") continue;
-			const ownModel = g?.model?.trim();
-			// A model-less guardrail runs on the org default, so that default must
-			// be runnable by the judge too (a deployment system key, OpenAI-compatible
-			// protocol). Otherwise it would save and then deny every covered request.
-			const model = ownModel || judgeDefault;
-			if (!model) continue;
-			if (g?.name && storedModels.get(g.name) === (ownModel ?? "")) continue;
-			const resolved = await resolveSystemJudgeTarget(model);
-			if (!resolved.ok) {
-				return {
-					error: "guardrail_model_unresolvable",
-					error_description: `Custom guardrail "${g?.name ?? "(unnamed)"}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
-				};
-			}
-		}
-	}
-
 	// An allow grant BEATS the egress judge. `checkDomainAccess` (proxy/
 	// http-proxy.ts) checks per-agent allow grants (step 4) before consulting
 	// the judge (step 5), so a domain that is both judged and allow-granted
@@ -385,20 +230,21 @@ export async function validateAgentSettingsUpdate(
 	// invisible from the outside — the request succeeds, just for the wrong
 	// reason — so refuse the config instead of saving a control that cannot fire.
 	//
-	// Validate the MERGE, not the patch: a PATCH may carry `guardrailsInline`
-	// alone, `networkConfig` alone, or both, and the hole only exists in the
-	// combination. Only run when the patch actually touches one of them, so an
-	// unrelated edit to an agent that is already in this state still saves (and
-	// so removing either side is always a valid repair).
-	const touchesGuardrails = "guardrailsInline" in (updates as object);
-	const touchesNetwork = "networkConfig" in (updates as object);
-	if (touchesGuardrails || touchesNetwork) {
-		const effectiveGuardrails = touchesGuardrails
-			? (patch.guardrailsInline ?? [])
-			: (storedSettings?.guardrailsInline ?? []);
-		const effectiveAllowed = touchesNetwork
-			? (patch.networkConfig?.allowedDomains ?? [])
-			: (storedSettings?.networkConfig?.allowedDomains ?? []);
+	// The judges come from the workspace guardrail library, so only a patch
+	// that touches `networkConfig` can open the hole here: an unrelated edit to
+	// an agent already in this state still saves, and removing the grant is
+	// always a valid repair.
+	if ("networkConfig" in (updates as object)) {
+		const effectiveGuardrails =
+			(
+				await resolveEgressGuardrails(
+					getDb(),
+					organizationId,
+					agentGuardrailPrincipal(agentId),
+					null,
+				)
+			).rows ?? [];
+		const effectiveAllowed = patch.networkConfig?.allowedDomains ?? [];
 
 		const shadowed = findSuppressedJudgedDomains(
 			effectiveGuardrails,

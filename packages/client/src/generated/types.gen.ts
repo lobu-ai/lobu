@@ -497,7 +497,7 @@ export type SearchSdkData = {
      */
     title?: string;
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, skills, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, guardrails, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, skills, views.
      */
     query: string;
     /**
@@ -660,6 +660,20 @@ export type QuerySdkResponses = {
        * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
+      /**
+       * What would lift this denial and who can do it; `url` opens the page to do it.
+       */
+      fix?: {
+        action:
+          | "grant_workspace"
+          | "raise_access"
+          | "edit_rule"
+          | "edit_allowlist"
+          | "ask_admin";
+        url?: string;
+        who: "you" | "workspace_admin";
+        workspace: string | null;
+      };
     };
     /**
      * Number of write/admin/external calls skipped by dry-run.
@@ -946,6 +960,20 @@ export type RunSdkResponses = {
        * Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.
        */
       details?: unknown;
+      /**
+       * What would lift this denial and who can do it; `url` opens the page to do it.
+       */
+      fix?: {
+        action:
+          | "grant_workspace"
+          | "raise_access"
+          | "edit_rule"
+          | "edit_allowlist"
+          | "ask_admin";
+        url?: string;
+        who: "you" | "workspace_admin";
+        workspace: string | null;
+      };
     };
     /**
      * Number of write/admin/external calls skipped by dry-run.
@@ -3898,17 +3926,6 @@ export type ManageAgentsData = {
           };
           soulMd?: string;
           userMd?: string;
-          guardrails?: Array<string>;
-          guardrailsInline?: Array<{
-            name: string;
-            enabled: boolean;
-            stage: "input" | "output" | "pre-tool" | "egress";
-            kind?: "judge" | "require-tool";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          }>;
           sandboxId?: string;
           verboseLogging?: boolean;
           showToolCalls?: boolean;
@@ -4017,17 +4034,6 @@ export type ManageAgentsResponses = {
           soulMd?: string;
           userMd?: string;
           identityMd?: string;
-          guardrails?: Array<string>;
-          guardrailsInline?: Array<{
-            name: string;
-            enabled: boolean;
-            stage: "input" | "output" | "pre-tool" | "egress";
-            kind?: "judge" | "require-tool";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          }>;
           sandboxId?: string;
           verboseLogging?: boolean;
           showToolCalls?: boolean;
@@ -4134,17 +4140,6 @@ export type ManageAgentsResponses = {
             };
             soulMd?: string;
             userMd?: string;
-            guardrails?: Array<string>;
-            guardrailsInline?: Array<{
-              name: string;
-              enabled: boolean;
-              stage: "input" | "output" | "pre-tool" | "egress";
-              kind?: "judge" | "require-tool";
-              policy?: string;
-              model?: string;
-              tools?: Array<string>;
-              domains?: Array<string>;
-            }>;
             sandboxId?: string;
             verboseLogging?: boolean;
             showToolCalls?: boolean;
@@ -4171,17 +4166,6 @@ export type ManageAgentsResponses = {
               } | null;
               soulMd?: string | null;
               userMd?: string | null;
-              guardrails?: Array<string> | null;
-              guardrailsInline?: Array<{
-                name: string;
-                enabled: boolean;
-                stage: "input" | "output" | "pre-tool" | "egress";
-                kind?: "judge" | "require-tool";
-                policy?: string;
-                model?: string;
-                tools?: Array<string>;
-                domains?: Array<string>;
-              }> | null;
               sandboxId?: string | null;
               verboseLogging?: boolean | null;
               showToolCalls?: boolean | null;
@@ -4213,17 +4197,6 @@ export type ManageAgentsResponses = {
             } | null;
             soulMd?: string | null;
             userMd?: string | null;
-            guardrails?: Array<string> | null;
-            guardrailsInline?: Array<{
-              name: string;
-              enabled: boolean;
-              stage: "input" | "output" | "pre-tool" | "egress";
-              kind?: "judge" | "require-tool";
-              policy?: string;
-              model?: string;
-              tools?: Array<string>;
-              domains?: Array<string>;
-            }> | null;
             sandboxId?: string | null;
             verboseLogging?: boolean | null;
             showToolCalls?: boolean | null;

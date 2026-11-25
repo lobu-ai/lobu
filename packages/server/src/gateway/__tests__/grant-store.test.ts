@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { getDb } from "../../db/client.js";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { GrantStore } from "../permissions/grant-store.js";
 import {
@@ -322,27 +322,26 @@ describe("GrantStore org scoping", () => {
  * writer funnels through `GrantStore.grant()`, so the guard lives here — one
  * check that covers all present writers and any future one.
  *
- * The judged set is read from `agents.guardrails_inline`, the durable config
- * every replica agrees on, so the check never passes vacuously on a replica
+ * The judged set is read from the workspace guardrail library, the durable
+ * config every replica agrees on, so the check never passes vacuously on a replica
  * that has not dispatched for the agent.
  */
 describe("GrantStore.grant — a judged domain gets no allow grant", () => {
   let store: GrantStore;
 
   const setJudge = async (domains: string[], enabled = true) => {
-    const sql = getDb();
-    await sql`
-      UPDATE agents SET guardrails_inline = ${sql.json([
-        {
-          name: "watchdog",
-          stage: "egress",
-          enabled,
-          policy: "Allow read-only GETs.",
-          domains,
-        },
-      ])}
-      WHERE organization_id = ${ORG_ID} AND id = 'agent-1'
-    `;
+    await createTestWorkspaceGuardrail({
+      organizationId: ORG_ID,
+      name: "watchdog",
+      config: {
+        kind: "judge",
+        stage: "egress",
+        policy: "Allow read-only GETs.",
+        domains,
+      },
+      enabled,
+      appliesTo: [{ kind: "agent", id: "agent-1" }],
+    });
   };
 
   beforeAll(async () => {

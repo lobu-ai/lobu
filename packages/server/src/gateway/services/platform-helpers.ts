@@ -103,9 +103,6 @@ export async function resolveAgentOptions(
   if (settings.networkConfig) {
     mergedOptions.networkConfig = settings.networkConfig;
   }
-  if (settings.guardrailsInline?.length) {
-    mergedOptions.guardrailsInline = settings.guardrailsInline;
-  }
   // Nix packages come from two places and both are hard requirements of code
   // that will run in the spawned worker, so union them rather than letting the
   // last writer win:
@@ -137,7 +134,7 @@ export async function resolveAgentOptions(
 
 /**
  * Build a MessagePayload from common fields.
- * Extracts networkConfig, guardrailsInline, nixConfig from
+ * Extracts networkConfig and nixConfig from
  * agentOptions before constructing the payload.
  */
 export function buildMessagePayload(params: {
@@ -162,7 +159,6 @@ export function buildMessagePayload(params: {
 }): MessagePayload {
   const {
     networkConfig,
-    guardrailsInline,
     nixConfig,
     ...remainingOptions
   } = params.agentOptions;
@@ -182,7 +178,6 @@ export function buildMessagePayload(params: {
     platformMetadata: params.platformMetadata,
     agentOptions: remainingOptions,
     networkConfig,
-    guardrailsInline,
     nixConfig,
   };
 }
