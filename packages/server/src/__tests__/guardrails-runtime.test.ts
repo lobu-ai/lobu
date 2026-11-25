@@ -27,6 +27,7 @@ import {
   flushPendingGuardrailAudits,
 } from '../gateway/guardrails/audit';
 import { registerBuiltinGuardrails } from '../gateway/guardrails/builtins';
+import { GatewayJudgeClient } from '../gateway/proxy/egress-judge/gateway-judge-client';
 import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
@@ -40,25 +41,16 @@ import {
   createTestWorkspaceGuardrail,
 } from './setup/test-fixtures';
 
-// Stub the judge transport so inline (custom) guardrails resolve to a
+// Stub the judge transport so custom judge guardrails resolve to a
 // deterministic verdict instead of reaching a provider. The shared TextJudge
-// constructs a `GatewayJudgeClient` by default; swapping the class makes
-// every inline judge in this file deny. Built-in guardrails (the other
-// describe blocks) don't use a judge, so they're unaffected.
-vi.mock('../gateway/proxy/egress-judge/gateway-judge-client.js', async (importActual) => {
-  const actual =
-    await importActual<
-      typeof import('../gateway/proxy/egress-judge/gateway-judge-client.js')
-    >();
-  return {
-    ...actual,
-    GatewayJudgeClient: class {
-      async judge() {
-        return { verdict: 'deny' as const, reason: 'stub judge denied' };
-      }
-    },
-  };
-});
+// is a module singleton and the server suites share one module graph
+// (`isolate: false`), so an earlier file may already have built it with a
+// real GatewayJudgeClient; stubbing the prototype covers that instance too.
+// Built-in guardrails (the other describe blocks) don't use a judge.
+const judgeStub = vi
+  .spyOn(GatewayJudgeClient.prototype, 'judge')
+  .mockResolvedValue({ verdict: 'deny', reason: 'stub judge denied' });
+afterAll(() => judgeStub.mockRestore());
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared fixtures

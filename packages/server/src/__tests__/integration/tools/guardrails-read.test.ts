@@ -154,9 +154,16 @@ describe("guardrail library reads", () => {
 		await expect(sdkFor(readerAgentCtx).list()).resolves.toBeDefined();
 	});
 
-	it("answers 403 over REST to an app the agent_config read policy denies", async () => {
+	it("answers 403 over REST, the library and the agent's installed catalog, to an app the agent_config read policy denies", async () => {
 		const token = await tokenFor("guardrails-denied-app");
+		const installed = (kinds: string) =>
+			get(`/api/${orgSlug}/installed/agents/${readerAgentCtx.agentId}/installed?kinds=${kinds}`, { token });
 		expect((await get(`/api/${orgSlug}/guardrails`, { token })).status).toBe(200);
+		const before = await installed("guardrails");
+		expect(before.status).toBe(200);
+		expect(await before.json()).toMatchObject({
+			installed: { guardrails: { items: expect.arrayContaining([expect.objectContaining({ id: judgeId })]) } },
+		});
 		await upsertEntityApprovalPolicy(orgId, {
 			resourceClass: "agent_config",
 			principalKind: "app",
@@ -165,6 +172,8 @@ describe("guardrail library reads", () => {
 		});
 		expect((await get(`/api/${orgSlug}/guardrails`, { token })).status).toBe(403);
 		expect((await get(`/api/${orgSlug}/guardrails/${judgeId}`, { token })).status).toBe(403);
+		expect((await installed("guardrails")).status).toBe(403);
+		expect((await installed("providers")).status).toBe(200);
 		// Another app is unaffected.
 		const other = await tokenFor("guardrails-other-app");
 		expect((await get(`/api/${orgSlug}/guardrails`, { token: other })).status).toBe(200);

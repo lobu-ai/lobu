@@ -201,7 +201,7 @@ function isCallerCancellation(c: Context<{ Bindings: Env }>): boolean {
 	return c.req.raw.signal.aborted && !isErrorReported(c);
 }
 
-function restErrorResponse(
+export function restErrorResponse(
 	c: Context<{ Bindings: Env }>,
 	thrown: unknown,
 	fix: AccessFix | null = null

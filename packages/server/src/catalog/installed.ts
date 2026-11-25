@@ -1,6 +1,7 @@
 import type { GuardrailStage } from "@lobu/core";
 import { isBuiltinGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
 import { assertAgentConfigReadAllowed } from "../authz/agent-config-access";
+import { assertGuardrailConfigReadAllowed } from "../authz/guardrail-config-access";
 import { assertSkillConfigReadAllowed } from "../authz/skill-config-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
 import { getDb } from "../db/client";
@@ -297,6 +298,7 @@ export async function listAgentInstalled(
 	}
 
 	if (wanted.has("guardrails")) {
+		await assertGuardrailConfigReadAllowed(ctx);
 		// The workspace library guardrails that apply to this agent, enabled or
 		// not. A built-in carries every stage it is registered at (`pii-scan`
 		// runs at input, output and pre-tool); a custom check carries its own.
