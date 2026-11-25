@@ -230,6 +230,10 @@ describe("WhatsApp Web threads", () => {
     await expect(adapter.postMessage(`whatsapp.web:202:${DM_JID}`, "hi")).rejects.toThrow(
       "Invalid WhatsApp Web thread ID",
     );
+    // A channel-level post names its chat by platform key and sends through
+    // this connection; it cannot be steered onto another connection's thread.
+    await expect(adapter.postChannelMessage(`whatsapp.web:202:${DM_JID}`, "hi")).rejects.toThrow("Invalid");
+    await expect(adapter.postChannelMessage(`slack:${DM_JID}`, "hi")).rejects.toThrow("Invalid");
     expect(calls).toHaveLength(0);
   });
 

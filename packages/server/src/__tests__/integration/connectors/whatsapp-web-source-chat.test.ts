@@ -18,6 +18,7 @@ import { EventEmitter } from "node:events";
 import type { Context } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { planAutomationActivationsForRuntimeConnection } from "../../../automations/activation";
+import { assertAutomationDeliveryTarget } from "../../../automations/delivery-target";
 import { upsertEntityApprovalPolicy } from "../../../authz/entity-policy";
 import { AutomationSubscriptionService } from "../../../gateway/channels/automation-subscription-service";
 import { CommandRegistry, verifyWorkerToken } from "@lobu/core";
@@ -40,12 +41,15 @@ import {
 } from "../../../gateway/orchestration/chat-turn-actor";
 import { RunsQueue } from "../../../gateway/infrastructure/queue/runs-queue";
 import type { QueueJob } from "../../../gateway/infrastructure/queue/types";
+import { __setChatInstanceManagerForTests } from "../../../lobu/gateway";
 import { orgContext } from "../../../lobu/stores/org-context";
+import { createNotificationForUsers, deliverNotificationTask, resolveBotDeliveryTargets } from "../../../notifications/service";
 import { PostgresSecretStore } from "../../../lobu/stores/postgres-secret-store";
 import { createPostgresAgentConfigStore, createPostgresAgentConnectionStore } from "../../../lobu/stores/postgres-stores";
 import { CHAT_SOURCE_INGRESS_QUEUE, type ChatSourceIngressJob } from "../../../runs/chat-ingress-jobs";
 import { receiveFeedNotifications } from "../../../runs/feed-notifications";
 import { sourceFeedScopeKey } from "../../../runs/source-feed-subscriptions";
+import { getNextNumericId } from "../../../tools/admin/helpers/db-helpers";
 import * as executeHandler from "../../../tools/admin/manage_operations/handlers/execute";
 import { createAuthProfile } from "../../../utils/auth-profiles";
 import { upsertBundledConnectorForOrg } from "../../../utils/ensure-connector-installed";
@@ -397,6 +401,7 @@ describe("WhatsApp Web source chat", () => {
   afterEach(async () => {
     // Queue shutdown needs a progressing clock for its drain timeout.
     vi.useRealTimers();
+    __setChatInstanceManagerForTests(null);
     await queue?.stop();
     queue = null;
     resetRateLimiterForTests();
@@ -535,6 +540,76 @@ describe("WhatsApp Web source chat", () => {
       .resolveForConnection(String(connectionId), GROUP_JID, orgId);
     expect(route?.organizationId).not.toBe(linked.targetOrgId);
   }, 60_000);
+
+  it.each(["archive", "delete", "source admin"] as const)(
+    "posts the linked workspace's proactive messages only to its linked group until it is unlinked by %s", async (unlink) => {
+      await insertAutomation("owner-reply", replyTo());
+      const ownerTargets = await resolveBotDeliveryTargets(orgId, null, sql);
+      const linked = await linkSourceGroup();
+      const linkedGroup = { connectionId: String(connectionId), platform: "whatsapp.web",
+        channelKey: `whatsapp.web:${GROUP_JID}`, teamId: null };
+      const executor = { agentId: linked.targetAgentId, deviceWorkerId: null };
+      const target = (channelId: string) => ({ connection_id: connectionId, channel_id: channelId });
+
+      expect(await resolveBotDeliveryTargets(linked.targetOrgId, null, sql)).toEqual([linkedGroup]);
+      expect(await resolveBotDeliveryTargets(linked.targetOrgId,
+        { connectionId: String(connectionId), channelId: OTHER_GROUP_JID }, sql)).toEqual([]);
+      await expect(assertAutomationDeliveryTarget(sql, linked.targetOrgId, executor, target(GROUP_JID)))
+        .resolves.toEqual(target(`whatsapp.web:${GROUP_JID}`));
+      await expect(assertAutomationDeliveryTarget(sql, linked.targetOrgId, executor, target(OTHER_GROUP_JID)))
+        .rejects.toMatchObject({ httpStatus: 422 });
+      // The owning workspace gains no target, and another workspace its owner
+      // administers gains nothing without a link of its own.
+      expect(await resolveBotDeliveryTargets(orgId, null, sql)).toEqual(ownerTargets);
+      const otherOrg = await createTestOrganization({ name: "Unlinked workspace" });
+      await addUserToOrganization(ownerId, otherOrg.id, "admin");
+      const otherAgent = await createTestAgent({ organizationId: otherOrg.id, ownerUserId: ownerId });
+      expect(await resolveBotDeliveryTargets(otherOrg.id, null, sql)).toEqual([]);
+      await expect(assertAutomationDeliveryTarget(sql, otherOrg.id, { agentId: otherAgent.agentId, deviceWorkerId: null },
+        target(GROUP_JID))).rejects.toMatchObject({ httpStatus: 422 });
+      // The grant is per linked channel: a second trigger on the link record,
+      // pointing at a connection its author does not administer, adds nothing.
+      const foreignOrg = await createTestOrganization({ name: "Foreign workspace" });
+      const foreignOwner = await createTestUser({ email: "wa-foreign-owner@example.test" });
+      await addUserToOrganization(foreignOwner.id, foreignOrg.id, "owner");
+      const [foreign] = await sql`INSERT INTO connections (organization_id, connector_key, slug, status, visibility, created_by)
+        VALUES (${foreignOrg.id}, 'whatsapp.web', 'whatsapp-web', 'active', 'private', ${foreignOwner.id}) RETURNING id`;
+      await sql`UPDATE automations SET triggers = triggers || ${sql.json([{ kind: "event", connector_key: "whatsapp.web",
+        connection_id: Number(foreign.id), event_types: ["message.created"], match: { channel_id: OTHER_GROUP_JID },
+        output: "reply_to_source", execution: "turn" }])}::jsonb WHERE id = ${linked.bindingId}`;
+      expect(await resolveBotDeliveryTargets(linked.targetOrgId, null, sql)).toEqual([linkedGroup]);
+
+      // An Automation in the linked workspace that targets the group posts
+      // through the owning connection, admitted by the owning workspace.
+      const digestId = await getNextNumericId(sql, "automations");
+      await sql`INSERT INTO automations (id, organization_id, slug, name, status, created_by,
+          automation_group_id, managed_agent_id, delivery_target)
+        VALUES (${digestId}, ${linked.targetOrgId}, 'group-digest', 'Group digest', 'active', ${ownerId}, ${digestId},
+          ${linked.targetAgentId}, ${sql.json(target(GROUP_JID))})`;
+      __setChatInstanceManagerForTests(manager);
+      const notify = (key: string) => createNotificationForUsers([ownerId], { organizationId: linked.targetOrgId,
+        type: "agent_message", title: "Group digest", body: "Digest for the linked group",
+        automationId: digestId, idempotencyKey: key });
+      const event = await notify("linked-group-digest");
+      await deliverNotificationTask({ organizationId: linked.targetOrgId, eventId: Number(event.eventId) });
+      expect(sends).toHaveLength(1);
+      expect(sends[0].input).toMatchObject({ chat_jid: GROUP_JID });
+      expect(String(sends[0].input.text)).toContain("Digest for the linked group");
+      expect(vi.mocked(executeHandler.handleExecute).mock.calls.at(-1)?.[1])
+        .toMatchObject({ organizationId: orgId, userId: ownerId, grantedOrganizationIds: [orgId] });
+      sends = [];
+
+      if (unlink === "archive") await sql`UPDATE automations SET status = 'archived' WHERE id = ${linked.bindingId}`;
+      if (unlink === "delete") await sql`DELETE FROM automations WHERE id = ${linked.bindingId}`;
+      if (unlink === "source admin") {
+        await sql`UPDATE member SET role = 'member' WHERE "organizationId" = ${orgId} AND "userId" = ${ownerId}`;
+      }
+      expect(await resolveBotDeliveryTargets(linked.targetOrgId, null, sql)).toEqual([]);
+      const afterUnlink = await notify("linked-group-digest-after-unlink");
+      await expect(deliverNotificationTask({ organizationId: linked.targetOrgId, eventId: Number(afterUnlink.eventId) }))
+        .rejects.toThrow(/target is unavailable/);
+      expect(sends).toHaveLength(0);
+    }, 60_000);
 
   it("does not grant the linked workspace general access to the source feed or its participants", async () => {
     await insertAutomation("owner-reply", replyTo());
