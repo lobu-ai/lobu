@@ -193,6 +193,23 @@ export abstract class ConnectorChatAdapter<Row>
     return this.send(threadId, this.converter.renderPostable(message), idempotencyKey);
   }
 
+  /**
+   * A channel-level post. Bindings and delivery targets address a chat by its
+   * platform channel key (`<platform>:<chat id>`), which names no connection;
+   * it is sent through THIS connection. This connection's own thread id is
+   * accepted too; any other connection's thread id is refused.
+   */
+  async postChannelMessage(
+    channelId: string,
+    message: AdapterPostableMessage,
+  ): Promise<RawMessage<Row>> {
+    const platformPrefix = `${this.name}:`;
+    const threadId = !channelId.startsWith(this.threadPrefix) && channelId.startsWith(platformPrefix)
+      ? this.encodeThreadId(channelId.slice(platformPrefix.length))
+      : channelId;
+    return this.postMessage(threadId, message);
+  }
+
   /** Buffer the whole stream and send it once — never post-then-edit. */
   async stream(
     threadId: string,

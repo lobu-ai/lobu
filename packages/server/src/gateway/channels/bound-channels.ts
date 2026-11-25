@@ -7,7 +7,7 @@
  * so the cross-org preview invariant (the sharpest tenant-safety edge) lives in
  * ONE place and cannot drift between callers.
  *
- * Two branches:
+ * Three branches:
  *   (A) the org's own connections, joined to their bindings on (org, agent,
  *       platform).
  *   (B) hosted-preview cross-org: a binding under THIS org served by the shared
@@ -19,6 +19,16 @@
  *       on agent_id, so the hosted connection's placeholder agent does not hide
  *       tenant bindings. A NOT EXISTS skips channels the org/agent already owns
  *       via branch A (no double-resolve / double-post).
+ *   (C) cross-org chat link: a channel this org linked with a `/link <code>`
+ *       claim on another org's ordinary chat connection (credentialed or
+ *       connector-transport). Authority is the canonical chat-link grant the
+ *       inbound route honors (`chat-link-authorization.ts`): an active
+ *       `system:chat-link` Automation whose author administers both orgs. It
+ *       grants exactly the linked channel, so nothing else on the owning
+ *       connection becomes reachable, and unlinking (archive, delete, or lost
+ *       admin) retires it. The post itself still runs as the owning
+ *       connection, under the owning org's connector policy. Same NOT EXISTS
+ *       as branch B.
  *
  * `agentId` (optional) scopes BOTH branches to one agent — set for the
  * conversation tools (an agent may only address ITS OWN bindings), omitted for
@@ -32,7 +42,11 @@
  * bindings because channel ids are workspace-scoped, not global.
  */
 import type { DbClient } from "../../db/client.js";
-import { runtimeConnectionIdToSlug } from "../../lobu/stores/connections-projection.js";
+import {
+  runtimeConnectionIdToSlug,
+  runtimeConnectionPredicate,
+} from "../../lobu/stores/connections-projection.js";
+import { linkedChatChannels } from "./chat-link-authorization.js";
 
 interface BoundChannelRow {
   /** Connection id that owns the post (preview conn for cross-org). */
@@ -44,7 +58,7 @@ interface BoundChannelRow {
   created_at: Date;
   /** Stored `connections.id` of the posting connection. */
   connection_db_id: number | string;
-  /** Served by another org's hosted-preview connection (branch B). */
+  /** Served by another org's connection (branch B or C). */
   cross_org: boolean;
 }
 
@@ -78,6 +92,25 @@ export async function resolveBoundChannelRows(
   const connDbFilterB = connectionDbId != null
     ? sql`AND b.connection_id = ${connectionDbId}`
     : sql``;
+  // A connector-transport connection's runtime id is its numeric row id, not
+  // a slug, so branch C matches through the canonical runtime-id predicate.
+  const connFilterC = connectionId
+    ? sql`AND ${runtimeConnectionPredicate(sql, connectionId, {
+        id: sql`b.connection_id`, slug: sql`b.connection_slug`, credentialMode: sql`b.credential_mode`,
+      })}`
+    : sql``;
+  const ownChannel = sql`
+    SELECT 1
+    FROM automation_message_subscriptions ob
+    WHERE ob.connection_organization_id = ${organizationId}
+      AND ob.organization_id = ${organizationId}
+      AND ob.connection_status = 'active'
+      AND ob.credential_mode IS NOT NULL
+      ${ownAgentFilter}
+      AND ob.platform = b.platform
+      AND ob.channel_id = b.channel_id
+  `;
+  const { channels: linkedChats } = await linkedChatChannels(sql, organizationId);
 
   // `connections` keys chat rows by `slug` (`agentconn-<id>` for BYO,
   // `slackinst-<id>` verbatim for managed). Callers expect the runtime
@@ -128,17 +161,26 @@ export async function resolveBoundChannelRows(
           ${connFilterB}
           ${connDbFilterB}
           -- Skip channels the org/agent already owns via branch A.
-          AND NOT EXISTS (
-            SELECT 1
-            FROM automation_message_subscriptions ob
-            WHERE ob.connection_organization_id = ${organizationId}
-              AND ob.organization_id = ${organizationId}
-              AND ob.connection_status = 'active'
-              AND ob.credential_mode IS NOT NULL
-              ${ownAgentFilter}
-              AND ob.platform = b.platform
-              AND ob.channel_id = b.channel_id
-          )
+          AND NOT EXISTS (${ownChannel})
+
+        UNION ALL
+
+        -- (C) cross-org chat link: only the channel each authorized link
+        -- names, posted by the owning connection. A connector-transport
+        -- connection (credential_mode NULL) is addressed by its row id.
+        SELECT
+          CASE WHEN b.credential_mode IS NULL
+            THEN b.connection_id::text ELSE b.runtime_connection_id END AS id,
+          b.platform, b.channel_id, b.team_id, b.created_at,
+          b.connection_id AS connection_db_id, true AS cross_org
+        FROM automation_message_subscriptions b
+        WHERE b.organization_id = ${organizationId}
+          AND b.connection_organization_id <> ${organizationId}
+          AND (b.automation_id, b.connection_id, b.channel_id) IN (${linkedChats})
+          ${agentFilterB}
+          ${connFilterC}
+          ${connDbFilterB}
+          AND NOT EXISTS (${ownChannel})
       ) candidates
       ORDER BY id, platform, channel_id, created_at ASC
     ) targets
