@@ -574,9 +574,11 @@ export class OAuthClientsStore {
   }
 
   /**
-   * One person's live login for a client: the newest live token's scope and
-   * grant, plus the client's registration. Null when the person holds no live
-   * token for it, so callers never confirm that someone else's login exists.
+   * One person's live login for a client: the highest retained MCP level and
+   * union of all live tokens' workspace grants, plus the client's registration.
+   * A narrower refresh or reauthorization does not revoke older access tokens.
+   * Null when the person holds no live token for it, so callers never confirm
+   * that someone else's login exists.
    */
   async getLiveLogin(clientId: string, userId: string): Promise<LiveLogin | null> {
     const rows = await this.sql`
@@ -590,11 +592,15 @@ export class OAuthClientsStore {
         AND t.revoked_at IS NULL
         AND t.expires_at > NOW()
       ORDER BY t.created_at DESC
-      LIMIT 1
     `;
     const row = rows[0];
     if (!row) return null;
     const metadata = (row.metadata ?? {}) as Record<string, unknown>;
+    const levels = new Set(rows.map((token) => mcpLevelOf(token.scope as string | null)));
+    const level = [...MCP_LEVELS].reverse().find((candidate) => levels.has(candidate)) ?? null;
+    const grantedOrganizationIds = new Set(rows.flatMap((token) =>
+      parsePgTextArray(token.granted_organization_ids as string | null)
+    ));
     return {
       clientId,
       clientName: (row.client_name as string | null) ?? null,
@@ -602,8 +608,8 @@ export class OAuthClientsStore {
       authorizationGrantType: (row.authorization_grant_type as LiveLogin['authorizationGrantType']) ?? null,
       createdAt: new Date(row.created_at as string | Date).toISOString(),
       lastUsedAt: typeof metadata.last_seen_at === 'number' ? new Date(metadata.last_seen_at).toISOString() : null,
-      level: mcpLevelOf(row.scope as string | null),
-      grantedOrganizationIds: parsePgTextArray(row.granted_organization_ids as string | null),
+      level,
+      grantedOrganizationIds: [...grantedOrganizationIds],
     };
   }
 

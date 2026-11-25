@@ -21,9 +21,12 @@ import {
   createTestUser,
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
-import { get, mcpRequest, post } from '../../setup/test-helpers';
+import { get, mcpRequest, post as requestPost } from '../../setup/test-helpers';
 
 const MULTI = { LOBU_OAUTH_MULTI_WORKSPACE_GRANTS: '1' };
+
+const post = (path: string, options?: Parameters<typeof requestPost>[1]) =>
+  requestPost(path, { ...options, headers: { Origin: 'http://localhost', ...options?.headers } });
 
 async function seedLogin() {
   const sql = getTestDb();
@@ -76,6 +79,126 @@ const searchIn = (token: string, workspace: string) =>
 describe('login upgrade links', () => {
   beforeEach(async () => {
     await cleanupTestDatabase();
+  });
+
+  it.each([
+    {},
+    { Origin: 'http://attacker.localhost' },
+    { Origin: 'https://attacker.example.com' },
+    { Origin: 'null' },
+    { Origin: 'not a URL' },
+    { Referer: 'http://attacker.localhost/page' },
+    { Origin: 'http://attacker.localhost', Referer: 'http://localhost/page' },
+    { Origin: 'null', Referer: 'http://localhost/page' },
+  ])('rejects a browser grant with untrusted origin headers %j without changing access', async (headers) => {
+    const { sql, other, client, cookie } = await seedLogin();
+    const before = await sql`
+      SELECT id, scope, granted_organization_ids FROM oauth_tokens
+      WHERE client_id = ${client.client_id} ORDER BY id
+    `;
+    const response = await requestPost(`/api/me/logins/${client.client_id}/grant`, {
+      cookie,
+      // A simple cross-origin fetch can send JSON as text/plain, without preflight.
+      rawBody: JSON.stringify({ workspace: other.slug, level: 'write' }),
+      headers: { 'Content-Type': 'text/plain', ...headers } as Record<string, string>,
+      env: MULTI,
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: 'forbidden' });
+    const after = await sql`
+      SELECT id, scope, granted_organization_ids FROM oauth_tokens
+      WHERE client_id = ${client.client_id} ORDER BY id
+    `;
+    expect(after).toEqual(before);
+  });
+
+  it.each<Record<string, string>>([
+    { Referer: 'http://localhost/agents/connected' },
+    { Origin: 'https://app.example.com', 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'app.example.com' },
+  ])('accepts a same-origin browser grant with headers %j', async (headers) => {
+    const { other, client, cookie } = await seedLogin();
+    const response = await requestPost(`/api/me/logins/${client.client_id}/grant`, {
+      cookie,
+      body: { workspace: other.slug },
+      headers,
+      env: MULTI,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ workspace: other.slug, updated_tokens: 2 });
+  });
+
+  it('reports the older live admin bearer after a refresh narrows the newest grant', async () => {
+    const { sql, home, client, cookie } = await seedLogin();
+    await sql`
+      UPDATE oauth_tokens SET scope = 'mcp:read mcp:write mcp:admin'
+      WHERE client_id = ${client.client_id}
+    `;
+    const refreshed = await new OAuthProvider(sql, undefined, true).refreshAccessToken({
+      grant_type: 'refresh_token',
+      client_id: client.client_id,
+      client_secret: client.client_secret,
+      refresh_token: 'upgrade-refresh-token',
+      scope: 'mcp:read',
+    });
+    expect(refreshed).toMatchObject({ scope: 'mcp:read' });
+    const view = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
+    expect(view.status).toBe(200);
+    expect(await view.json()).toMatchObject({ level: 'admin', workspaces: [{ id: home.id }] });
+
+    // The consumed admin refresh row is revoked; only its older bearer still carries admin.
+    await sql`UPDATE oauth_tokens SET expires_at = NOW() - INTERVAL '1 second' WHERE id = 'upgrade-access'`;
+    const afterExpiry = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
+    expect(await afterExpiry.json()).toMatchObject({ level: 'read' });
+  });
+
+  it('reports workspaces retained by older tokens after reauthorization selects another workspace', async () => {
+    const { sql, home, other, owner, client, cookie } = await seedLogin();
+    const provider = new OAuthProvider(sql, 'https://lobu.test', true);
+    const verifier = 'synthetic-reauthorization-code-verifier';
+    const redirectUri = 'https://app.example.com/callback';
+    const code = await provider.createAuthorizationCode({
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      scope: 'mcp:read',
+    }, owner.id, null, [other.id]);
+    const issued = await provider.exchangeAuthorizationCode({
+      grant_type: 'authorization_code', client_id: client.client_id,
+      client_secret: client.client_secret, code, code_verifier: verifier, redirect_uri: redirectUri,
+    });
+    expect(issued).not.toHaveProperty('error');
+
+    const view = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
+    expect(view.status).toBe(200);
+    const body = await view.json();
+    expect(body.level).toBe('write');
+    expect(body.workspaces.map((workspace: { id: string }) => workspace.id).sort())
+      .toEqual([home.id, other.id].sort());
+  });
+
+  it('lists all live workspaces when separate grants together exceed the per-grant workspace limit', async () => {
+    const { sql, home, other, owner, client, cookie } = await seedLogin();
+    const olderIds = [home.id];
+    for (let i = 0; i < 49; i++) {
+      const workspace = await createTestOrganization({ name: `Retained ${i}`, slug: `retained-${i}` });
+      await addUserToOrganization(owner.id, workspace.id, 'member');
+      olderIds.push(workspace.id);
+    }
+    await sql`
+      UPDATE oauth_tokens SET granted_organization_ids = ${pgTextArray(olderIds)}::text[]
+      WHERE id = 'upgrade-access'
+    `;
+    await sql`
+      UPDATE oauth_tokens SET granted_organization_ids = ${pgTextArray([other.id])}::text[]
+      WHERE id = 'upgrade-refresh'
+    `;
+    const view = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
+    expect(view.status).toBe(200);
+    const body = await view.json();
+    expect(body.workspaces.map((workspace: { id: string }) => workspace.id).sort())
+      .toEqual([...olderIds, other.id].sort());
   });
 
   it('links an ungranted workspace to the login page, and the grant reaches the same bearer and its refresh', async () => {

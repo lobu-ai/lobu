@@ -1,11 +1,13 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { deriveAppPrincipalId, isHostedRedirectUri } from "../auth/app-principal";
+import { resolveBaseUrl, safeOrigin } from "../auth/base-url";
 import { mcpAuth } from "../auth/middleware";
 import { OAuthClientsStore, type OAuthMcpLevel } from "../auth/oauth/clients";
 import { isTokenDerivedSession } from "../auth/oauth/scopes";
 import {
 	findUngrantedMemberWorkspace,
+	type GrantedMemberWorkspace,
 	isMultiWorkspaceGrantIssuanceEnabled,
 	listLiveGrantedMemberWorkspaces,
 	MAX_GRANTED_ORGANIZATIONS,
@@ -61,10 +63,15 @@ routes.get("/:clientId", mcpAuth, async (c) => {
 	const store = new OAuthClientsStore(getDb());
 	const login = await store.getLiveLogin(clientId, userId);
 	if (!login) return notFound(c);
-	const workspaces = await listLiveGrantedMemberWorkspaces({
-		userId,
-		grantedOrganizationIds: login.grantedOrganizationIds,
-	});
+	// Separate live grants can retain different workspaces after reauthorization.
+	// Resolve their union in bounded batches: the resolver's limit is per grant.
+	const workspaces: GrantedMemberWorkspace[] = [];
+	for (let start = 0; start < login.grantedOrganizationIds.length; start += MAX_GRANTED_ORGANIZATIONS) {
+		workspaces.push(...await listLiveGrantedMemberWorkspaces({
+			userId,
+			grantedOrganizationIds: login.grantedOrganizationIds.slice(start, start + MAX_GRANTED_ORGANIZATIONS),
+		}));
+	}
 	return c.json({
 		client_id: login.clientId,
 		client_name: login.clientName,
@@ -87,6 +94,17 @@ routes.get("/:clientId", mcpAuth, async (c) => {
 routes.post("/:clientId/grant", mcpAuth, async (c) => {
 	const userId = interactiveUserId(c);
 	if (!userId) return c.get("user") ? forbidden(c) : c.json({ error: "unauthorized" }, 401);
+
+	// Like OAuth consent, widening a cookie-authenticated grant requires a
+	// same-origin browser request. An invalid Origin must not fall back to Referer.
+	const origin = safeOrigin(c.req.header("origin") ?? c.req.header("referer"));
+	const allowedOrigins = new Set([
+		new URL(c.req.url).origin,
+		resolveBaseUrl({ request: c.req.raw, skipEnvOverride: true }),
+	]);
+	if (!origin || !allowedOrigins.has(origin)) {
+		return c.json({ error: "forbidden", message: "Invalid request origin." }, 403);
+	}
 
 	const body = (await c.req.json().catch(() => null)) as { workspace?: unknown; level?: unknown } | null;
 	const workspaceInput = typeof body?.workspace === "string" ? body.workspace.trim() : "";
