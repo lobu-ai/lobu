@@ -14,7 +14,6 @@ import {
 } from "../modules/module-system.js";
 import { getCredentialLeaseRegistry } from "../agent-tooling/registry.js";
 import type { GrantStore } from "../permissions/grant-store.js";
-import type { PolicyStore } from "../permissions/policy-store.js";
 import type { WritableSecretStore } from "../secrets/index.js";
 import {
   DeploymentManager,
@@ -46,14 +45,12 @@ export class Orchestrator {
   /**
    * Inject core services into the orchestrator after gateway initialization.
    * Provider modules in the registry carry their own credential stores;
-   * the deployment manager wires its secret store + grant/policy stores from
-   * here.
+   * the deployment manager wires its secret store + grant store from here.
    */
   async injectCoreServices(
     secretStore: WritableSecretStore,
     providerCatalogService?: ProviderCatalogService,
     grantStore?: GrantStore,
-    policyStore?: PolicyStore,
     guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
     agentTurnMcp?: AgentTurnDeps["mcp"],
@@ -70,10 +67,6 @@ export class Orchestrator {
 
     if (grantStore) {
       this.deploymentManager.setGrantStore(grantStore);
-    }
-
-    if (policyStore) {
-      this.deploymentManager.setPolicyStore(policyStore);
     }
 
     if (providerCatalogService) {

@@ -28,7 +28,10 @@ import type { RevokedTokenStore } from "../auth/revoked-token-store.js";
 import { getRevokedTokenStore } from "../auth/revoked-token-store.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
 import type { GrantStore } from "../permissions/grant-store.js";
-import type { PolicyStore } from "../permissions/policy-store.js";
+import type {
+  PolicyStore,
+  ResolvedJudgeRule,
+} from "../permissions/policy-store.js";
 import { EgressJudge } from "./egress-judge/judge.js";
 import type { JudgeDecision } from "./egress-judge/types.js";
 
@@ -192,30 +195,48 @@ async function checkDomainAccess(
   // PolicyStore is keyed by `(orgId, agentId)`; without an org id we refuse
   // to consult it — falling through to an unkeyed lookup would let another
   // tenant's policy decide our verdict.
+  //
+  // Every judge whose domain selector covers the host runs, and any deny
+  // wins: an exact rule never shadows a covering wildcard (or the reverse).
+  // A policy that cannot be read returns `null`, which `decideEgress` turns
+  // into a deny — the judged plane fails closed.
   const policyStore = proxyPolicyStore;
   const egressJudge = proxyEgressJudge;
   const judge =
     policyStore && egressJudge && agentId && organizationId
       ? async (host: string) => {
-          const rule = policyStore.resolve(organizationId, agentId, host);
-          if (!rule) return null;
-          const decision = await egressJudge.decide(
-            {
-              agentId,
-              organizationId,
-              hostname: host,
-              method: requestContext?.method,
-              path: requestContext?.path,
-            },
-            rule
+          let rules: ResolvedJudgeRule[];
+          try {
+            rules = await policyStore.resolve(organizationId, agentId, host);
+          } catch (error) {
+            logger.error(
+              `Egress judge policy lookup failed for ${host} (agent: ${agentId}); denying`,
+              { error: error instanceof Error ? error.message : String(error) }
+            );
+            return null;
+          }
+          if (rules.length === 0) return null;
+          const decisions = await Promise.all(
+            rules.map((rule) =>
+              egressJudge.decide(
+                {
+                  agentId,
+                  organizationId,
+                  hostname: host,
+                  method: requestContext?.method,
+                  path: requestContext?.path,
+                },
+                rule
+              )
+            )
           );
-          const allowed = decision.verdict === "allow";
-          if (!allowed) {
+          for (const decision of decisions) {
+            if (decision.verdict === "allow") continue;
             // Egress denials share the guardrail audit trail: a judge DENY writes a
             // `guardrail-trip` event (stage `egress`) just like message-pipeline
-            // guardrails. Enforcement stays here in the proxy — this is audit only.
-            // Fire-and-forget: `recordGuardrailTrip` never rejects, so we don't
-            // await it on the egress hot path.
+            // guardrails, one per denying judge. Enforcement stays here in the
+            // proxy — this is audit only. Fire-and-forget: `recordGuardrailTrip`
+            // never rejects, so we don't await it on the egress hot path.
             void recordGuardrailTrip({
               organizationId,
               agentId,
@@ -231,7 +252,8 @@ async function checkDomainAccess(
               },
             });
           }
-          return { allowed, decision };
+          const denial = decisions.find((d) => d.verdict !== "allow");
+          return { allowed: !denial, decision: denial ?? decisions[0]! };
         }
       : undefined;
 

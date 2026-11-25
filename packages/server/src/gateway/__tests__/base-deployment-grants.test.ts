@@ -6,7 +6,6 @@ import {
   type OrchestratorConfig,
 } from "../orchestration/deployment-manager.js";
 import { GrantStore } from "../permissions/grant-store.js";
-import { PolicyStore } from "../permissions/policy-store.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -69,7 +68,6 @@ function buildPayload(overrides: Partial<MessagePayload>): MessagePayload {
 
 describe("DeploymentManager.syncNetworkConfigGrants", () => {
   let grantStore: GrantStore;
-  let policyStore: PolicyStore;
   let manager: TestDeploymentManager;
 
   // Grant reads are org-scoped, so every lookup needs the payload org.
@@ -87,10 +85,8 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     // grants.agent_id has an FK on agents(id); seed the row used below.
     await seedAgentRow("agent-1");
     grantStore = new GrantStore();
-    policyStore = new PolicyStore();
     manager = new TestDeploymentManager(TEST_CONFIG);
     manager.setGrantStore(grantStore);
-    manager.setPolicyStore(policyStore);
   });
 
   test("syncs networkConfig.allowedDomains into the grant store", async () => {
@@ -186,7 +182,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     // was removed from config; revocation must not depend on pod-local state.
     const freshManager = new TestDeploymentManager(TEST_CONFIG);
     freshManager.setGrantStore(grantStore);
-    freshManager.setPolicyStore(policyStore);
     await freshManager.syncNetworkConfigGrants(
       buildPayload({ networkConfig: { allowedDomains: [] } })
     );
@@ -202,7 +197,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
 
     const freshManager = new TestDeploymentManager(TEST_CONFIG);
     freshManager.setGrantStore(grantStore);
-    freshManager.setPolicyStore(policyStore);
     await freshManager.syncNetworkConfigGrants(buildPayload({}));
 
     expect(await hasGrant("cache.nixos.org")).toBe(false);
@@ -242,7 +236,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
 
     const freshManager = new TestDeploymentManager(TEST_CONFIG);
     freshManager.setGrantStore(grantStore);
-    freshManager.setPolicyStore(policyStore);
     await freshManager.syncNetworkConfigGrants(
       buildPayload({ networkConfig: { allowedDomains: ["x.example.com"] } })
     );
@@ -264,7 +257,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     // in the infra exempt set — a denied row is never exempt.
     const freshManager = new TestDeploymentManager(TEST_CONFIG);
     freshManager.setGrantStore(grantStore);
-    freshManager.setPolicyStore(policyStore);
     await freshManager.syncNetworkConfigGrants(buildPayload({}));
     expect(await isDenied("registry.npmjs.org")).toBe(false);
   });
@@ -273,7 +265,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
     const replicaA = manager;
     const replicaB = new TestDeploymentManager(TEST_CONFIG);
     replicaB.setGrantStore(grantStore);
-    replicaB.setPolicyStore(policyStore);
 
     const configX = { networkConfig: { allowedDomains: ["x.example.com"] } };
     const configY = { networkConfig: { allowedDomains: ["y.example.com"] } };
@@ -300,53 +291,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
         networkConfig: { allowedDomains: ["api.example.com"] },
       })
     );
-  });
-
-  test("syncs egress judge policies even when no grant store is set", async () => {
-    const barebones = new TestDeploymentManager(TEST_CONFIG);
-    barebones.setPolicyStore(policyStore);
-
-    // Egress judges are sourced from the agent's `egress`-stage inline
-    // guardrails — each becomes a named judge gating its `domains`.
-    await barebones.syncNetworkConfigGrants(
-      buildPayload({
-        guardrailsInline: [
-          {
-            name: "default",
-            enabled: true,
-            stage: "egress",
-            policy: "initial policy",
-            model: "model-x",
-            domains: ["api.example.com"],
-          },
-        ],
-      })
-    );
-
-    let resolved = policyStore.resolve("test-org", "agent-1", "api.example.com");
-    expect(resolved?.policy).toContain("initial policy");
-    expect(resolved?.judgeModel).toBe("model-x");
-
-    await barebones.syncNetworkConfigGrants(
-      buildPayload({
-        guardrailsInline: [
-          {
-            name: "default",
-            enabled: true,
-            stage: "egress",
-            policy: "updated policy",
-            domains: ["api.example.com"],
-          },
-        ],
-      })
-    );
-
-    resolved = policyStore.resolve("test-org", "agent-1", "api.example.com");
-    expect(resolved?.policy).toContain("updated policy");
-    expect(resolved?.policy).not.toContain("initial policy");
-
-    await barebones.syncNetworkConfigGrants(buildPayload({}));
-    expect(policyStore.resolve("test-org", "agent-1", "api.example.com")).toBeUndefined();
   });
 
   test("revokes patterns removed from the agent's config", async () => {
@@ -434,7 +378,6 @@ describe("DeploymentManager.syncNetworkConfigGrants", () => {
  */
 describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () => {
   let grantStore: GrantStore;
-  let policyStore: PolicyStore;
   let manager: TestDeploymentManager;
 
   const hasGrant = (pattern: string, organizationId = "test-org") =>
@@ -460,10 +403,8 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
     await resetTestDatabase();
     await seedAgentRow("agent-1");
     grantStore = new GrantStore();
-    policyStore = new PolicyStore();
     manager = new TestDeploymentManager(TEST_CONFIG);
     manager.setGrantStore(grantStore);
-    manager.setPolicyStore(policyStore);
   });
 
   test("skips the allow grant for a domain its own judge governs", async () => {
@@ -474,10 +415,6 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
       })
     );
     expect(await hasGrant("api.example.com")).toBe(false);
-    // The judge itself must still be registered, or we have just denied it.
-    expect(
-      policyStore.resolve("test-org", "agent-1", "api.example.com")
-    ).toBeDefined();
   });
 
   test("still grants an UNJUDGED domain in the same payload", async () => {

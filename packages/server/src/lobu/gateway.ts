@@ -402,7 +402,6 @@ export async function initLobuGateway(options?: {
 			coreServices.getSecretStore(),
 			coreServices.getProviderCatalogService(),
 			coreServices.getGrantStore() ?? undefined,
-			coreServices.getPolicyStore() ?? undefined,
 			coreServices.getGuardrailRegistry() ?? undefined,
 			coreServices.getAgentSettingsStore() ?? undefined,
 			agentTurnMcpDeps(coreServices),

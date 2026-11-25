@@ -61,7 +61,7 @@ function grantStoreAllowing(
 }
 
 function policyStoreReturning(rule: ResolvedJudgeRule): PolicyStore {
-  return { resolve: () => rule } as unknown as PolicyStore;
+  return { resolve: async () => [rule] } as unknown as PolicyStore;
 }
 
 describe("wireProxyEgressStores — boot wiring of the HTTP egress proxy", () => {

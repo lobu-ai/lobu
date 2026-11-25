@@ -114,10 +114,12 @@ export interface MessagePayload {
 
   /**
    * Per-agent operator-authored inline guardrails. Threaded alongside
-   * `networkConfig` so the deployment manager can sync the `egress`-stage
-   * entries into the egress policy store (the proxy-plane LLM judge). The
+   * `networkConfig` so the deployment manager's grant sync can keep the
+   * domains of `egress`-stage judges out of the agent's allow grants (an allow
+   * grant outranks the judge). The proxy-plane judge itself reads the policy
+   * from `agents.guardrails_inline`, not from this payload. The
    * input/output/pre-tool entries are resolved separately by the message
-   * pipeline from agent settings; they ride here only for the egress sync.
+   * pipeline from agent settings; they ride here only for the grant sync.
    */
   guardrailsInline?: AgentInlineGuardrail[];
 

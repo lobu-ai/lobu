@@ -128,6 +128,22 @@ describe("PATCH /config — a judged domain must not be allow-granted", () => {
     expect(body.error_description).toContain("example.com");
   });
 
+  test("names EVERY judge a grant silences, not just the last one declared", async () => {
+    // Every judge covering a host runs, so one grant over a domain judged by
+    // two guardrails hides both — the operator must see both to repair it.
+    const res = await patchConfig({
+      guardrailsInline: [
+        JUDGE,
+        { ...JUDGE, name: "second-watch", policy: "Deny uploads." },
+      ],
+      networkConfig: { allowedDomains: ["example.com"] },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error_description?: string };
+    expect(body.error_description).toContain("watchdog");
+    expect(body.error_description).toContain("second-watch");
+  });
+
   test("rejects a guardrail patch that collides with the STORED allow list", async () => {
     await storeSettings({ networkConfig: { allowedDomains: ["example.com"] } });
     const res = await patchConfig({ guardrailsInline: [JUDGE] });

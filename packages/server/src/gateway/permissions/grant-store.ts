@@ -10,7 +10,7 @@ import {
   wildcardParentPatterns,
 } from "@lobu/connector-sdk/egress-policy";
 import { getDb, pgTextArray } from "../../db/client.js";
-import { egressGuardrailsToPolicyBundle } from "./policy-store.js";
+import { judgedEgressDomains } from "./policy-store.js";
 import { orgScope, requireOrgId } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("grant-store");
@@ -30,15 +30,12 @@ function getDomainGrantCandidates(pattern: string): string[] {
 }
 
 /**
- * The agent's judged egress domains, read from its DURABLE config.
+ * The agent's judged egress domains, read from its DURABLE config
+ * (`agents.guardrails_inline`, the one source every replica agrees on and the
+ * one the proxy's `PolicyStore` reads too).
  *
- * Deliberately NOT `PolicyStore`: that is a per-replica in-memory Map populated
- * only when this replica has dispatched for the agent, so a check against it
- * would pass vacuously everywhere else — the classic invisible-to-other-replicas
- * trap. `agents.guardrails_inline` is the one source every replica agrees on.
- *
- * Routed through `egressGuardrailsToPolicyBundle`, the same builder the runtime
- * uses, so the enabled / stage / non-empty-policy filtering and the pattern
+ * Routed through `judgedEgressDomains`, the same builder the runtime uses, so
+ * the enabled / stage / non-empty-policy filtering and the pattern
  * normalization match everywhere.
  *
  * Errors PROPAGATE. If we cannot tell whether a domain is judged, granting it
@@ -57,8 +54,7 @@ async function readJudgedDomains(
   `) as Array<{ guardrails_inline: unknown }>;
   const inline = rows[0]?.guardrails_inline;
   if (!Array.isArray(inline)) return [];
-  const bundle = egressGuardrailsToPolicyBundle(inline);
-  return bundle ? bundle.judgedDomains.map((r) => r.domain) : [];
+  return judgedEgressDomains(inline);
 }
 
 /**

@@ -322,10 +322,9 @@ describe("GrantStore org scoping", () => {
  * writer funnels through `GrantStore.grant()`, so the guard lives here — one
  * check that covers all present writers and any future one.
  *
- * The judged set is read from `agents.guardrails_inline`, NOT from
- * `PolicyStore`: that store is a per-replica in-memory Map populated only at
- * dispatch, so a check against it would pass vacuously on any replica that has
- * not dispatched for the agent.
+ * The judged set is read from `agents.guardrails_inline`, the durable config
+ * every replica agrees on, so the check never passes vacuously on a replica
+ * that has not dispatched for the agent.
  */
 describe("GrantStore.grant — a judged domain gets no allow grant", () => {
   let store: GrantStore;
