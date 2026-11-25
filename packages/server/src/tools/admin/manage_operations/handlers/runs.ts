@@ -21,6 +21,11 @@ import type { ConnectorPolicyPrincipal } from "../../../../authz/connector-polic
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { listOrgActivity } from "../activity-feed";
 import { ENTITY_CHANGE_ACTION_KEYS } from "../../run-decider";
+import {
+	MANAGE_SKILLS_ACTION_KEY,
+	mayReadSkillBodies,
+	skillProposalEventCopy,
+} from "../../manage_skills";
 export async function handleListActivity(
 	args: Static<typeof ListActivityAction>,
 	ctx: ToolContext,
@@ -68,8 +73,19 @@ function publicAutomationFields(value: unknown): unknown {
 		: { ...publicRef, automation_id: automationId };
 }
 
+/** A held skill write's body is shown only to a reader allowed to see skill bodies. */
+async function skillBodiesFor(
+	rows: ReadonlyArray<Record<string, unknown>>,
+	ctx: ToolContext,
+): Promise<boolean> {
+	return rows.some((row) => row.operation_key === MANAGE_SKILLS_ACTION_KEY)
+		? mayReadSkillBodies(ctx)
+		: true;
+}
+
 function publicRunRecord(
 	row: Record<string, unknown>,
+	skillBodies: boolean,
 ): Record<string, unknown> {
 	const publicRecord: Record<string, unknown> = {
 		...row,
@@ -79,7 +95,9 @@ function publicRunRecord(
 				(actionKey) => actionKey === row.operation_key,
 			)
 				? publicAutomationFields(row.input)
-				: row.input,
+				: row.operation_key === MANAGE_SKILLS_ACTION_KEY && !skillBodies
+					? skillProposalEventCopy(row.input)
+					: row.input,
 		initiator_ref:
 			row.initiator_kind === "automation"
 				? publicAutomationFields(row.initiator_ref)
@@ -252,9 +270,10 @@ export async function handleListRuns(
     }
     return principal;
   };
+  const skillBodies = await skillBodiesFor(pageRows, ctx);
   const runs = await Promise.all(
     pageRows.map(async ({ policy_principal_kind, policy_principal_id, ...row }) => ({
-      ...publicRunRecord(row),
+      ...publicRunRecord(row, skillBodies),
       policy_principal: await policyPrincipalOf(
         policy_principal_kind as string | null,
         policy_principal_id as string | null,
@@ -311,6 +330,9 @@ export async function handleGetRun(
 	if (rows.length === 0) return withFailureCode({ error: "Run not found" }, "NOT_FOUND");
 	return {
 		action: "get_run",
-		run: publicRunRecord(rows[0] as Record<string, unknown>),
+		run: publicRunRecord(
+			rows[0] as Record<string, unknown>,
+			await skillBodiesFor(rows, ctx),
+		),
 	};
 }

@@ -375,7 +375,7 @@ describe("manage_skills", () => {
 		expect(run?.status).toBe("completed");
 	});
 
-	it("keeps library bodies out of the audit and approval events a read-denied agent can fetch", async () => {
+	it("keeps library bodies out of every event copy and run read a read-denied agent can reach", async () => {
 		const secret = "Only skill readers see this body.";
 		const created = (await put(ownerCtx, {
 			expected_revision: 0, skill: body("guarded", { content: secret }),
@@ -383,29 +383,43 @@ describe("manage_skills", () => {
 		await put(ownerCtx, {
 			id: created.skill.id, expected_revision: 1, skill: body("guarded", { content: `${secret} Revised.` }),
 		});
-		// The proposer's own text is its business; the card's `current` is the library's.
-		const pending = (await put(proposingAgentCtx, {
-			id: created.skill.id, expected_revision: 2, skill: body("guarded", { content: "Proposed body." }),
-		})) as { event_id: number };
+		// An enabled-only update proposes the library's unchanged body.
+		const pendingUpdate = (await put(proposingAgentCtx, {
+			id: created.skill.id, expected_revision: 2,
+			skill: body("guarded", { content: `${secret} Revised.`, enabled: false }),
+		})) as { run_id: number; event_id: number };
+		// An approved archive stores its output on the completed card.
+		const pendingArchive = (await executeTool("manage_skills", {
+			action: "archive", id: created.skill.id, expected_revision: 2,
+		}, TEST_ENV, proposingAgentCtx)) as { run_id: number };
+		await executeTool("manage_operations", { action: "approve", run_id: pendingArchive.run_id }, TEST_ENV, ownerCtx);
 
-		const audits = await getTestDb()<{ id: string }>`
+		const events = await getTestDb()<{ id: string }>`
 			SELECT id FROM current_event_records
-			WHERE organization_id = ${orgId} AND metadata->>'resource_kind' = 'skill'
-				AND metadata->>'resource_id' = ${created.skill.id}
+			WHERE organization_id = ${orgId}
+				AND (metadata->>'resource_id' = ${created.skill.id}
+					OR run_id IN (${pendingUpdate.run_id}, ${pendingArchive.run_id}))
 		`;
-		expect(audits).toHaveLength(2);
-		const read = (await executeTool(
-			"read_knowledge",
-			{ content_ids: [...audits.map((row) => Number(row.id)), pending.event_id] },
-			TEST_ENV,
-			deniedAgentCtx,
-		)) as { content: Array<{ id: number; payload_data?: { state?: Record<string, unknown> } }> };
-		expect(read.content.map((item) => item.id).sort()).toEqual(
-			[...audits.map((row) => Number(row.id)), pending.event_id].sort(),
-		);
-		expect(JSON.stringify(read)).not.toContain(secret);
-		const states = read.content.flatMap((item) => (item.payload_data?.state ? [item.payload_data.state] : []));
-		expect(states).toHaveLength(2);
-		for (const state of states) expect(state).toMatchObject({ content_sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		const ids = events.map((row) => Number(row.id));
+		// Two writes and one archive audited, plus one card per approval.
+		expect(ids).toHaveLength(5);
+		const readAs = (ctx: AuthContext) => executeTool("read_knowledge", { content_ids: ids }, TEST_ENV, ctx) as Promise<{
+			content: Array<{ id: number; run_id?: number | null; interaction_input?: unknown; payload_data?: { state?: unknown } }>;
+		}>;
+		const denied = await readAs(deniedAgentCtx);
+		// Exact-id reads also return each approval card's superseded versions.
+		expect(denied.content.map((item) => item.id)).toEqual(expect.arrayContaining(ids));
+		expect(JSON.stringify(denied)).not.toContain(secret);
+		expect(JSON.stringify(denied)).toMatch(/"content_sha256":"[0-9a-f]{64}"/);
+		for (const action of [{ action: "list_runs" }, { action: "get_run", run_id: pendingUpdate.run_id }]) {
+			expect(JSON.stringify(await executeTool("manage_operations", action, TEST_ENV, deniedAgentCtx))).not.toContain(secret);
+		}
+
+		// The reviewer still sees what it is approving, in the event and on the card.
+		const owner = await readAs(ownerCtx);
+		const card = owner.content.find((item) => item.id === pendingUpdate.event_id);
+		expect(card?.interaction_input).toMatchObject({ write: { skill: { content: `${secret} Revised.`, enabled: false } } });
+		expect(JSON.stringify(await executeTool("get_approval", { run_id: pendingUpdate.run_id }, TEST_ENV, ownerCtx)))
+			.toContain(`${secret} Revised.`);
 	});
 });

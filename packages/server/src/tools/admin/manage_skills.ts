@@ -38,9 +38,9 @@ import {
   resolveStoredActingPrincipal,
   resolveWritePolicyDecision,
 } from '../../authz/entity-policy';
-import { assertSkillConfigReadAllowed } from '../../authz/skill-config-access';
+import { assertSkillConfigReadAllowed, skillConfigReadAllowed } from '../../authz/skill-config-access';
 import { listCatalogEntries } from '../../catalog/load';
-import { createDbClientFromEnv, type DbClient, getDb } from '../../db/client';
+import { createDbClientFromEnv, type DbClient, getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
 import {
   currentMcpActivityAttribution,
@@ -276,14 +276,14 @@ async function queueSkillWriteForApproval(
         runId,
         interactionType: 'approval',
         interactionStatus: 'pending',
-        interactionInput: proposal as unknown as Record<string, unknown>,
+        interactionInput: skillProposalEventCopy(proposal) as Record<string, unknown>,
         metadata: {
           ...approvalContext(ApprovalKind.Approval, normalApprovalImpact()),
           tool: 'manage_skills',
           action_key: MANAGE_SKILLS_ACTION_KEY,
           action: proposal.action,
           policy_action: proposal.policy_action,
-          proposal,
+          proposal: skillProposalEventCopy(proposal),
           // The library's copy, digested like its audit rows: anyone who can
           // read this event may lack skill_config read.
           current: redactConfigState('skill', current ? { ...current } : null),
@@ -338,7 +338,7 @@ export async function applyManageSkillsProposal(
   ctx: ToolContext,
   requesterUserId: string | null,
   db: DbClient,
-): Promise<{ skill: WorkspaceSkill }> {
+): Promise<{ skill: Record<string, unknown> | null }> {
   if (!isManageSkillsProposal(proposal)) {
     throw new ToolUserError('Invalid manage_skills approval proposal', 400);
   }
@@ -373,7 +373,47 @@ export async function applyManageSkillsProposal(
           skill: normalizeSkillInput({ ...skill, provenance: skill.provenance ?? undefined }),
         } as SkillWrite);
   const applyCtx: ToolContext = { ...ctx, userId: requesterUserId ?? ctx.userId };
-  return { skill: await applyAndAudit(db, applyCtx, proposal.action, write) };
+  // The approval stores this output on its event: digest the body like the audit row.
+  const applied = await applyAndAudit(db, applyCtx, proposal.action, write);
+  return { skill: redactConfigState('skill', { ...applied }) };
+}
+
+/**
+ * A held write as its event copies carry it: the skill body becomes its
+ * digest, like the audit row. The full proposal stays in `runs.action_input`;
+ * `revealSkillApprovalProposals` restores it for a reader the `skill_config`
+ * read policy allows.
+ */
+export function skillProposalEventCopy(proposal: unknown): unknown {
+  if (!isManageSkillsProposal(proposal) || !proposal.write.skill) return proposal;
+  return { ...proposal, write: { ...proposal.write, skill: redactConfigState('skill', { ...proposal.write.skill }) } };
+}
+
+/** Whether this caller may see skill bodies: a workspace member the `skill_config` read policy allows. */
+export async function mayReadSkillBodies(ctx: ToolContext): Promise<boolean> {
+  return ctx.memberRole != null && skillConfigReadAllowed(ctx);
+}
+
+/** Restore the full proposal on skill approval events for a reader that may see skill bodies. */
+export async function revealSkillApprovalProposals(
+  sql: DbClient,
+  ctx: ToolContext,
+  items: Array<{ metadata: Record<string, unknown> | null; interaction_input?: Record<string, unknown> | null; run_id?: number | string | null }>,
+): Promise<void> {
+  const held = items.filter((item) => item.metadata?.action_key === MANAGE_SKILLS_ACTION_KEY && item.run_id != null);
+  if (held.length === 0 || !(await mayReadSkillBodies(ctx))) return;
+  const rows = await sql<{ id: string; action_input: unknown }>`
+    SELECT id::text AS id, action_input FROM runs
+    WHERE organization_id = ${ctx.organizationId} AND action_key = ${MANAGE_SKILLS_ACTION_KEY}
+      AND id = ANY(${pgBigintArray(held.map((item) => Number(item.run_id)))}::bigint[])
+  `;
+  const proposals = new Map(rows.map((row) => [row.id, row.action_input]));
+  for (const item of held) {
+    const proposal = proposals.get(String(item.run_id));
+    if (!isManageSkillsProposal(proposal)) continue;
+    item.interaction_input = proposal as unknown as Record<string, unknown>;
+    item.metadata = { ...item.metadata, proposal };
+  }
 }
 
 const writeAction = (args: WriteArgs, ctx: ToolContext, env: Env) =>
