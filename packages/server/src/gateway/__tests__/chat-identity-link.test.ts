@@ -987,6 +987,14 @@ test("a member of a workspace linked to a foreign WhatsApp group receives its ac
     organizationId: ORG_A, agentId: AGENT_ID, connectionId: Number(id),
     platform: "whatsapp.web", channelId: group, configuredBy: owner.id,
   });
+  // The connection's workspace is public and has its own `person` type; the
+  // linked workspace has none. Its sender contacts must never borrow that type.
+  await getDb()`UPDATE organization SET visibility = 'public' WHERE id = ${ORG_B}`;
+  await getDb()`INSERT INTO entity_types (slug, name, organization_id) VALUES ('person', 'Person', ${ORG_B})`;
+  const foreignTypedEntities = () => getDb()`
+    SELECT e.id FROM entities e JOIN entity_types et ON et.id = e.entity_type_id
+    WHERE e.organization_id = ${ORG_A} AND et.organization_id IS DISTINCT FROM e.organization_id
+  `;
 
   const sent: Array<{ chat_jid: unknown; text: unknown }> = [];
   const adapter = new WhatsAppWebAdapter({
@@ -1049,6 +1057,11 @@ test("a member of a workspace linked to a foreign WhatsApp group receives its ac
     await deliver("group-unlinked-again");
     expect(sent).toHaveLength(1);
     expect(await claimCount()).toBe(1);
+    // Capture (and its sender attribution) has settled in the linked workspace.
+    await waitFor(async () => expect(await getDb()`
+      SELECT 1 FROM channel_messages
+      WHERE organization_id = ${ORG_A} AND platform_message_id = ${`${id}:group-unlinked-again`}
+    `).toHaveLength(1));
 
     const page = await routesAs(member).request(pageUrl(token));
     expect(page.status).toBe(200);
@@ -1057,6 +1070,7 @@ test("a member of a workspace linked to a foreign WhatsApp group receives its ac
     await addUserToOrganization(outsider.id, ORG_B, "member");
     expect((await submit(outsider, token)).status).toBe(403);
     expect((await submit(member, token)).status).toBe(200);
+    expect(await foreignTypedEntities()).toEqual([]);
     await waitFor(() => expect(sent).toHaveLength(2));
     expect(sent[1]?.chat_jid).toBe(sender);
     expect(await resolveChatSenderMember("whatsapp.web", undefined, sender, ORG_B)).toBeNull();
