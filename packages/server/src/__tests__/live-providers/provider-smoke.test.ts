@@ -381,10 +381,13 @@ for (const { id, provider } of flattened) {
 				(block) => block.type === "toolCall",
 			);
 			if (required) {
+				// The agent loop runs any parsed tool call unless the turn errored or
+				// aborted, so that is the contract. The stop reason itself varies:
+				// Gemini's OpenAI-compatible stream ends tool calls with "stop".
 				expect(
-					response.stopReason,
-					`${id} required tool turn failed: ${response.errorMessage ?? "unknown provider error"}`,
-				).toBe("toolUse");
+					["error", "aborted"].includes(response.stopReason),
+					`${id} required tool turn failed: ${response.errorMessage ?? response.stopReason}`,
+				).toBe(false);
 				expect(toolCall, `${id} returned no parsed tool call`).toMatchObject({
 					type: "toolCall",
 					name: "get_weather",
