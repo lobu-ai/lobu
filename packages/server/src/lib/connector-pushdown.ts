@@ -409,20 +409,18 @@ export async function readSourceFeed(p: ReadSourceFeedParams): Promise<ReadSourc
   const controller = new AbortController();
   const onAbort = () => controller.abort(p.signal?.reason);
   p.signal?.addEventListener('abort', onAbort, { once: true });
-  let browserLeased = false;
+  let browser: ReturnType<typeof createSourceReadBridge> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      const error = browserLeased
-        ? new BrowserInterruptionError('timeout', `Browser source read ${p.feedId} timed out; no recovery handoff was issued.`)
-        : sourceReadDeadlineError(p.feedId);
+      const error = browser?.deadlineError() ?? sourceReadDeadlineError(p.feedId);
       controller.abort(error);
       reject(error);
     }, timeoutMs);
   });
   try {
     return await Promise.race([
-      readSourceFeedWithinDeadline({ ...p, signal: controller.signal }, () => { browserLeased = true; }),
+      readSourceFeedWithinDeadline({ ...p, signal: controller.signal }, (bridge) => { browser = bridge; }),
       deadline,
     ]);
   } finally {
@@ -460,7 +458,7 @@ interface SourceFeedRow {
 /** Every transport receives the one source-read deadline and cancellation signal. */
 async function readSourceFeedWithinDeadline(
   p: ReadSourceFeedParams & { signal: AbortSignal },
-  onBrowserLease: () => void,
+  onBrowserBridge: (bridge: ReturnType<typeof createSourceReadBridge>) => void,
 ): Promise<ReadSourceFeedResult> {
   const sql = getDb();
   let sourceSubscription = false;
@@ -698,14 +696,14 @@ async function readSourceFeedWithinDeadline(
   // Adapter and compiled reads reach the shared source, so they are admitted
   // per connection. A device-pinned read runs on its member's own device.
   if (feed.device_worker_id !== null) {
-    return readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease);
+    return readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserBridge);
   }
   const slot = await sourceAdmission.acquire(Number(feed.connection_id), {
     callerClass: sourceCallerClassOfAccess(p.scope.chatAccess), deadlineAt: p.deadlineAt, signal: p.signal,
   });
   let rateLimited = false;
   try {
-    return await raceAbort(readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserLease), p.signal);
+    return await raceAbort(readLiveSourceFeed(p, feed, feedConfig, sourceRevision, sourceSubscription, finish, onBrowserBridge), p.signal);
   } catch (error) {
     rateLimited = (error as { httpStatus?: unknown } | null)?.httpStatus === 429;
     throw error;
@@ -722,7 +720,7 @@ async function readLiveSourceFeed(
   sourceRevision: string,
   sourceSubscription: boolean,
   finish: (result: ReadSourceFeedResult) => ReadSourceFeedResult,
-  onBrowserLease: () => void,
+  onBrowserBridge: (bridge: ReturnType<typeof createSourceReadBridge>) => void,
 ): Promise<ReadSourceFeedResult> {
   remainingReadMs(p);
   const adapterResult = p.recoveryId ? null : await raceAbort(readSourceFeedFromAdapter({
@@ -777,13 +775,13 @@ async function readLiveSourceFeed(
   const browser = createSourceReadBridge({ ...feed, selected_artifact_hash: artifactHash }, {
     scope: p.scope, automationId: p.automationId, feedId: p.feedId,
     deadlineAt: p.deadlineAt, flowId: p.flowId, recoveryId: p.recoveryId,
-    onBrowserLease,
     requestHash: sourceRecoveryHash({ feedId: feed.id, revision: sourceRevision, artifact: artifactHash,
       query: p.query, cursor: p.cursor, limit: p.limit, offset: p.offset,
       sort: p.sort, window: p.window, match: p.match }),
     sourceSubscriptionScopeKey: sourceSubscription
       ? sourceFeedScopeKey(feed.config, feed.pinned_version ?? feed.definition_version) : undefined,
   }, p.signal);
+  onBrowserBridge(browser);
   return browser.run(async () => {
     const result = await executeCompiledConnector({
       compiledCode,

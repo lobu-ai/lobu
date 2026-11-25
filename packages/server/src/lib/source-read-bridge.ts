@@ -17,8 +17,11 @@ import { scrubSourceReadRun } from './source-read-run';
 
 const logger = createLogger('source-read-bridge');
 
-export function sourceReadDeadlineError(feedId: number): Error & { exitReason: 'timeout' } {
-  return Object.assign(new Error(`source read for feed '${feedId}' timed out`), {
+export function sourceReadDeadlineError(feedId: number, browserStepPending = false): Error & { exitReason: 'timeout' } {
+  const guidance = browserStepPending
+    ? '. A paired browser step was still pending. Check the paired Chrome connection and inspect its tabs with list_tabs if available. If the device is offline, ask its owner to reconnect it. If a Lobu tab is stalled, ask its owner to reset that tab. Retry this read once after the browser responds. The feed contents are unknown.'
+    : '';
+  return Object.assign(new Error(`source read for feed '${feedId}' timed out${guidance}`), {
     exitReason: 'timeout' as const,
   });
 }
@@ -39,7 +42,6 @@ interface SourceReadBridgeOptions {
   feedId: number;
   deadlineAt: number;
   flowId?: string;
-  onBrowserLease?: () => void;
   recoveryId?: string;
   requestHash: string;
   sourceSubscriptionScopeKey?: string;
@@ -92,7 +94,6 @@ export function createSourceReadBridge(
           },
           tx,
         );
-      if (leased) params.onBrowserLease?.();
       return run.runId;
     });
   };
@@ -136,6 +137,12 @@ export function createSourceReadBridge(
     }
   };
   return {
+    deadlineError(): Error {
+      if (leased) {
+        return new BrowserInterruptionError('timeout', `Browser source read ${params.feedId} timed out; no recovery handoff was issued.`);
+      }
+      return sourceReadDeadlineError(params.feedId, dispatches.size > 0);
+    },
     onChromeDispatch(actionKey: string, actionInput: Record<string, unknown>) {
       const cleanup = actionKey === 'network_intercept_stop' || actionKey === 'close_tab';
       const dispatchSignal = cleanup ? signal : workSignal;

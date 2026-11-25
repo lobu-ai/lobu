@@ -598,6 +598,22 @@ describe('compiled browser source reads', () => {
     expect(await sql`SELECT id FROM events WHERE organization_id = ${orgId}`).toHaveLength(0);
   });
 
+  it('guides the caller when a paired browser step is still pending at the read deadline', async () => {
+    const reading = manageFeeds({
+      action: 'read_feeds', reads: [{ feed_id: feedId, query: 'private query', limit: 2 }], timeout_ms: 3000,
+    }, {} as Env, context()) as Promise<Record<string, any>>;
+    expect(await answerBrowser(reading, false)).toBeDefined();
+
+    const failure = (await reading).results[0];
+    expect(failure).toMatchObject({
+      ok: false, error_code: 'UPSTREAM_TIMEOUT', retryable: true,
+      error: expect.stringContaining('Check the paired Chrome connection and inspect its tabs'),
+    });
+    expect(failure.interruption).toBeUndefined();
+    expect(failure.rows).toBeUndefined();
+    await expectScrubbed();
+  });
+
   it('recovers abandoned running parents and browser payloads at their persisted deadline', async () => {
     const sql = getTestDb();
     const reading = read();
