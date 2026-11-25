@@ -10,7 +10,7 @@ import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
 import { leasedAutomationId } from "../../../../automations/automation-source";
 import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/automation-connection-visibility";
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
-import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy } from "../../../../authz/connector-policy";
+import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, requesterPolicyExplanation } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
 import { applyRunConnectorPolicyAtClaim, classifyRunDestination, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { hasClassifiableDestination } from "../../../../authz/destination-audience";
@@ -652,7 +652,7 @@ async function pendingCheckResult(
 		status: "pending_check",
 		expires_at: new Date(run.expires_at).toISOString(),
 		message: `Operation '${operationName}' is held by a workspace check${connectorPolicyNoteSuffix(policy) || "."} If this action meets the rule, call operations.confirm({ run_id: ${runId}, statement }) with one sentence saying why. Otherwise call operations.cancel(${runId}) and try a corrected version.`,
-		policy,
+		policy: requesterPolicyExplanation(policy),
 	};
 }
 
@@ -1029,7 +1029,7 @@ export async function handleExecute(
 				: null;
 		return withFailureCode({
 			error: appendAccessFix(refusal, fix),
-			policy: explainConnectorPolicy(policy, principal),
+			policy: requesterPolicyExplanation(explainConnectorPolicy(policy, principal)),
 			...(fix ? { fix } : {}),
 		}, "PERMISSION");
 	}
@@ -1275,7 +1275,7 @@ export async function handleExecute(
 			approval_url: approvalUrl,
 			status: "pending_approval",
 			message: pendingApprovalMessage(operation.name, policyExplanation),
-			policy: policyExplanation,
+			policy: requesterPolicyExplanation(policyExplanation),
 		};
 	}
 

@@ -64,7 +64,9 @@ export async function getAvailableOperations(
       continue;
     }
     for (const operation of operations) {
-      if (evaluateConnectorPolicy({ organizationId, connectionId: Number(row.connection_id), operation, actor, policies }).effect === 'deny') continue;
+      // Skip only what is blocked for every input; a conditional Block still lets other inputs through.
+      if (evaluateConnectorPolicy({ organizationId, connectionId: Number(row.connection_id), operation, actor, policies,
+        unknownConditions: 'lenient' }).effect === 'deny') continue;
       result.push({
         connection_id: Number(row.connection_id),
         operation_key: operation.operation_key,

@@ -439,6 +439,41 @@ describe("org connector policy scopes", () => {
 		expect((await listEntityApprovalPolicies(orgId, "connector_action")).map((policy) => policy.id).sort()).toEqual([workspace.id, unscoped.id].sort());
 	});
 
+	it("a conditional rule applies only where its when holds, and an undecidable one takes the asked side", async () => {
+		const qualified = qualifiedOperationKey(operation.connector_key, operation.operation_key);
+		const ask = await save({ connectorKey: operation.connector_key, effects: { execute: "approval" } });
+		const internal = [{ field: "/to", op: "ends_with", value: "@acme.example" }];
+		const narrow = await save({ connectionId, operationKey: qualified, condition: internal, effects: { execute: "auto" } });
+		const secrets = await save({ connectorKey: operation.connector_key, kind: "guardrail", condition: [{ scan: "secrets", field: "/body" }], effects: { execute: "deny" } });
+		// The same scope without the condition is a different rule.
+		const plain = await save({ connectionId, operationKey: qualified, effects: { execute: "approval" } });
+		expect(new Set([narrow.id, plain.id]).size).toBe(2);
+		expect((await save({ connectionId, operationKey: qualified, condition: internal, effects: { execute: "auto" } })).id).toBe(narrow.id);
+		await deleteEntityApprovalPolicy({ organizationId: orgId, resourceClass: "connector_action", connectionId, operationKey: qualified });
+		expect((await listEntityApprovalPolicies(orgId, "connector_action")).map((policy) => policy.id).sort()).toEqual([ask.id, narrow.id, secrets.id].sort());
+
+		const policies = await listEntityApprovalPolicies(orgId, "connector_action");
+		const evaluate = (input?: Record<string, unknown> | null, unknownConditions?: "strict" | "lenient", rules = policies) =>
+			evaluateConnectorPolicy({ organizationId: orgId, connectionId, operation, actor: agent, policies: rules, input, unknownConditions });
+		// Discovery: a conditional Auto neither grants nor shadows the broader Ask, and a conditional Block counts.
+		expect(evaluate()).toMatchObject({ effect: "deny", ruleIds: [secrets.id] });
+		expect(evaluate(undefined, "lenient")).toMatchObject({ effect: "auto", ruleIds: [narrow.id] });
+		// At execution each condition is decided on the input.
+		expect(evaluate({ to: "teammate@acme.example", body: "hello" })).toMatchObject({ effect: "auto", ruleIds: [narrow.id] });
+		expect(evaluate({ to: "someone@outside.example", body: "hello" })).toMatchObject({ effect: "approval", ruleIds: [ask.id] });
+		expect(evaluate(null)).toMatchObject({ effect: "approval", ruleIds: [ask.id] });
+		expect(evaluate({ to: "teammate@acme.example", body: { nested: `ghp_${"c".repeat(36)}` } }))
+			.toMatchObject({ effect: "deny", ruleIds: [secrets.id], rules: [{ id: secrets.id, when: [{ scan: "secrets", field: "/body" }] }] });
+		// A stored condition this runtime cannot read is undecidable, whatever the input.
+		const unreadable = policies.map((policy) => policy.id === narrow.id ? { ...policy, condition: [{ field: "/to", op: "starts_with", value: "a" }] } : policy);
+		expect(evaluate({ to: "teammate@acme.example", body: "hello" }, "strict", unreadable)).toMatchObject({ effect: "approval", ruleIds: [ask.id] });
+		// The writer and the database refuse a malformed condition.
+		await expect(save({ connectionId, condition: [], effects: { execute: "deny" }, kind: "guardrail" })).rejects.toThrow("when must list 1-8 conditions.");
+		await expect(upsertEntityApprovalPolicy(orgId, { resourceClass: "entity", entityTypeSlug: "x", createMode: "deny", condition: internal }))
+			.rejects.toThrow("when is only valid on a connector action rule.");
+		await expect(getTestDb()`UPDATE write_approval_policies SET condition = '{}'::jsonb WHERE id = ${narrow.id}`).rejects.toMatchObject({ code: "23514" });
+	});
+
 	it("an allowed actions list binds a caller's writes only and is named as the reason", async () => {
 		const policies = await listEntityApprovalPolicies(orgId, "connector_action");
 		const evaluate = (op: typeof operation | { connector_key: string; operation_key: string; kind: "read" }, allowlists: Parameters<typeof evaluateConnectorPolicy>[0]["allowlists"]) =>

@@ -160,6 +160,62 @@ describe("connector policy collection", () => {
     expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.audience).sort()).toEqual(["external", null]);
   });
 
+  it("stores a rule's when as part of its identity and refuses malformed conditions by field", async () => {
+    const before = await snapshot();
+    const external = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [{ field: "/to", op: "not_ends_with", value: "@acme.example" }] };
+    const secrets = { effect: "deny", kind: "guardrail", when: [{ scan: "secrets", field: "/body" }, { field: "/draft", op: "exists" }] };
+    const unconditional = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside" };
+    const created = await request("PUT", path(), { revision: before.revision, rules: [external, secrets, unconditional] });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const saved = await created.json();
+    // Two rules that differ only by `when` are separate rows.
+    expect(saved.rules).toHaveLength(3);
+    expect(withoutIds(saved.rules)).toEqual(expect.arrayContaining([external, secrets, unconditional]));
+    expect(await snapshot()).toEqual(saved);
+    const stored = await listEntityApprovalPolicies(org.id, "connector_action");
+    expect(stored.map(p => p.condition)).toEqual(expect.arrayContaining([external.when, secrets.when, null]));
+    // Echoing is a no-op with stable ids; key order inside a condition does not matter.
+    const reordered = saved.rules.map((rule: { when?: Array<Record<string, unknown>> }) =>
+      rule.when ? { ...rule, when: rule.when.map(condition => Object.fromEntries(Object.entries(condition).reverse())) } : rule);
+    const echoed = await request("PUT", path(), { revision: saved.revision, rules: reordered.reverse() });
+    expect(await echoed.json()).toEqual(saved);
+    const duplicate = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules, { ...external, effect: "deny" }] });
+    expect(await duplicate.json()).toEqual({ error: "invalid_request", message: "Duplicate policy scope." });
+
+    const condition = (when: unknown) => ({ effect: "deny", kind: "guardrail", when });
+    for (const [rule, message] of [
+      [condition([{ field: "/to", op: "starts_with", value: "x" }]), "rules[0].when[0].op must be one of eq, neq, in, not_in, contains, ends_with, not_ends_with, exists."],
+      [condition([{ field: "to", op: "eq", value: "x" }]), expect.stringMatching(/^rules\[0\]\.when\[0\]\.field must be a JSON pointer/)],
+      [condition([{ field: "/a~2b", op: "exists" }]), expect.stringMatching(/^rules\[0\]\.when\[0\]\.field must be a JSON pointer/)],
+      [condition(Array.from({ length: 9 }, () => ({ field: "/to", op: "exists" }))), "rules[0].when must list 1-8 conditions."],
+      [condition([]), "rules[0].when must list 1-8 conditions."],
+      [condition({ field: "/to", op: "exists" }), "rules[0].when must list 1-8 conditions."],
+      [condition([{ field: "/to", op: "eq" }]), "rules[0].when[0].value is required with op eq."],
+      [condition([{ field: "/to", op: "in", value: "x" }]), "rules[0].when[0].value must be a non-empty array with op in."],
+      [condition([{ field: "/to", op: "ends_with", value: 3 }]), "rules[0].when[0].value must be a non-empty string with op ends_with."],
+      [condition([{ field: "/to", op: "exists", value: true }]), "rules[0].when[0].value is not accepted with op exists."],
+      [condition([{ scan: "credit_cards", field: "/body" }]), "rules[0].when[0].scan must be one of secrets, pii."],
+      [condition([{ scan: "pii", field: "/body", op: "eq" }]), "rules[0].when[0].op is not accepted on a scan condition (scan, field)."],
+    ] as const) {
+      const rejected = await request("PUT", path(), { revision: saved.revision, rules: [rule] });
+      expect(rejected.status, JSON.stringify(rule)).toBe(400);
+      expect(await rejected.json()).toEqual({ error: "invalid_request", message });
+    }
+    // The single-rule path never drops a condition silently.
+    const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+    const single = await request("PUT", `/api/${org.slug}/agent/${agent.agentId}/permissions`, {
+      resource_class: "connector_action", effects: { execute: "deny" }, when: [{ field: "/to", op: "exists" }],
+    });
+    expect(single.status).toBe(400);
+    expect(await single.json()).toMatchObject({ message: "when is only accepted by /write-permissions/connector-actions." });
+    expect(await snapshot()).toEqual(saved);
+
+    // Dropping `when` from a rule replaces it with the unconditional one.
+    const plain = await request("PUT", path(), { revision: saved.revision, rules: [unconditional] });
+    expect(withoutIds((await plain.json()).rules)).toEqual([unconditional]);
+    expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.condition)).toEqual([null]);
+  });
+
   it("rejects a stale plan after another collection edit", async () => {
     const before = await snapshot();
     expect((await request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny" }] })).status).toBe(200);
@@ -568,9 +624,9 @@ describe("connected app caller identity", () => {
     expect(saved.status, await saved.clone().text()).toBe(200);
     return saved.json();
   }
-  async function execute(token?: string) {
-    const response = await request("POST", `/api/${org.slug}/manage_operations`, { action: "execute", connection_id: connectionId, operation_key: "needs_approval", input: {} }, token);
-    return { status: response.status, body: await response.json() as { status?: string; run_id?: number; error?: string } };
+  async function execute(token?: string, input: Record<string, unknown> = {}) {
+    const response = await request("POST", `/api/${org.slug}/manage_operations`, { action: "execute", connection_id: connectionId, operation_key: "needs_approval", input }, token);
+    return { status: response.status, body: await response.json() as { status?: string; run_id?: number; error?: string; policy?: { rules: Array<Record<string, unknown>> } } };
   }
   async function oauthToken(redirect_uris: string[], authorizationGrantType: "authorization_code" | "device_code" = "authorization_code", client_name: string | null = "Synthetic App") {
     const client = await createTestOAuthClient({ redirect_uris, client_name });
@@ -755,5 +811,53 @@ describe("connected app caller identity", () => {
     for (const requester of ["app_key=example.com", "app_key=web%3AExample.com", "app_key=web%3Aexample.com&automation_id=1"]) {
       expect((await explain(requester)).status, requester).toBe(400);
     }
+  });
+
+  it("a rule's when decides on the operation input, and discovery takes the strict side", async () => {
+    const exact = { connection_id: connectionId, operation_key: "app-policy::needs_approval" };
+    const outside = { field: "/to", op: "not_ends_with", value: "@acme.example" };
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [outside] }]);
+    const named = await oauthToken(["https://app.example.com/callback"]);
+    const explain = async () => ((await (await request("GET",
+      `/api/${org.slug}/write-permissions/explain?connection_id=${connectionId}&operation_key=needs_approval&app_key=web%3Aexample.com`)).json()) as { effect: string }).effect;
+    // Without an input, a conditional Ask counts as holding.
+    expect(await explain()).toBe("approval");
+
+    const held = await execute(named.token, { to: "someone@outside.example" });
+    expect(held.body.status, JSON.stringify(held.body)).toBe("pending_approval");
+    // The requester gets the rule note; the approval card shows the condition that matched.
+    expect(held.body.policy?.rules).toEqual([{ id: expect.any(Number), kind: "guardrail", note: "Ask before mailing outside" }]);
+    const [card] = await getTestDb()`SELECT metadata FROM events WHERE run_id = ${held.body.run_id}
+      AND organization_id = ${org.id} AND superseded_by IS NULL AND metadata->>'status' = 'pending_approval'`;
+    expect(card?.metadata?.policy?.rules).toEqual([{ id: expect.any(Number), kind: "guardrail", note: "Ask before mailing outside", when: [outside] }]);
+    // On a list, not_ends_with holds only when every recipient is outside.
+    expect((await execute(named.token, { to: ["someone@outside.example", "other@outside.example"] })).body.status).toBe("pending_approval");
+    for (const to of ["teammate@acme.example", ["teammate@acme.example", "lead@acme.example"], ["teammate@acme.example", "someone@outside.example"]]) {
+      const internal = await execute(named.token, { to });
+      expect(internal.status, JSON.stringify(internal.body)).toBe(200);
+      expect(internal.body.status, JSON.stringify(to)).not.toBe("pending_approval");
+    }
+    // A missing field holds no comparison, so the Ask does not apply.
+    expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
+
+    // A conditional Always allow lifts the Ask only for an input it holds on, and never in discovery.
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail" }]);
+    await setRules(appPath("web:example.com"), [{ ...exact, effect: "auto", when: [{ field: "/to", op: "ends_with", value: "@acme.example" }] }]);
+    expect(await explain()).toBe("approval");
+    const lifted = await execute(named.token, { to: "teammate@acme.example" });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+    expect(lifted.body.status).not.toBe("pending_approval");
+    expect((await execute(named.token, { to: "someone@outside.example" })).body.status).toBe("pending_approval");
+    await setRules(appPath("web:example.com"), []);
+
+    // A Block on a body that looks like it carries a secret.
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "deny", kind: "guardrail", note: "Never send credentials", when: [{ scan: "secrets", field: "/body" }] }]);
+    expect(await explain()).toBe("deny");
+    const blocked = await execute(named.token, { body: `token ghp_${"c".repeat(36)}` });
+    expect(blocked.body.error, JSON.stringify(blocked.body)).toContain("Policy blocks 'needs_approval'");
+    expect(blocked.body.policy?.rules).toEqual([{ id: expect.any(Number), kind: "guardrail", note: "Never send credentials" }]);
+    const clean = await execute(named.token, { body: "See you at the review." });
+    expect(clean.status, JSON.stringify(clean.body)).toBe(200);
+    expect(clean.body.error ?? "").not.toContain("Policy blocks");
   });
 });

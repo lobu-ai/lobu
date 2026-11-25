@@ -3,6 +3,7 @@ import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
 import type { ActingPrincipal, EntityApprovalPolicy, EntityPolicyPrincipalKind } from "./entity-policy";
+import { policyConditionsHold } from "./policy-conditions";
 import { principalMatches } from "./principal-matches";
 import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
@@ -63,6 +64,11 @@ export interface ConnectorPolicyRuleRef {
 	id: number;
 	kind: ConnectorPolicyKind;
 	note?: string;
+	/**
+	 * The conditions of a conditional rule that decided the result, as stored.
+	 * Shown to approvers on the card and in Activity; the agent gets the note.
+	 */
+	when?: readonly unknown[];
 }
 
 export interface ConnectorPolicyResult {
@@ -117,6 +123,14 @@ export function explainConnectorPolicy(
 		rules: policy.rules.map((rule) => ({ ...rule })),
 		principal: { ...principal },
 	};
+}
+
+/**
+ * The explanation returned to the requester: an agent, app or Automation gets
+ * each rule's note but not its conditions, which only approvers see.
+ */
+export function requesterPolicyExplanation(explanation: ConnectorPolicyExplanation): ConnectorPolicyExplanation {
+	return { ...explanation, rules: explanation.rules.map(({ when: _when, ...rule }) => rule) };
 }
 
 /**
@@ -201,6 +215,24 @@ export function canConfirmCheck(actor: ActingPrincipal): boolean {
 	return actor.kind === "automation" && actor.ownerAgentId !== null;
 }
 
+/** Auto grants; every other rule (a hold, a block, any guardrail) restricts. */
+function grantsAccess(rule: EntityApprovalPolicy): boolean {
+	return rule.kind === "grant" && rule.effects.execute === "auto";
+}
+
+/**
+ * How a rule's `when` is decided when it cannot be (no input, as in
+ * discovery, or a stored condition this runtime cannot read).
+ *
+ * - `strict` (the default) reports the most restrictive result any input could
+ *   get: a restricting rule applies, a granting rule does not, and neither
+ *   may shadow a broader rule, since for some input it would not hold.
+ * - `lenient` reports the least restrictive one: a restricting rule does not
+ *   apply, a granting rule does, and either may shadow. Only used to decide
+ *   whether an operation is blocked for every input, e.g. to hide it.
+ */
+export type UnknownConditionSide = "strict" | "lenient";
+
 /** Keep the narrowest matching grants, apply principal restrictions, then every matching guardrail. */
 export function evaluateConnectorPolicy(args: {
 	organizationId: string;
@@ -221,6 +253,13 @@ export function evaluateConnectorPolicy(args: {
 	 * audience never applies.
 	 */
 	destinationAudience?: DestinationAudience;
+	/**
+	 * The operation's input, which a rule's `when` reads. Absent: not known
+	 * yet (discovery, inspection), so conditions are decided per `unknownConditions`.
+	 * Null is an operation with no input.
+	 */
+	input?: Record<string, unknown> | null;
+	unknownConditions?: UnknownConditionSide;
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
@@ -251,9 +290,24 @@ export function evaluateConnectorPolicy(args: {
 			matchesCategory(rule.operationCategory, args.operation) &&
 			reachesAudience(rule.audience, args.destinationAudience),
 	);
-	const grants = matches.filter((rule) => rule.kind === "grant");
+	// A rule whose `when` does not hold is ignored, exactly as if its scope did
+	// not match. An undecidable one applies only on the side asked for.
+	const lenient = args.unknownConditions === "lenient";
+	const holds = new Map(matches.map((rule) => [rule, policyConditionsHold(rule.condition, args.input)]));
+	const applies = (rule: EntityApprovalPolicy) => {
+		const held = holds.get(rule);
+		return held === "unknown" ? grantsAccess(rule) === lenient : held === true;
+	};
+	const canShadow = (rule: EntityApprovalPolicy) => {
+		const held = holds.get(rule);
+		return held === "unknown" ? lenient : held === true;
+	};
+	const grants = matches.filter((rule) => rule.kind === "grant" && applies(rule));
 	const orgRules = grants.filter((rule) => rule.principalKind === null);
-	const decisive = orgRules.filter((rule) => !orgRules.some((other) => moreSpecific(other, rule)));
+	const shadowing = matches.filter(
+		(rule) => rule.kind === "grant" && rule.principalKind === null && canShadow(rule),
+	);
+	const decisive = orgRules.filter((rule) => !shadowing.some((other) => moreSpecific(other, rule)));
 	// With no matching rule the action runs: holds come from rules, never from silence.
 	let effect: ConnectorPolicyResult["effect"] = "auto";
 	const restrictions = grants.filter(
@@ -281,7 +335,7 @@ export function evaluateConnectorPolicy(args: {
 	// log, check, hold or block: a stored `auto` (rejected on write) or any
 	// unrecognised effect fails closed to deny.
 	const guardrails = matches.filter(
-		(rule) => rule.kind !== "grant" && principalMatches(rule, args.actor),
+		(rule) => rule.kind !== "grant" && applies(rule) && principalMatches(rule, args.actor),
 	);
 	let contributors: EntityApprovalPolicy[] = [];
 	const fold = (rule: EntityApprovalPolicy, candidate: ConnectorPolicyResult["effect"]) => {
@@ -327,6 +381,7 @@ export function evaluateConnectorPolicy(args: {
 			id: rule.id,
 			kind: rule.kind,
 			...(rule.note ? { note: rule.note } : {}),
+			...(rule.condition ? { when: rule.condition } : {}),
 		})),
 		reason: ordered.some((rule) => rule.kind !== "grant")
 			? "guardrail"
