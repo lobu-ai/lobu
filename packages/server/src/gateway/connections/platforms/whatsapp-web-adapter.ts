@@ -52,18 +52,14 @@ export interface WhatsAppWebMessageRow {
   own_mention_jids?: string[];
 }
 
-/**
- * Prefixes the GFM parser adds to a written URL or email to form its link
- * target: none for `<url>`, `http://` for a `www.` literal, `mailto:` for an
- * email. A link whose target is its own text plus one of these is an autolink.
- */
-const AUTOLINK_TARGET_PREFIXES = ["", "http://", "mailto:"];
-
 /** A link or image as WhatsApp text: the bare URL, or `label (url)`. */
 function linkText(label: string, url: string): string {
-  if (!label) return url;
-  if (AUTOLINK_TARGET_PREFIXES.some((prefix) => prefix + label === url)) return label;
-  return `${label} (${url})`;
+  if (!label || label === url) return url;
+  // GFM autolink literals: a bare email targets `mailto:` and a bare `www.`
+  // domain targets `http://`; WhatsApp links both from the label alone.
+  const isAutolinkLiteral =
+    url === `mailto:${label}` || (label.startsWith("www.") && url === `http://${label}`);
+  return isAutolinkLiteral ? label : `${label} (${url})`;
 }
 
 /**
