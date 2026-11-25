@@ -67,7 +67,7 @@ import {
   UNLINKED_ORGANIZATION_TURNS_PER_HOUR,
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
-import { CHAT_TURN_CONTEXT_CHARS } from "../orchestration/chat-turn-limits.js";
+import { CHAT_TURN_OPTIONAL_CONTEXT_CHARS } from "../orchestration/chat-turn-limits.js";
 import { buildCtaCardPayload } from "../platform/link-buttons.js";
 import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
 import { buildConversationUrl } from "./conversation-url.js";
@@ -1212,7 +1212,8 @@ export class MessageHandlerBridge {
         ? recentThreadContext?.({
             entries: recentThreadEntries,
             unavailable: threadHistoryUnavailable || !conversationState,
-            budget: CHAT_TURN_CONTEXT_CHARS - (automationContext ? automationContext.length + 2 : 0),
+            // Leaves a retry room for its interrupted-turn note and the sender line.
+            budget: CHAT_TURN_OPTIONAL_CONTEXT_CHARS - (automationContext ? automationContext.length + 2 : 0),
           })
         : undefined;
       await this.enqueueUserTurn({

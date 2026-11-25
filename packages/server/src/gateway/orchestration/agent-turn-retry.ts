@@ -17,7 +17,11 @@
  */
 
 import { AgentErrorCode, type MessagePayload } from "@lobu/core";
-import { CHAT_TURN_CONTEXT_CHARS } from "./chat-turn-limits.js";
+import {
+  CHAT_TURN_CONTEXT_CHARS,
+  CHAT_TURN_SENDER_LINE_RESERVE_CHARS,
+  INTERRUPTED_TURN_SHORT_NOTE,
+} from "./chat-turn-limits.js";
 import { type DbClient, getDb, pgTextArray } from "../../db/client.js";
 import {
   AGENT_TURN_TOOL_LOG_MAX,
@@ -96,13 +100,6 @@ const NOTE_LINE_CHARS = 240;
  * room for the sender line and caller context behind it.
  */
 const NOTE_BUDGET_CHARS = 1_200;
-/**
- * Room left for the sender line `chatTurnContext` appends behind the caller
- * context. The note never takes this space or the caller's own context.
- */
-const SENDER_LINE_RESERVE_CHARS = 160;
-/** Used when the full note does not fit beside the caller's context. */
-const SHORT_NOTE = "A previous attempt at this message was interrupted after it ran tools. Check for their effects before repeating any.";
 
 function clip(text: string, max: number): string {
   const flat = text.replaceAll("\r", " ").replaceAll("\n", " ").trim();
@@ -218,7 +215,7 @@ export async function buildInterruptedTurnNote(
   const limit = Math.min(budget, NOTE_BUDGET_CHARS);
   // Not even one line fits beside the caller's context: say so in one line.
   if (head.length + tail.length + lines[0]!.length + 2 > limit) {
-    return SHORT_NOTE.length <= limit ? SHORT_NOTE : undefined;
+    return INTERRUPTED_TURN_SHORT_NOTE.length <= limit ? INTERRUPTED_TURN_SHORT_NOTE : undefined;
   }
   const kept: string[] = [];
   let size = head.length + tail.length + 2;
@@ -291,7 +288,7 @@ export async function retryInterruptedAgentTurn(input: {
     // first, so it only gets what the caller's own context leaves.
     const callerContext = originalContext?.trim() ?? "";
     const note = await buildInterruptedTurnNote(tx, run,
-      CHAT_TURN_CONTEXT_CHARS - (callerContext ? callerContext.length + 2 : 0) - SENDER_LINE_RESERVE_CHARS);
+      CHAT_TURN_CONTEXT_CHARS - (callerContext ? callerContext.length + 2 : 0) - CHAT_TURN_SENDER_LINE_RESERVE_CHARS);
     const ephemeralContext = [note, callerContext].filter(Boolean).join("\n\n");
     const payload: MessagePayload = {
       ...original,
