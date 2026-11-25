@@ -283,6 +283,29 @@ describe("guardrail library writes", () => {
 		await grant;
 		expect((await sql`SELECT pattern FROM grants WHERE agent_id = ${other.agentId}`).map((row) => row.pattern)).toEqual([]);
 		expect(grantState).toBe("waiting");
+
+		// An agent created (with an allow grant) after an every-agent judge
+		// write read the workspace's agents but before it took the lock: the
+		// cleanup covers the agents present under the lock, so it goes too.
+		const lateAgentId = `agent-late-${org.id.slice(-6)}`;
+		const lateAgent = holdLock(async (tx) => {
+			await tx`INSERT INTO agents (id, organization_id, name, owner_platform, owner_user_id, created_at, updated_at)
+				VALUES (${lateAgentId}, ${org.id}, 'Late', 'lobu', ${owner.id}, NOW(), NOW())`;
+			await tx`INSERT INTO grants (agent_id, kind, pattern, denied, organization_id)
+				VALUES (${lateAgentId}, 'domain', 'api.ledger.test', false, ${org.id})`;
+		});
+		await lateAgent.isLocked;
+		const everyAgentJudge = create({
+			name: "ledger",
+			config: { ...egress.config, domains: ["api.ledger.test"] },
+			applies_to: [{ principal_kind: "agent", principal_id: null }],
+		});
+		const everyAgentState = await stateAfter(everyAgentJudge);
+		lateAgent.release();
+		await lateAgent.done;
+		expect((await everyAgentJudge).status).toBe(200);
+		expect((await sql`SELECT pattern FROM grants WHERE agent_id = ${lateAgentId} AND NOT denied`).map((row) => row.pattern)).toEqual([]);
+		expect(everyAgentState).toBe("waiting");
 	});
 
 	it("records a config event that digests the judge policy", async () => {

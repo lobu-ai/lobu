@@ -34,7 +34,7 @@ import {
 	checkGuardrailWrite,
 	type GuardrailBody,
 	type GuardrailWrite,
-	guardrailSubjectAgentIds,
+	guardrailSubjectScope,
 	normalizeGuardrailInput,
 } from "./workspace-guardrails";
 
@@ -112,34 +112,33 @@ function asApplying(next: GuardrailBody): ApplyingGuardrail[] {
  * judged domain an agent's `networkConfig.allowedDomains` reaches would never
  * be judged. Refuse such a write, naming every (agent, domain, grant) it
  * would silence. The global `WORKER_ALLOWED_DOMAINS` shadows the same way but
- * is operator config, so it only warns. Returns the covered agents for the
- * grant cleanup.
+ * is operator config, so it only warns. Runs inside the locked write
+ * transaction, against the agents present then.
  */
 async function assertEgressJudgeNotShadowed(
-	sql: DbClient,
+	tx: DbClient,
 	organizationId: string,
 	next: GuardrailBody,
-): Promise<string[]> {
+): Promise<void> {
 	const judged = judgedEgressDomains(asApplying(next));
-	if (judged.length === 0) return [];
-	const agentIds = await guardrailSubjectAgentIds(sql, organizationId, next.applies_to);
-	if (agentIds.length > 0) {
-		const rows = await sql<{ id: string; network_config: { allowedDomains?: string[] } | null }>`
-			SELECT id, network_config FROM agents
-			WHERE organization_id = ${organizationId} AND id = ANY(${pgTextArray(agentIds)}::text[])
-			ORDER BY id
-		`;
-		const pairs = rows.flatMap((row) =>
-			findSuppressedJudgedDomains(asApplying(next), row.network_config?.allowedDomains ?? []).map(
-				({ domain, grant }) => `agent "${row.id}" allows "${grant}", which covers judged domain "${domain}"`,
-			),
+	if (judged.length === 0) return;
+	const { everyAgent, agentIds } = guardrailSubjectScope(next.applies_to);
+	const rows = await tx<{ id: string; network_config: { allowedDomains?: string[] } | null }>`
+		SELECT id, network_config FROM agents
+		WHERE organization_id = ${organizationId}
+		  AND (${everyAgent}::boolean OR id = ANY(${pgTextArray(agentIds)}::text[]))
+		ORDER BY id
+	`;
+	const pairs = rows.flatMap((row) =>
+		findSuppressedJudgedDomains(asApplying(next), row.network_config?.allowedDomains ?? []).map(
+			({ domain, grant }) => `agent "${row.id}" allows "${grant}", which covers judged domain "${domain}"`,
+		),
+	);
+	if (pairs.length > 0) {
+		throw new ToolUserError(
+			`Guardrail "${next.name}" would never run for some agents: the proxy matches an allow grant before the egress judge. ${pairs.join("; ")}. Remove the domain from those agents' networkConfig.allowedDomains (a judged domain is reachable through its judge), or drop it from config.domains.`,
+			422,
 		);
-		if (pairs.length > 0) {
-			throw new ToolUserError(
-				`Guardrail "${next.name}" would never run for some agents: the proxy matches an allow grant before the egress judge. ${pairs.join("; ")}. Remove the domain from those agents' networkConfig.allowedDomains (a judged domain is reachable through its judge), or drop it from config.domains.`,
-				422,
-			);
-		}
 	}
 	const globalAllowed = loadAllowedDomains();
 	const unrestricted = isUnrestrictedMode(globalAllowed);
@@ -153,62 +152,62 @@ async function assertEgressJudgeNotShadowed(
 			}. The global allowlist is matched before the judge, so it will not run for them.`,
 		);
 	}
-	return agentIds;
 }
 
 /**
- * Revoke the covered agents' allow grants that reach a domain the written
- * judge governs. A stored allow grant outranks the judge, and the dispatch
- * reconcile never revisits an expiring one, so without this an approved
- * "allow for an hour" would keep the new judge silent until it lapsed.
- * Denies stay: a deny outranks the judge by design.
+ * Revoke the allow grants (not the denies) that reach a domain the written
+ * judge governs, for every agent its subjects cover when the locked write
+ * transaction runs, including one created a moment ago. A stored allow grant
+ * outranks the judge, and the dispatch reconcile never revisits an expiring
+ * one, so without this an approved "allow for an hour" would keep the new
+ * judge silent until it lapsed. A deny outranks the judge by design.
  */
-async function revokeShadowingGrants(
-	tx: DbClient,
-	organizationId: string,
-	agentIds: readonly string[],
-	next: GuardrailBody,
-): Promise<void> {
+async function revokeShadowingGrants(tx: DbClient, organizationId: string, next: GuardrailBody): Promise<void> {
 	const judged = judgedEgressDomains(asApplying(next));
-	if (judged.length === 0 || agentIds.length === 0) return;
+	if (judged.length === 0) return;
+	const { everyAgent, agentIds } = guardrailSubjectScope(next.applies_to);
 	const grants = await tx<{ agent_id: string; pattern: string }>`
-		SELECT agent_id, pattern FROM grants
-		WHERE organization_id = ${organizationId}
-		  AND agent_id = ANY(${pgTextArray([...agentIds])}::text[])
-		  AND kind = 'domain' AND NOT denied
+		SELECT g.agent_id, g.pattern FROM grants g
+		JOIN agents a ON a.id = g.agent_id AND a.organization_id = g.organization_id
+		WHERE g.organization_id = ${organizationId}
+		  AND g.kind = 'domain' AND NOT g.denied
+		  AND (${everyAgent}::boolean OR a.id = ANY(${pgTextArray(agentIds)}::text[]))
 	`;
-	for (const grant of grants) {
+	const revoked = grants.filter((grant) => {
 		const pattern = normalizeDomainPattern(grant.pattern);
-		if (!judged.some((domain) => patternReaches(domain, pattern))) continue;
-		await tx`
-			DELETE FROM grants
-			WHERE organization_id = ${organizationId} AND agent_id = ${grant.agent_id}
-			  AND kind = 'domain' AND pattern = ${grant.pattern} AND NOT denied
-		`;
-		logger.info("Revoked an allow grant that would shadow an egress judge", {
-			agentId: grant.agent_id,
-			pattern: grant.pattern,
-			guardrail: next.name,
-		});
-	}
+		return judged.some((domain) => patternReaches(domain, pattern));
+	});
+	if (revoked.length === 0) return;
+	await tx`
+		DELETE FROM grants
+		WHERE organization_id = ${organizationId} AND kind = 'domain' AND NOT denied
+		  AND (agent_id, pattern) IN (
+			SELECT * FROM unnest(
+				${pgTextArray(revoked.map((grant) => grant.agent_id))}::text[],
+				${pgTextArray(revoked.map((grant) => grant.pattern))}::text[]
+			)
+		  )
+	`;
+	logger.info("Revoked allow grants that would shadow an egress judge", {
+		guardrail: next.name,
+		grants: revoked.map((grant) => ({ agentId: grant.agent_id, pattern: grant.pattern })),
+	});
 }
 
 /** Audit fields: what a config event says changed between two revisions. */
 const AUDITED_FIELDS = ["config", "applies_to", "enabled"] as const;
 
-async function applyAndAudit(
-	ctx: ToolContext,
-	write: GuardrailWrite,
-	shadowAgentIds: readonly string[],
-): Promise<WorkspaceGuardrail> {
+async function applyAndAudit(ctx: ToolContext, write: GuardrailWrite): Promise<WorkspaceGuardrail> {
 	return getDb().begin(async (tx) => {
 		await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
 		// Shared with GrantStore.grant: an allow grant commits either before
-		// this write's grant cleanup or after its judge is visible.
+		// this write's grant cleanup or after its judge is visible. Everything
+		// that depends on which agents exist is read after this lock.
 		await lockEgressJudgeDecisions(tx, ctx.organizationId);
+		if (write.guardrail) await assertEgressJudgeNotShadowed(tx, ctx.organizationId, write.guardrail);
 		const { before, after, changed } = await applyGuardrailWrite(tx, ctx.organizationId, write);
 		if (!changed) return after;
-		if (write.guardrail) await revokeShadowingGrants(tx, ctx.organizationId, shadowAgentIds, write.guardrail);
+		if (write.guardrail) await revokeShadowingGrants(tx, ctx.organizationId, write.guardrail);
 		const op = write.op === "create" ? "created" : write.op === "archive" ? "deleted" : "updated";
 		await insertToolConfigChange(
 			ctx,
@@ -255,8 +254,7 @@ export async function putGuardrail(
 	// `write.guardrail` is set for create and update.
 	const next = write.guardrail as GuardrailBody;
 	await assertJudgeModelRunnable(ctx.organizationId, next, before);
-	const shadowAgentIds = await assertEgressJudgeNotShadowed(sql, ctx.organizationId, next);
-	return { guardrail: await applyAndAudit(ctx, write, shadowAgentIds) };
+	return { guardrail: await applyAndAudit(ctx, write) };
 }
 
 /** Archive a guardrail at its current revision; it stops applying at once. */
@@ -270,6 +268,6 @@ export async function archiveGuardrail(
 	}
 	await assertReadable(ctx);
 	return {
-		guardrail: await applyAndAudit(ctx, { op: "archive", id: params.id, expected_revision: revision, guardrail: null }, []),
+		guardrail: await applyAndAudit(ctx, { op: "archive", id: params.id, expected_revision: revision, guardrail: null }),
 	};
 }

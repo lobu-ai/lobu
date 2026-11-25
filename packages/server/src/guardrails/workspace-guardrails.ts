@@ -359,28 +359,28 @@ async function assertSubjectAgentsExist(
 }
 
 /**
- * The agents a guardrail's subjects cover: every agent of the workspace for
- * an every-agent subject (a bounded config table), else the named ones.
+ * The agents a guardrail's subjects cover, as a predicate for a query to
+ * apply to the agents it reads: every agent of the workspace for an
+ * every-agent subject, else the named ones. Never a resolved id list, which
+ * would go stale as agents are created.
  */
-export async function guardrailSubjectAgentIds(
-	sql: DbClient,
-	organizationId: string,
-	subjects: readonly GuardrailSubject[],
-): Promise<string[]> {
+export function guardrailSubjectScope(subjects: readonly GuardrailSubject[]): {
+	everyAgent: boolean;
+	agentIds: string[];
+} {
 	const everyAgent = subjects.some(
 		(subject) => subject.principal_kind === null || (subject.principal_kind === "agent" && subject.principal_id === null),
 	);
-	if (everyAgent) {
-		const rows = await sql<{ id: string }>`SELECT id FROM agents WHERE organization_id = ${organizationId}`;
-		return rows.map((row) => row.id);
-	}
-	return [
-		...new Set(
-			subjects.flatMap((subject) =>
-				subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
-			),
-		),
-	];
+	const agentIds = everyAgent
+		? []
+		: [
+				...new Set(
+					subjects.flatMap((subject) =>
+						subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
+					),
+				),
+			];
+	return { everyAgent, agentIds };
 }
 
 /**
