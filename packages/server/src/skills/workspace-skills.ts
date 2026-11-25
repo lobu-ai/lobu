@@ -10,6 +10,7 @@ import type { SkillInput, SkillSubject, WorkspaceSkill } from "@lobu/core/contra
 import type { DbClient } from "../db/client";
 import { pgTextArray } from "../db/client";
 import type { ActingPrincipal } from "../authz/entity-policy";
+import { appKeyProblem } from "../authz/policy-principal";
 import { ToolUserError } from "../utils/errors";
 
 /** The subset of a principal a skill subject can name; see `principalMatches`. */
@@ -351,8 +352,8 @@ const EVERYONE: SkillSubject[] = [{ principal_kind: null }];
 
 /**
  * Apply defaults and the rules the input schema cannot express: the library
- * name grammar, non-blank text, agent-only subjects (app subjects arrive with
- * the MCP Skills extension), and duplicate subjects folded. 422 on bad input.
+ * name grammar, non-blank text, well-formed app keys on app subjects, and
+ * duplicate subjects folded. 422 on bad input.
  */
 export function normalizeSkillInput(input: SkillInput): SkillBody {
 	if (!isLibrarySkillName(input.name)) {
@@ -375,15 +376,21 @@ export function normalizeSkillInput(input: SkillInput): SkillBody {
 	};
 }
 
-/** Reject app subjects and fold duplicates, keeping the caller's order. */
+/**
+ * Check app subjects and fold duplicates, keeping the caller's order. An app
+ * subject's `principal_id` is the connected-app key `resolveActingPrincipal`
+ * gives an OAuth or PAT caller (`web:<domain>`, `client:<id>`,
+ * `local:<name>`, `pat:<id>`); null names every app.
+ */
 function normalizeSkillSubjects(subjects: readonly SkillSubject[]): SkillSubject[] {
 	const seen = new Set<string>();
 	const out: SkillSubject[] = [];
 	for (const subject of subjects) {
-		if (subject.principal_kind === "app") {
-			throw new ToolUserError("Skills apply to everyone or to agents; app subjects are not accepted yet.", 422);
+		if (subject.principal_kind === "app" && subject.principal_id != null) {
+			const problem = appKeyProblem(subject.principal_id, "An app subject's principal_id");
+			if (problem) throw new ToolUserError(problem, 422);
 		}
-		const key = subject.principal_kind === null ? "" : `agent:${subject.principal_id ?? ""}`;
+		const key = subject.principal_kind === null ? "" : `${subject.principal_kind}:${subject.principal_id ?? ""}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		out.push(subject);

@@ -20,7 +20,9 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import {
   CallToolRequestSchema,
+  ErrorCode,
   ListResourcesRequestSchema,
+  McpError,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
   type Notification as McpNotification,
@@ -28,6 +30,7 @@ import {
   type Result as McpResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Context } from 'hono';
+import { z } from 'zod';
 import { OAuthClientsStore } from './auth/oauth/clients';
 import { buildMcpBearerChallenge, publicMcpRequestUrl } from './auth/oauth/resource-indicator';
 import { type AuthRejectReason, recordAuthRejection } from './auth/span-attributes';
@@ -56,7 +59,7 @@ import {
   mcpSessionMap,
 } from './mcp-session-state';
 import { MCP_SESSION_MAX_AGE_MS, McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
-import { LOBU_SKILL_MARKDOWN } from './skills/lobu-skill.generated';
+import { getSkill, listSkills, LOBU_SKILL_RESOURCE, readSkillResource, SKILLS_EXTENSION_ID } from './skills/mcp-skills';
 import { mcpImagesForResourceLinks, readMcpAttachmentResource } from './mcp-media-resources';
 import { AccessDeniedError, isAdminOrOwnerRole, scopeRemedy, workspaceScopeDenialMessage } from './tools/access-control';
 import { accessRemedyOf, appendAccessFix, buildAccessFix, loginGrantUrl, withAccessRemedy } from './tools/access-fix';
@@ -255,6 +258,16 @@ class SessionServer extends Server {
   }
 }
 
+/** SEP-2640 request envelopes; `skills/*` params are validated by their handlers. */
+const SkillsListRequestSchema = z.object({
+  method: z.literal('skills/list'),
+  params: z.record(z.string(), z.unknown()).optional(),
+});
+const SkillsGetRequestSchema = z.object({
+  method: z.literal('skills/get'),
+  params: z.record(z.string(), z.unknown()).optional(),
+});
+
 /** Display modes an MCP App resource can declare for the host. */
 type McpAppDisplayMode = 'inline' | 'fullscreen' | 'pip';
 
@@ -340,30 +353,6 @@ const VIEWS_LOADER_META = {
 export const MCP_APP_DIRS: ReadonlySet<string> = new Set(
   [...Object.values(MCP_APP_RESOURCES).map((r) => r.appDir), "view-native"]
 );
-
-/**
- * Skill resources served over `resources/list` + `resources/read` as plain
- * markdown reference material (NOT interactive `ui://` bundles). Slackbot and
- * other MCP clients can read these to learn how to work with Lobu. The content
- * is embedded at build time (see scripts/gen-skill-resource.ts) so it ships
- * identically in prod and local dev — `skills/` is not copied into the server
- * image, so a runtime file read would 404 in prod.
- */
-const MCP_SKILL_RESOURCES: Record<
-  string,
-  {
-    name: string;
-    description: string;
-    text: string;
-  }
-> = {
-  'skill://lobu': {
-    name: 'Lobu',
-    description:
-      'How to work with a Lobu project and Lobu memory: run/validate/evaluate/connect, MCP client setup, knowledge search/save, Automations, and connectors.',
-    text: LOBU_SKILL_MARKDOWN,
-  },
-};
 
 function supportsMcpApps(capabilities: Record<string, unknown> | null | undefined): boolean {
   const extensions = capabilities?.extensions;
@@ -456,7 +445,9 @@ function createServerForContext(
   const server = new SessionServer(
     { name: 'lobu-mcp', version: '0.2.0' },
     {
-      capabilities: { tools: {}, resources: {} },
+      // SEP-2640 requires `resources` alongside the Skills extension. `{}`
+      // declares no optional features (no `resources/directory/read`).
+      capabilities: { tools: {}, resources: {}, extensions: { [SKILLS_EXTENSION_ID]: {} } },
       ...(sessionAuthCtx.instructions && { instructions: sessionAuthCtx.instructions }),
     }
   );
@@ -548,14 +539,24 @@ function createServerForContext(
         mimeType: MCP_APP_MIME_TYPE,
         _meta: mcpAppResourceMeta(forThisRequest(sessionAuthCtx), VIEWS_LOADER_META),
       },
-      ...Object.entries(MCP_SKILL_RESOURCES).map(([uri, meta]) => ({
-        uri,
-        name: meta.name,
-        description: meta.description,
-        mimeType: 'text/markdown',
-      })),
+      LOBU_SKILL_RESOURCE,
     ],
   }));
+
+  // MCP Skills extension (SEP-2640). The SDK has no schemas for these methods,
+  // so params arrive unparsed and a malformed one is -32602, not -32603.
+  server.setRequestHandler(SkillsListRequestSchema, async (request) => {
+    const cursor = request.params?.cursor;
+    if (cursor !== undefined && typeof cursor !== 'string') {
+      throw new McpError(ErrorCode.InvalidParams, 'skills/list cursor must be a string.');
+    }
+    return listSkills(toAccountToolContext(forThisRequest(sessionAuthCtx)), cursor);
+  });
+  server.setRequestHandler(SkillsGetRequestSchema, async (request) => {
+    const uri = request.params?.uri;
+    if (typeof uri !== 'string') throw new McpError(ErrorCode.InvalidParams, 'skills/get requires a string uri.');
+    return getSkill(toAccountToolContext(forThisRequest(sessionAuthCtx)), uri);
+  });
 
   // resources/read — return the built bundle HTML for a `ui://` app resource.
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
@@ -563,12 +564,8 @@ function createServerForContext(
     const uri = request.params.uri;
     const mediaResource = await readMcpAttachmentResource(uri, env, authCtx);
     if (mediaResource) return mediaResource;
-    const skill = MCP_SKILL_RESOURCES[uri];
-    if (skill) {
-      return {
-        contents: [{ uri, mimeType: 'text/markdown', text: skill.text }],
-      };
-    }
+    const skill = await readSkillResource(toAccountToolContext(authCtx), uri);
+    if (skill) return skill;
     // Views: the generic loader is one stable id; per-view bundles resolve by
     // key so the loader can fetch them through the host resource channel. An
     // unknown key (a removed view) is an unknown resource — fail closed rather
