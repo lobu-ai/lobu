@@ -88,25 +88,7 @@ afterEach(async () => {
 });
 
 function makeGateway(): WorkerGateway {
-  return new WorkerGateway(
-    queue as any,
-    "https://gateway.example.com",
-    { getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
-    {
-      getSessionContext: async () => ({
-        agentLayers: {
-          identityMd: "",
-          soulMd: "",
-          userMd: "",
-          unconfiguredNotice: "",
-        },
-        platformInstructions: "",
-        networkInstructions: "",
-        skillsInstructions: "",
-        mcpStatus: [],
-      }),
-    } as any
-  );
+  return new WorkerGateway(queue as any);
 }
 
 function mintToken(opts?: {

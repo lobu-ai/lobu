@@ -94,7 +94,7 @@ describe("BaseProviderModule.hasCredentials org-shared key fallback", () => {
     inferenceProviderRows = [{ block: null, ciphertext: encrypt("zai-secret-value") }];
 
     const mod = makeModule(false);
-    // Pass org explicitly (as the worker session-context path now does) and
+    // Pass org explicitly (as the worker turn path does) and
     // also via the ALS fallback — both must resolve the org-shared key.
     expect(
       await mod.hasCredentials("agent-1", { organizationId: "org-1" })

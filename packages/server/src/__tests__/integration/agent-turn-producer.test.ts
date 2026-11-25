@@ -495,12 +495,9 @@ describe('agent turn producer', () => {
   it.each(['compatible', 'codex'])('executes a %s tool round trip through worker HTTP and an isolate', async (protocol) => {
     const requests: Array<Record<string, any>> = [];
     const serverErrors: string[] = [];
-    const paths: string[] = [];
     const server = createServer(async (req, res) => {
       try {
         const path = new URL(req.url!, 'http://localhost').pathname;
-        paths.push(path);
-        if (path.endsWith('/session-context')) throw new Error('Turns must use their admitted envelope');
         const chunks = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -589,7 +586,6 @@ describe('agent turn producer', () => {
         executor: new IsolateExecutor({ allowedDomains: ['127.0.0.1'], timeoutMs: 20_000 }), timeoutMs: 20_000,
       });
       expect(serverErrors).toEqual([]);
-      expect(paths.some(path => path.endsWith('/session-context'))).toBe(false);
       expect(result.error).toBeUndefined();
       // Two turn calls, then the chips side call on the same provider route.
       expect(requests).toHaveLength(3);

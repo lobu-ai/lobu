@@ -201,7 +201,7 @@ describe("verifySettingsSession — jti revocation", () => {
 });
 
 // Routes wired through `authenticateWorker` (internal worker endpoints —
-// SSE stream, response post, session-context) used to skip the revocation
+// SSE stream, response post) used to skip the revocation
 // check because the verify call wasn't async. The middleware now consults
 // the singleton store; this test pins that contract.
 describe("authenticateWorker (internal middleware) — revocation reach", () => {

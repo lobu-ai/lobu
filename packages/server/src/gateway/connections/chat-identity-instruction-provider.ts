@@ -19,8 +19,9 @@
  * the framing is the half that resolves the ambiguity.
  *
  * PROMPT-CACHE CONTRACT — read before adding a line here.
- * This block sits at the FRONT of `gatewayInstructions` (`session-context.ts`),
- * and the openai-completions path has no explicit cache breakpoints: reuse is
+ * This block follows the agent layers in the turn system prompt
+ * (`composeTurnSystemPrompt` in `agent-turn-producer.ts`), and the
+ * openai-completions path has no explicit cache breakpoints: reuse is
  * longest-common-prefix only. Everything emitted here must be CONNECTION-scoped
  * (platform, bot handle, bot id) — constant for the life of the connection, so
  * every conversation on it shares one prefix. Never interpolate anything
