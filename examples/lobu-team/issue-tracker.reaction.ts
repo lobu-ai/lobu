@@ -261,13 +261,15 @@ export const RULES = {
   /** New issues per hour; the rest wait for a later run. */
   maxNewPerHour: 5,
   /**
-   * High priority — the only level that notifies — is earned by reach: two
-   * named users in an hour (a tenth of daily actives), or enough workspaces
-   * to be systemic. Sightings alone never qualify: one caller retrying or a
-   * crawler walking distinct URLs mints an occurrence per request with no
-   * user attached. Sign-in failures page on the first sighting.
+   * High priority — the only level that notifies — is earned by reach: three
+   * named users in an hour, or enough workspaces to be systemic. Two was too
+   * low: two unrelated callers each hitting their own failure in the same hour
+   * (a command outrunning its own time limit) paged with nothing down.
+   * Sightings alone never qualify: one caller retrying or a crawler walking
+   * distinct URLs mints an occurrence per request with no user attached.
+   * Sign-in failures page on the first sighting.
    */
-  highMinUsers: 2,
+  highMinUsers: 3,
   highMinOrgs: 3,
   /**
    * A 5xx the gateway answered itself never reached the server, so no user or
