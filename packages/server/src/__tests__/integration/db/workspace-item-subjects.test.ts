@@ -3,7 +3,7 @@
  * These tables are trust boundaries: a subject must never bind an item of
  * another workspace, name an agent outside its workspace, or outlive the agent
  * it names (agent ids are reusable, so a leftover row would apply to the next
- * agent created with that id). The constraints and triggers live in
+ * agent created with that id). The constraints live in
  * 20261125120000_workspace_skills_and_guardrails.sql.
  */
 
@@ -52,11 +52,11 @@ const tables: ItemTable[] = [
   },
 ];
 
-async function pgError(run: () => Promise<unknown>): Promise<{ code?: string; message: string }> {
+async function pgError(run: () => Promise<unknown>): Promise<{ code?: string; constraint_name?: string; message: string }> {
   try {
     await run();
   } catch (err) {
-    return err as { code?: string; message: string };
+    return err as { code?: string; constraint_name?: string; message: string };
   }
   throw new Error('expected the statement to be rejected');
 }
@@ -110,7 +110,7 @@ describe.each(tables)('workspace $label subjects', (table) => {
     for (const agentId of ['missing-agent', 'other-org-agent']) {
       const err = await pgError(() => insertSubject(orgId, item, 'agent', agentId));
       expect(err.code).toBe('23503');
-      expect(err.message).toContain(`${table.subjects} principal agent ${agentId} not found in org ${orgId}`);
+      expect(err.constraint_name).toBe(`${table.subjects}_agent_fkey`);
     }
 
     // A rebind to a missing agent is rejected the same way.
@@ -123,6 +123,7 @@ describe.each(tables)('workspace $label subjects', (table) => {
       ),
     );
     expect(rebind.code).toBe('23503');
+    expect(rebind.constraint_name).toBe(`${table.subjects}_agent_fkey`);
 
     // Everyone, any-agent and app subjects name no agent row.
     await insertSubject(orgId, item, null, null);
