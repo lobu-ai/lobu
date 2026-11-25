@@ -1,4 +1,4 @@
-import type { GoogleChatAdapter } from "@chat-adapter/gchat";
+import type { LobuGoogleChatAdapter } from "./gchat-adapter.js";
 import type { AdapterCreationContext, ChatRuntimeConfig } from "./types.js";
 
 export class GoogleChatScopeError extends Error {
@@ -44,10 +44,10 @@ export function googleChatEventSpace(body: any): string {
 
 /** A scoped facade: raw Google clients and protected SDK methods are not exposed. */
 export function scopeGoogleChatAdapter(
-  initial: GoogleChatAdapter,
+  initial: LobuGoogleChatAdapter,
   runtime: NonNullable<AdapterCreationContext["runtime"]>,
-  create: (config: ChatRuntimeConfig) => Promise<GoogleChatAdapter>,
-): GoogleChatAdapter {
+  create: (config: ChatRuntimeConfig) => Promise<LobuGoogleChatAdapter>,
+): LobuGoogleChatAdapter {
   const space = runtime.scope;
   resource(space, space);
   let delegate = initial;
@@ -170,7 +170,7 @@ export function scopeGoogleChatAdapter(
       return (await current()).handleWebhook(request, options);
     },
   };
-  for (const name of ["postMessage", "postEphemeral", "fetchMessages", "fetchThread", "onThreadSubscribe", "startTyping"]) {
+  for (const name of ["postMessage", "postTerminalReply", "postEphemeral", "fetchMessages", "fetchThread", "onThreadSubscribe", "startTyping"]) {
     scoped[name] = async (id: string, ...args: any[]) => {
       thread(id);
       return message(await (await current() as any)[name](id, ...args));

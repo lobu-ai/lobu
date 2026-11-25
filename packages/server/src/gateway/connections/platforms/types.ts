@@ -127,6 +127,8 @@ export interface NoticeChannelContext {
  * the manager treats an absent hook as "platform doesn't support this".
  */
 export interface ChatPlatformDescriptor {
+  /** Override the default live-streaming response delivery for this platform. */
+  responseStrategy?: import("../platform-strategies/types.js").PlatformResponseStrategy;
   /**
    * True when this platform's transport is a CONNECTOR connection — a data
    * row (`credential_mode` NULL) owned by its connector, e.g. a device-paired

@@ -50,14 +50,14 @@ describe("Google Chat installed space isolation", () => {
     expect(calls).toEqual([]);
   });
 
-  for (const method of ["postMessage", "postEphemeral", "fetchMessages", "fetchThread", "onThreadSubscribe", "startTyping"]) {
+  for (const method of ["postMessage", "postTerminalReply", "postEphemeral", "fetchMessages", "fetchThread", "onThreadSubscribe", "startTyping"]) {
     test(`${method} rejects foreign, malformed and mismatched nested threads`, async () => {
       const { adapter, calls, base } = await fixture();
       const valid = base.encodeThreadId({ spaceName: space });
       for (const id of ["gchat:spaces/foreign", `${valid}:extra:segment`,
         base.encodeThreadId({ spaceName: space, threadName: "spaces/foreign/threads/thread" }),
         base.encodeThreadId({ spaceName: space, threadName: `${space}/messages/../threads/thread` })]) {
-        await expect(adapter[method](id, "hello")).rejects.toThrow();
+        await expect(adapter[method](id, "hello", "request-key")).rejects.toThrow("outside the installed space");
       }
       expect(calls).toEqual([]);
     });

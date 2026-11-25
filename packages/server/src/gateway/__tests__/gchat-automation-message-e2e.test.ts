@@ -7,7 +7,7 @@
  * real bridge, channel subscription reader, Automation planner, transcript
  * writer and Postgres run queue (`helpers/chat-bridge-harness.ts`, shared
  * with the Slack suite). Completions render through the real
- * `ChatResponseBridge` and default (live-streaming) strategy.
+ * `ChatResponseBridge` and Google Chat delivery strategy.
  */
 import {
   afterEach,
@@ -34,6 +34,7 @@ import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
+import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
 import {
   type AssembledChatBridge,
   startAssembledChatBridge,
@@ -142,6 +143,9 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
   let connectionDbId: number;
   let created: Array<Record<string, any>>;
   let updated: Array<Record<string, any>>;
+  let accepted: Map<string, string>;
+  let loseNextReceipt: boolean;
+  let rejectThread: boolean;
 
   /** Deliver a webhook and wait for the SDK's background dispatch. */
   async function deliver(body: Record<string, unknown>): Promise<number> {
@@ -175,10 +179,21 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     });
     created = [];
     updated = [];
+    accepted = new Map();
+    loseNextReceipt = false;
+    rejectThread = false;
     resetRateLimiterForTests();
     adapter.chatApi.spaces.messages.create = mock(async (request: Record<string, any>) => {
       created.push(request);
-      return { data: { name: `${request.parent}/messages/bot-${created.length}` } };
+      if (rejectThread) throw { response: { status: 404 } };
+      const key = request.requestId ?? `unkeyed-${created.length}`;
+      const name = accepted.get(key) ?? `${request.parent}/messages/bot-${created.length}`;
+      accepted.set(key, name);
+      if (loseNextReceipt) {
+        loseNextReceipt = false;
+        throw { response: { status: 503 } };
+      }
+      return { data: { name } };
     });
     adapter.chatApi.spaces.messages.update = mock(async (request: Record<string, any>) => {
       updated.push(request);
@@ -455,48 +470,78 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       expect(rows[0]?.action_input.platformMetadata.automationId).toBeUndefined();
     });
     expect(created).toEqual([]);
+    const [queued] = await sql<{ action_input: ThreadResponsePayload }[]>`
+      SELECT action_input FROM runs WHERE run_type = 'chat_message'
+    `;
+    const responses = new ChatResponseBridge(bridge.manager as never);
+    await responses.handleCompletion({ ...queued!.action_input, finalText: "DM answer." }, "s");
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ parent: DM_SPACE, requestId: expect.any(String) });
+    expect(created[0]?.requestBody).toEqual({ text: "DM answer.", thread: undefined });
+    expect(updated).toEqual([]);
     // A DM fallback does not materialize a chat-link Automation.
     expect(await sql`SELECT id FROM automations WHERE organization_id = ${ORG_ID}`).toHaveLength(0);
   });
 
-  test("a completion streams the reply into the originating Google thread", async () => {
+  test("a completion posts the full reply in the originating Google thread without placeholders", async () => {
     const payload = await queueLinkedSpaceTurn("inbound-reply");
     const responses = new ChatResponseBridge(bridge.manager as never);
     await responses.handleDelta({ ...payload, delta: "All green. " }, "s");
     await responses.handleDelta({ ...payload, delta: "Nothing blocked." }, "s");
+    expect(created).toEqual([]);
     await responses.handleCompletion({ ...payload, finalText: "All green. Nothing blocked." }, "s");
 
-    // Chat SDK's post-then-edit stream fallback: one placeholder message in
-    // the inbound thread, then edited in place to the streamed text.
-    await waitFor(() =>
-      expect(updated.at(-1)?.requestBody?.text).toBe("All green. Nothing blocked."),
-    );
     expect(created).toEqual([
       {
         parent: SPACE,
-        messageReplyOption: "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
-        requestBody: { text: "...", thread: { name: THREAD } },
+        requestId: expect.any(String),
+        messageReplyOption: "REPLY_MESSAGE_OR_FAIL",
+        requestBody: { text: "All green. Nothing blocked.", thread: { name: THREAD } },
       },
     ]);
-    // Intermediate edits are throttle-timing dependent; every edit targets the
-    // one placeholder and the last carries the complete reply.
-    for (const edit of updated) {
-      expect(edit).toMatchObject({ name: `${SPACE}/messages/bot-1`, updateMask: "text,cardsV2" });
-    }
+    expect(updated).toEqual([]);
   });
 
-  // CURRENT (known gap): under N>1 replicas the `thread_response` rows are
-  // claimed competitively. For agents without output guardrails, Google Chat's
-  // live-streaming path does not deliver `finalText` on a replica with no local
-  // stream. Guardrail-enabled turns have a separate final-text delivery path;
-  // Slack's strategy also consumes finalText without a local stream.
-  test("without output guardrails, a completion on a replica with no deltas posts nothing", async () => {
+  test("a different replica retries an ambiguous acceptance without posting a second reply", async () => {
     const payload = await queueLinkedSpaceTurn("inbound-crosspod");
-
-    // Replica B claims only the terminal row.
+    const replicaA = new ChatResponseBridge(bridge.manager as never);
     const replicaB = new ChatResponseBridge(bridge.manager as never);
-    await replicaB.handleCompletion({ ...payload, finalText: "The full answer." }, "s");
-    expect(created).toEqual([]);
+    const completion = { ...payload, finalText: "The full answer." };
+    loseNextReceipt = true;
+    await expect(replicaA.handleCompletion(completion, "s")).rejects.toThrow("503");
+    await replicaB.handleCompletion(completion, "s");
+    expect(created).toHaveLength(2);
+    expect(created[0]?.requestId).toEqual(expect.any(String));
+    expect(created[1]).toEqual(created[0]);
+    expect(accepted.size).toBe(1);
     expect(updated).toEqual([]);
+  });
+
+  test("a missing Google thread fails without starting a new conversation", async () => {
+    const payload = await queueLinkedSpaceTurn("inbound-deleted-thread");
+    const responses = new ChatResponseBridge(bridge.manager as never);
+    rejectThread = true;
+    await expect(responses.handleCompletion({ ...payload, finalText: "Stay in thread." }, "s")).rejects.toThrow("404");
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      parent: SPACE,
+      messageReplyOption: "REPLY_MESSAGE_OR_FAIL",
+      requestBody: { thread: { name: THREAD } },
+    });
+    expect(accepted.size).toBe(0);
+  });
+
+  test("a multibyte reply stays within Google's request limit and every part stays in thread", async () => {
+    const payload = await queueLinkedSpaceTurn("inbound-long-reply");
+    const full = "界".repeat(11_000);
+    const responses = new ChatResponseBridge(bridge.manager as never);
+    await responses.handleCompletion({ ...payload, finalText: full }, "s");
+    expect(created).toHaveLength(2);
+    for (const request of created) {
+      expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThan(32_000);
+      expect(request.requestBody?.thread?.name).toBe(THREAD);
+    }
+    expect(created.map((request) => request.requestBody?.text).join("")).toBe(full);
+    expect(accepted.size).toBe(2);
   });
 });

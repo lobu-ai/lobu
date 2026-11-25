@@ -9,11 +9,12 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
-  GoogleChatAdapter,
   GoogleChatAdapterConfig,
   ServiceAccountCredentials,
 } from "@chat-adapter/gchat";
 import type { WebhookOptions } from "chat";
+import { googleChatResponseStrategy } from "../platform-strategies/gchat.js";
+import type { LobuGoogleChatAdapter } from "./gchat-adapter.js";
 import { extractWhatsAppStyleRoutingInfo } from "./shared.js";
 import { scopeGoogleChatAdapter } from "./gchat-scope.js";
 import {
@@ -521,9 +522,9 @@ async function createUnscopedAdapter(
   config: JsonObject,
   context?: AdapterCreationContext,
   alternateWebhookUrls: readonly string[] = [],
-): Promise<GoogleChatAdapter> {
-  // Preserve the platform registry's existing lazy adapter boundary.
-  const { createGoogleChatAdapter } = await import("@chat-adapter/gchat");
+): Promise<LobuGoogleChatAdapter> {
+  // Load the Google API client only when this platform is used.
+  const { LobuGoogleChatAdapter } = await import("./gchat-adapter.js");
   const adapterConfig = { ...config };
   delete adapterConfig.platform;
   const helpCommandId =
@@ -558,7 +559,7 @@ async function createUnscopedAdapter(
       }
     : adapterConfig;
 
-  const adapter = createGoogleChatAdapter(
+  const adapter = new LobuGoogleChatAdapter(
     normalizedConfig as GoogleChatAdapterConfig
   );
   if (alternateWebhookUrls.length > 0) {
@@ -631,6 +632,7 @@ async function createUnscopedAdapter(
 }
 
 export const gchatPlatform: ChatPlatformDescriptor = {
+  responseStrategy: googleChatResponseStrategy,
   // Either a service-account JSON key or ADC — never neither.
   requiredConfigKeys: [
     ["credentials", "useApplicationDefaultCredentials"],
