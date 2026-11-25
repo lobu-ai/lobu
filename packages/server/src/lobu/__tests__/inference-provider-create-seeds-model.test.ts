@@ -7,6 +7,7 @@ import {
 	beforeEach,
 	describe,
 	expect,
+	spyOn,
 	test,
 } from "bun:test";
 import {
@@ -331,6 +332,8 @@ describe("org inference provider routes", () => {
 					"text-retired": { status: "deprecated", tool_call: true, modalities: { output: ["text"] } },
 					"image-1": { tool_call: true, modalities: { output: ["image"] } },
 					"text-no-tools": { tool_call: false, modalities: { output: ["text"] } },
+					"null-entry": null,
+					"text-string-output": { tool_call: true, modalities: { output: "text" } },
 				} } });
 			}
 			const page = url.searchParams.get("pageToken");
@@ -346,13 +349,17 @@ describe("org inference provider routes", () => {
 					{ name: "models/text-retired", supportedGenerationMethods: ["generateContent"] },
 					{ name: "models/image-1", supportedGenerationMethods: ["generateContent"] },
 					{ name: "models/text-no-tools", supportedGenerationMethods: ["generateContent"] },
+					{ name: "models/null-entry", supportedGenerationMethods: ["generateContent"] },
+					{ name: "models/text-string-output", supportedGenerationMethods: ["generateContent"] },
 				],
 			});
 		}) as typeof fetch;
 		try {
 			// Only text-1 is a current, tool-capable text model per models.dev:
 			// text-retired is deprecated, image-1 is image-only, text-no-tools
-			// cannot call tools, and text-2 is not in models.dev at all.
+			// cannot call tools, text-2 is not in models.dev at all, and the
+			// malformed null-entry and text-string-output entries are skipped
+			// without failing the rest of the listing.
 			const discovered = await agentRoutes.request(path);
 			expect(discovered.status).toBe(200);
 			expect(discovered.headers.get("cache-control")).toBe("private, no-store");
@@ -363,9 +370,23 @@ describe("org inference provider routes", () => {
 				{ page: null, key: "synthetic-google-credential" },
 				{ page: "second", key: "synthetic-google-credential" },
 			]);
-			// An unreachable models.dev fails open: the provider's own list, unfiltered.
-			__resetModelsDevCacheForTests();
+			// Once the cached catalog expires, a failed refresh keeps filtering
+			// with the last catalog models.dev returned.
 			modelsDevReachable = false;
+			const later = Date.now() + 2 * 60 * 60 * 1000;
+			const clock = spyOn(Date, "now").mockReturnValue(later);
+			try {
+				const stale = await agentRoutes.request(path);
+				expect(stale.status).toBe(200);
+				expect(await stale.json()).toEqual({ models: [
+					{ id: "text-1", label: "Text One" },
+				] });
+			} finally {
+				clock.mockRestore();
+			}
+			// With no catalog ever fetched, an unreachable models.dev fails
+			// open: the provider's own list, unfiltered.
+			__resetModelsDevCacheForTests();
 			const unfiltered = await agentRoutes.request(path);
 			expect(unfiltered.status).toBe(200);
 			expect(await unfiltered.json()).toEqual({ models: [
@@ -373,6 +394,8 @@ describe("org inference provider routes", () => {
 				{ id: "text-retired", label: "text-retired" },
 				{ id: "image-1", label: "image-1" },
 				{ id: "text-no-tools", label: "text-no-tools" },
+				{ id: "null-entry", label: "null-entry" },
+				{ id: "text-string-output", label: "text-string-output" },
 				{ id: "text-2", label: "text-2" },
 			] });
 			upstreamStatus = 503;
@@ -389,6 +412,10 @@ describe("org inference provider routes", () => {
 		const { ensureOAuthInferenceProvider } = await import("../stores/provider-secrets.js");
 		expect((await createProvider({ slug: "team-claude", kind: "claude", apiKey: "synthetic-anthropic-key" })).status).toBe(201);
 		await ensureOAuthInferenceProvider({ organizationId: ORG, slug: "chatgpt", kind: "chatgpt", createdBy: USER });
+		// The modules honor upstream overrides; pin the default hosts this test serves.
+		const upstreamOverrides = ["ANTHROPIC_BASE_URL", "OPENAI_CODEX_BASE_URL"] as const;
+		const savedOverrides = upstreamOverrides.map((key) => [key, process.env[key]] as const);
+		for (const key of upstreamOverrides) delete process.env[key];
 		const originalFetch = globalThis.fetch;
 		const credentials: Record<string, string | null> = {};
 		globalThis.fetch = (async (input, init) => {
@@ -421,6 +448,10 @@ describe("org inference provider routes", () => {
 			expect(credentials.chatgpt).toBe("synthetic-account");
 		} finally {
 			globalThis.fetch = originalFetch;
+			for (const [key, value] of savedOverrides) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		}
 	});
 

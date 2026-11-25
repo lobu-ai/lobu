@@ -7,11 +7,8 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 
 /** One provider's models in the models.dev catalog, keyed by model id. */
 export interface ModelsDevProvider {
-  models?: Record<
-    string,
-    | { status?: string; tool_call?: boolean; modalities?: { output?: string[] } }
-    | undefined
-  >;
+  /** Entries are fetched JSON, so each is checked before use. */
+  models?: Record<string, unknown>;
 }
 
 type ModelsDevCatalog = Record<string, ModelsDevProvider | undefined>;
@@ -40,14 +37,21 @@ async function fetchModelsDevCatalog(): Promise<ModelsDevCatalog | undefined> {
     cached = { at: Date.now(), catalog: payload as ModelsDevCatalog };
     return cached.catalog;
   } catch {
-    logger.warn("models.dev catalog unavailable; model listings stay unfiltered");
-    return undefined;
+    // Keep filtering with the last catalog models.dev returned; only a
+    // process that has never reached it lists models unfiltered.
+    logger.warn(
+      cached
+        ? "models.dev catalog refresh failed; filtering with the last fetched catalog"
+        : "models.dev catalog unavailable; model listings stay unfiltered",
+    );
+    return cached?.catalog;
   }
 }
 
 /**
  * The models.dev entry for one provider, or undefined when the provider has no
- * models.dev id or the catalog is unreachable (callers then fail open).
+ * models.dev id or no catalog has ever been fetched (callers then fail open).
+ * After the cache expires, a failed refresh keeps the last fetched catalog.
  */
 export async function loadModelsDevProvider(
   modelsDevId: string | undefined,
@@ -83,11 +87,18 @@ export function filterModelsByModelsDev<T extends { id: string }>(
   if (!known || typeof known !== "object") return models;
   return models.filter((model) => {
     const entry = Object.hasOwn(known, model.id) ? known[model.id] : undefined;
+    if (!entry || typeof entry !== "object") return false;
+    const { status, tool_call, modalities } = entry as {
+      status?: unknown;
+      tool_call?: unknown;
+      modalities?: { output?: unknown } | null;
+    };
+    const output = modalities?.output;
     return (
-      entry !== undefined &&
-      entry.status !== "deprecated" &&
-      entry.tool_call === true &&
-      (entry.modalities?.output?.includes("text") ?? false)
+      status !== "deprecated" &&
+      tool_call === true &&
+      Array.isArray(output) &&
+      output.includes("text")
     );
   });
 }
