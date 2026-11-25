@@ -41,12 +41,12 @@ import {
   resolveSdkCompat,
   verifyWorkerToken,
 } from "@lobu/core";
-import { skillDirectoryName } from "@lobu/core/agent-tooling";
 import type { AgentTurnPollPayload } from "@lobu/core/contracts/worker/protocol";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
+import { resolveRunSkills } from "../../skills/run-skills.js";
 import { resolveRunInitiator } from "../../tools/initiator.js";
 import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run-session.js";
 import { getPlatformDescriptor } from "../connections/platforms/index.js";
@@ -112,15 +112,6 @@ const LANE_APIS = new Set<string>([
 
 const TURN_MESSAGE_CHARS = 32_000;
 
-/**
- * Skill bounds, restating the worker contract's own caps so an oversized
- * library is bounded here rather than failing schema validation at the poll.
- * A skill over the bound is dropped whole; see the producer below for why.
- * Kept as numbers because this module works in the envelope's TYPES, not its
- * runtime schema object.
- */
-const TURN_SKILLS_MAX = 64;
-const TURN_SKILL_CHARS = 64_000;
 const compactionDefaults = SettingsManager.inMemory().getCompactionSettings();
 
 /**
@@ -1134,21 +1125,13 @@ export async function enqueueAgentTurn(
     // + run (all derived from the canonical conversation id) and throws on a
     // missing version, so a pinned run fails rather than silently falling back
     // to live skills.
-    // Pinned snapshots passed the save constraints at read; never rename or
-    // drop any of their instructions through the live-library normalization.
-    const skills = automationContext?.skills ?? (settings?.skillsConfig?.skills ?? [])
-      .filter((skill) => skill.enabled && skill.content)
-      .map((skill) => ({ name: skill.name, content: skill.content! }))
-      .flatMap((skill) => {
-        // An oversized skill is DROPPED, never truncated. A skill is authored
-        // instructions, so slicing one mid-sentence would hand the model a
-        // corrupted rule that reads as complete — worse than not seeding it,
-        // and invisible at the point where the agent acts on it.
-        const name = skillDirectoryName(skill.name);
-        if (!name || skill.content.length > TURN_SKILL_CHARS) return [];
-        return [{ name, content: skill.content }];
-      })
-      .slice(0, TURN_SKILLS_MAX);
+    // Pinned snapshots were already resolved from the version by the same
+    // resolver; never rename or drop any of their instructions through the
+    // live-library filter.
+    const skills = automationContext?.skills ?? resolveRunSkills({
+      kind: "agent_library",
+      skills: settings?.skillsConfig?.skills,
+    });
 
     // The platform's identity block, from the same provider the platform
     // adapter registered for the retired lane. `orgScoped` is true by
