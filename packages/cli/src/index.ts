@@ -126,6 +126,7 @@ Cloud:
   providers <subcmd>       Manage org model providers (create, set-key, ...)
   sandbox <subcmd>         Manage sandboxes (runtime providers)
   clients <subcmd>         List / revoke connected clients (MCP, messaging)
+  skills <subcmd>          List / show workspace library skills (read-only)
   call [tool]              Invoke a tool by name (run_sdk/query_sdk/query_sql need --arg title=)
   token [create]           Print or mint personal access tokens
   browser <subcmd>         Named browsers paired as devices (start, stop, list, rm)
@@ -1083,6 +1084,33 @@ Memory:
       await clientsRevokeCommand(clientId, options);
     }
   );
+
+  // ─── skills ─────────────────────────────────────────────────────────
+  // The workspace skill library, read-only over `manage_skills`.
+  const skills = program
+    .command("skills")
+    .description("List and show workspace library skills (read-only)");
+
+  withCommonOpts(
+    skills
+      .command("list")
+      .description("List the workspace skill library in delivery order")
+      .option("--archived", "Include archived skills"),
+    { org: true, json: true }
+  ).action(async (options: CloudCommandOptions & { archived?: boolean }) => {
+    const { skillsListCommand } = await import("./commands/skills.js");
+    await skillsListCommand(options);
+  });
+
+  withCommonOpts(
+    skills
+      .command("show <name>")
+      .description("Print one skill's details and SKILL.md body"),
+    { org: true, json: true }
+  ).action(async (name: string, options: CloudCommandOptions) => {
+    const { skillsShowCommand } = await import("./commands/skills.js");
+    await skillsShowCommand(name, options);
+  });
 
   // ─── call ───────────────────────────────────────────────────────────
   // Generic dispatcher over the admin REST tool surface

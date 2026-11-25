@@ -161,6 +161,49 @@ function fullOrgRoutes(): Record<
         },
       ],
     }),
+    manage_skills: (body) => {
+      if (body.action !== "list") {
+        throw new Error(
+          `unexpected manage_skills action: ${String(body.action)}`
+        );
+      }
+      // Two pages, so the export walks the cursor.
+      return body.cursor
+        ? {
+            items: [
+              {
+                id: "skill-2",
+                name: "triage",
+                description: "",
+                content: "Label every thread.\n",
+                applies_to: [{ principal_kind: null }],
+                enabled: false,
+                sort_order: 1,
+                revision: 1,
+                archived: false,
+              },
+            ],
+            next_cursor: null,
+          }
+        : {
+            items: [
+              {
+                id: "skill-1",
+                name: "account-brief",
+                description: 'Brief: "accounts", in one page',
+                content: "Summarize the account.",
+                applies_to: [
+                  { principal_kind: "agent", principal_id: "sales" },
+                ],
+                enabled: true,
+                sort_order: 0,
+                revision: 3,
+                archived: false,
+              },
+            ],
+            next_cursor: "page-2",
+          };
+    },
     manage_entity_schema: () => {
       // The mapper uses a single endpoint for both entity_type and
       // relationship_type list actions; return a body carrying both keys.
@@ -305,12 +348,12 @@ describe("lobu init --from-org", () => {
         workerProxyPort: "9001",
         fetchImpl: buildFetch(fullOrgRoutes()),
       });
+      const printed = stdout.mock.calls.map((call) => String(call[0])).join("");
       // The library changed since the version froze its copy.
-      expect(
-        stdout.mock.calls.map((call) => String(call[0])).join("")
-      ).toContain(
+      expect(printed).toContain(
         'Automation "account-health" pins an older body of skill "account-brief"'
       );
+      expect(printed).toContain("Exported 2 workspace skill(s) to skills/");
     } finally {
       stdout.mockRestore();
     }
@@ -336,8 +379,18 @@ describe("lobu init --from-org", () => {
         "utf-8"
       )
     ).toContain("client.knowledge.save");
-    // Skill bodies live in the workspace library; the agent dir gets none.
+    // Library skills export to the project root, never into an agent dir, and
+    // the config references none of them (apply cannot write the library).
     expect(existsSync(join(dir, "agents", "sales", "skills"))).toBe(false);
+    expect(
+      readFileSync(join(dir, "skills", "account-brief", "SKILL.md"), "utf-8")
+    ).toBe(
+      '---\nname: account-brief\ndescription: "Brief: \\"accounts\\", in one page"\n---\nSummarize the account.\n'
+    );
+    expect(
+      readFileSync(join(dir, "skills", "triage", "SKILL.md"), "utf-8")
+    ).toBe("---\nname: triage\n---\nLabel every thread.\n");
+    expect(source).not.toContain("skillFromFile");
     expect(readFileSync(join(dir, ".env.example"), "utf-8")).toContain(
       "ANTHROPIC_API_KEY="
     );

@@ -745,12 +745,6 @@ export async function initCommand(
       `# User Context\n\n<!-- Add user-specific preferences, timezone, environment details here -->\n`
     );
 
-    await mkdir(join(agentDir, "skills"), { recursive: true });
-    await writeFile(join(agentDir, "skills", ".gitkeep"), "");
-
-    await mkdir(join(projectDir, "skills"), { recursive: true });
-    await writeFile(join(projectDir, "skills", ".gitkeep"), "");
-
     // Connector authoring surface: package.json declares the connector SDK
     // (provided by the runtime — externalized at compile, here for editor
     // types) plus any npm deps the user adds; tsconfig gives the editor
@@ -1005,9 +999,9 @@ async function generateLobuConfig(
     "// lobu.config.ts — Lobu project configuration",
     "// Docs: https://lobu.ai/getting-started/",
     "//",
-    "// `dir` points to a folder with IDENTITY.md, SOUL.md, USER.md, and an",
-    "// optional skills/ directory. Shared skills in the root skills/ directory",
-    "// are available to every agent. Run `lobu apply` to sync this to your org.",
+    "// `dir` points to a folder with IDENTITY.md, SOUL.md and USER.md. Skills",
+    "// live in the workspace skill library (`lobu skills list`). Run",
+    "// `lobu apply` to sync this to your org.",
     "",
     imports,
     "",

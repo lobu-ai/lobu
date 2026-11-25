@@ -20,6 +20,7 @@ import { basename, join, resolve } from "node:path";
 import type { AgentSettings } from "@lobu/core";
 import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import { resolvedEventExecution } from "@lobu/core/contracts/tools/manage-automations";
+import type { WorkspaceSkill } from "@lobu/core/contracts/tools/manage-skills";
 import chalk from "chalk";
 import { UNRESOLVED_MODEL_SUFFIX } from "../../../config/index.js";
 import { printText } from "../../../internal/output.js";
@@ -382,6 +383,15 @@ function emitAgent(
   const handleName = minter.mint(agent.agentId, "Agent");
   const decl = `const ${handleName} = defineAgent(${objectLiteral(fields, 0)});`;
   return { handle: { name: handleName, decl }, files };
+}
+
+/** A library skill as SKILL.md: name/description frontmatter, then the body. */
+function emitSkillFile(skill: WorkspaceSkill): string {
+  const fm = [`name: ${skill.name}`];
+  // A JSON string is a valid YAML double-quoted scalar, so any description
+  // (colons, quotes, newlines) parses back unchanged.
+  if (skill.description) fm.push(`description: ${str(skill.description)}`);
+  return `---\n${fm.join("\n")}\n---\n${ensureTrailingNewline(skill.content)}`;
 }
 
 function ensureTrailingNewline(s: string): string {
@@ -782,6 +792,8 @@ interface FetchedState {
   /** The stored navigation document; null when the workspace uses defaults
    *  or this login is not a navigation editor. */
   navigation: NavigationConfig | null;
+  /** The unarchived workspace skill library, or why it could not be read. */
+  skillLibrary: { skills: WorkspaceSkill[] } | { error: string };
 }
 
 async function fetchOrgState(
@@ -818,6 +830,14 @@ async function fetchOrgState(
     .getNavigation()
     .then((state) => state.config)
     .catch(() => null);
+  // A login without the skill read check still bootstraps everything else;
+  // generateProject says the library was not exported.
+  const skillLibrary = await client
+    .listSkills()
+    .then((skills) => ({ skills }))
+    .catch((error: unknown) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
 
   // The relationship-type `list` action omits rules, so hydrate each type's
   // rules (list_rules) before emitting — otherwise the generated config drops
@@ -907,6 +927,7 @@ async function fetchOrgState(
     connections,
     connectorDefinitions,
     navigation,
+    skillLibrary,
   };
 }
 
@@ -957,6 +978,25 @@ function generateProject(
         );
       }
     }
+  }
+
+  // The workspace skill library exports as skills/<name>/SKILL.md so the bodies
+  // live in the project. Apply cannot write the library yet, so the config
+  // references none of them; Automations keep naming skills directly.
+  if ("error" in state.skillLibrary) {
+    warnings.push(
+      `Could not read the workspace skill library (${state.skillLibrary.error}) — skills were not exported.`
+    );
+  } else if (state.skillLibrary.skills.length > 0) {
+    for (const skill of state.skillLibrary.skills) {
+      files.push({
+        relPath: `skills/${skill.name}/SKILL.md`,
+        body: emitSkillFile(skill),
+      });
+    }
+    warnings.push(
+      `Exported ${state.skillLibrary.skills.length} workspace skill(s) to skills/ for reference. lobu apply does not write the skill library yet, so lobu.config.ts does not reference them; who each skill applies to and whether it is enabled stay in the workspace (see \`lobu skills list\`).`
+    );
   }
 
   // Agents first (automations reference their handles).

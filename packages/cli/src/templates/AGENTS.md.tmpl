@@ -19,8 +19,8 @@ An open-source, event-sourced backend for AI agents:
   and MCP.
 - **Automations** subscribe an agent to connector events, declared event outputs
   from other Automations, schedules, or an explicit call (a PR review, Slack
-  reply, daily digest, etc.). Their instructions come from prompts and the
-  agent's skills, referenced by name.
+  reply, daily digest, etc.). Their instructions come from prompts and
+  workspace library skills, referenced by name.
 
 `lobu run` boots the whole thing (gateway + worker + memory) as one Node process
 on http://localhost:{{GATEWAY_PORT}}.
@@ -62,7 +62,9 @@ install it — don't work around it.
   connector fits).
 - `*.reaction.ts` — code an Automation runs after extraction (post to Slack, update
   an entity).
-- `skills/<name>/SKILL.md` — reusable capability bundles for the agent.
+- `skills/<name>/SKILL.md` — local copies of workspace library skills
+  (`lobu init --from-org` exports them). `lobu apply` does not write the skill
+  library yet; read it with `lobu skills list`.
 - `.env` — secrets (`DATABASE_URL`, encryption keys, provider keys, OAuth creds).
   Never open or read this file and never request permission to do so. Inspect
   declared `secret("ENV_NAME")` placeholders and `.env.example` when present.
@@ -72,9 +74,9 @@ install it — don't work around it.
 
 Author everything in `lobu.config.ts` with helpers from `@lobu/cli/config`:
 `defineConfig`, `defineAgent`, `defineEntityType`, `defineRelationshipType`,
-`defineAutomation`, `defineSkill`, `defineConnection`, `defineAuthProfile`,
-`on`, `every`, `context`, `secret`, plus `connectorFromFile`,
-`reactionFromFile`, `skillFromFile`.
+`defineAutomation`, `defineConnection`, `defineAuthProfile`,
+`on`, `every`, `context`, `secret`, plus `connectorFromFile` and
+`reactionFromFile`.
 
 Read the complete, working reference before editing:
 https://github.com/lobu-ai/lobu/blob/main/examples/lobu-crm/lobu.config.ts
@@ -91,7 +93,6 @@ const agent = defineAgent({
     // init prewrites this from --provider; canonical ids include `claude`, `openai`.
     { id: "claude", model: "claude-sonnet-4-20250514", key: secret("ANTHROPIC_API_KEY") },
   ],
-  // skills: [skillFromFile("./skills/<name>")],
   // network: { allowed: ["api.example.com"] }, // egress allowlist
 });
 ```
@@ -312,9 +313,11 @@ ask the user to add it to `.env`.
 
 ### Automation (event from a connector or workspace, schedule, or manual) + outputs
 
-An Automation's instructions come from the agent's skill library: list skill names
-in `skills` and `lobu apply` compiles their bodies (in order) into the frozen
-instructions for that Automation version. Schedule triggers, connector events
+An Automation's instructions come from its `prompt` and the workspace skill
+library: list skill names in `skills` and the server freezes each skill's current
+body (in order) into that Automation version when it saves. `lobu skills list`
+shows the library; `lobu apply` cannot add skills to it yet, so name only skills
+that already exist there (an unknown name fails the apply). Schedule triggers, connector events
 with `execution: "window"`, workspace events with their default window
 execution, and Automations with no triggers (manual) require a prompt, a skill, or
 both. A connector event with `execution: "turn"` (chat or another connector signal) may omit
@@ -322,12 +325,6 @@ both — the incoming connector signal is the content and a built-in default
 applies.
 
 ```ts
-const digestSkill = defineSkill({
-  name: "daily-digest",
-  content: "Summarize yesterday's tickets by root cause and post to Slack.",
-});
-// … add it to the agent: defineAgent({ …, skills: [digestSkill] })
-
 const digest = defineAutomation({
   agent,
   slug: "daily-digest",
@@ -339,7 +336,9 @@ const digest = defineAutomation({
     // Or to a declared event output from another Automation:
     // { kind: "event", source: "workspace", event_types: ["observation"], match: { namespace: "account-risk" } },
   ],
-  skills: ["daily-digest"],
+  prompt: "Summarize yesterday's tickets by root cause and post to Slack.",
+  // Optional: pin library skills by name (see `lobu skills list`).
+  // skills: ["ticket-triage"],
   outputs: {
     tickets: { entity: ticket, key: ["id"] },
     alerts: { event: "observation" },

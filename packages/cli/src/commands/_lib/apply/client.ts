@@ -36,6 +36,10 @@ import type {
   InferenceModality,
   InferenceProviderCreateInput,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
+import {
+  SKILLS_LIST_MAX_LIMIT,
+  type WorkspaceSkill,
+} from "@lobu/core/contracts/tools/manage-skills";
 import type { ViewSetInput } from "@lobu/core/contracts/tools/manage-views";
 import { ApiClient, type HttpMethod } from "../../../internal/api-client.js";
 import { resolveApiClient } from "../../../internal/index.js";
@@ -777,6 +781,43 @@ export class ApplyClient {
       "DELETE",
       `/api/${this.orgSlug}/agents/inference-providers/${encodeURIComponent(slug)}`
     );
+  }
+
+  // ── Skills ────────────────────────────────────────────────────────────────
+
+  /**
+   * The workspace skill library in delivery order, every page. `manage_skills`
+   * is read-only: the library is bounded workspace configuration, so callers
+   * get it whole rather than a cursor.
+   */
+  async listSkills(
+    opts: { includeArchived?: boolean } = {}
+  ): Promise<WorkspaceSkill[]> {
+    const skills: WorkspaceSkill[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: {
+        body: { items?: WorkspaceSkill[]; next_cursor?: string | null };
+      } = await this.request("POST", `/api/${this.orgSlug}/manage_skills`, {
+        action: "list",
+        limit: SKILLS_LIST_MAX_LIMIT,
+        ...(opts.includeArchived ? { include_archived: true } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      skills.push(...(page.body.items ?? []));
+      cursor = page.body.next_cursor ?? null;
+    } while (cursor);
+    return skills;
+  }
+
+  /** One unarchived library skill by name. */
+  async getSkill(name: string): Promise<WorkspaceSkill> {
+    const { body } = await this.request<{ skill: WorkspaceSkill }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_skills`,
+      { action: "get", name }
+    );
+    return body.skill;
   }
 
   // ── Views ─────────────────────────────────────────────────────────────────

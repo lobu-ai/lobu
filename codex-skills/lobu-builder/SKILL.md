@@ -16,7 +16,7 @@ If you are inside the Lobu monorepo rather than a generated Lobu project, follow
 1. Read `AGENTS.md` first. If it redirects to another file such as `@TESTING.md`, open that too.
 2. Read `lobu.config.ts`. It is TypeScript: `defineConfig` from `@lobu/cli/config` is the default export.
 3. Enumerate agent directories under `agents/` and inspect the target agent's `IDENTITY.md`, `SOUL.md`, and `USER.md`.
-4. Check whether the repo has shared `skills/` or agent-local `agents/<id>/skills/`.
+4. Check the workspace skill library with `lobu skills list` (a `skills/` folder holds exported reference copies only).
 5. Look for evals under `agents/<id>/evals/promptfooconfig.yaml` (the project may also have legacy YAML files — those don't run).
 
 Do not assume there is only one agent or one platform connection.
@@ -26,9 +26,8 @@ Do not assume there is only one agent or one platform connection.
 - `IDENTITY.md`: who the agent is
 - `SOUL.md`: rules, workflows, guardrails
 - `USER.md`: user or tenant context
-- `lobu.config.ts`: providers, connections, enabled skills, MCP servers, network allowlist (authored with `define*` from `@lobu/cli/config`)
-- `skills/.../SKILL.md`: shared reusable capabilities
-- `agents/<id>/skills/.../SKILL.md`: agent-specific capabilities
+- `lobu.config.ts`: providers, connections, Automation skill names, MCP servers, network allowlist (authored with `define*` from `@lobu/cli/config`)
+- Skills live in the workspace skill library, not in project files; `lobu apply` does not write the library yet
 - `agents/<id>/evals/promptfooconfig.yaml`: promptfoo eval suite (runs via `bunx promptfoo eval` with `@lobu/promptfoo-provider`)
 
 Prefer editing these files directly instead of burying semantics in ad hoc code.

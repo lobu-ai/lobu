@@ -79,7 +79,7 @@ After the local proof, ask the user whether to keep running locally or deploy to
 - **Lobu** is the agent framework, runtime, deployment layer, and memory surface.
 - Keep framework configuration in `lobu.config.ts` (TypeScript, `defineConfig` from `@lobu/cli/config`).
 - Keep agent identity and instructions in `IDENTITY.md`, `SOUL.md`, and `USER.md`.
-- Keep reusable capability bundles in `skills/<name>/SKILL.md` or `agents/<agent>/skills/<name>/SKILL.md`.
+- Reusable capability bundles are skills in the workspace skill library. Read them with `lobu skills list` / `lobu skills show <name>`; `lobu apply` does not write the library yet. `lobu init --from-org` exports local copies to `skills/<name>/SKILL.md` for reference.
 - Use `lobu login` for CLI authentication. Do not use a separate memory login command.
 - Use `lobu connect` for MCP client and skill setup.
 - Use `lobu memory ...` for memory operations, seeding, and direct tool calls.
@@ -96,7 +96,7 @@ Reference the canonical docs before guessing how a feature works:
 
 1. Read `lobu.config.ts` first.
 2. Read the active agent files under `agents/<id>/`.
-3. Check local skills under `skills/` and `agents/<id>/skills/`.
+3. Check the workspace skill library with `lobu skills list`; Automations name library skills in `defineAutomation({ skills: [...] })`.
 4. Use `lobu validate` after config changes.
 5. Discover the live SDK and connector surface with `search_sdk`; never guess a method, connector key, feed key, connection id, or operation key.
 6. When prompt or Automation changes, run evals via promptfoo (see `examples/personal-finance/evals/promptfooconfig.yaml`). The in-house `lobu eval` command has been removed.
