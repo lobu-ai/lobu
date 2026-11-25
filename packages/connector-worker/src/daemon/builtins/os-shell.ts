@@ -106,7 +106,8 @@ function appendCapped(current: string, chunk: string): string {
   return Buffer.from(next, 'utf8').subarray(0, MAX_OUTPUT_BYTES).toString('utf8') + TRUNCATED_MARKER;
 }
 
-function readTimeout(value: unknown): number {
+/** The command budget a run asked for, or the default when it named none. */
+export function shellTimeoutMs(value: unknown): number {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(value) || Number(value) < 100 || Number(value) > MAX_TIMEOUT_MS) {
     throw new ShellInputError(`timeout_ms must be an integer between 100 and ${MAX_TIMEOUT_MS}`);
@@ -157,7 +158,7 @@ export async function runShellBuiltin(
   if (!isAbsolute(cwd) || !existsSync(cwd)) {
     throw new ShellInputError(`cwd must be an existing absolute path (got '${cwd}')`);
   }
-  const timeoutMs = readTimeout(input.timeout_ms);
+  const timeoutMs = shellTimeoutMs(input.timeout_ms);
   const stdin = input.stdin;
   if (stdin !== undefined && typeof stdin !== 'string')
     throw new ShellInputError('stdin must be a string');

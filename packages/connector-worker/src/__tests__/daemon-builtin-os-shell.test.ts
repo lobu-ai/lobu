@@ -402,6 +402,8 @@ describe('daemon-builtin os.shell', () => {
     expect(Date.now() - started).toBeLessThan(5_500);
     expect(completions[0]?.status).toBe('failed');
     expect(completions[0]?.error_message).toStartWith('operation_execution_failed: Shell command timed out after ');
+    // The requested budget, not the wall time that includes the kill grace.
+    expect(completions[0]?.error_message).toMatch(/timed out after 300ms\b/);
     expect(completions[0]?.error_code).toBe('UPSTREAM_TIMEOUT');
     expect(completions[0]?.action_output).toMatchObject({
       stdout: '', stderr: '', timed_out: true, success: false,
