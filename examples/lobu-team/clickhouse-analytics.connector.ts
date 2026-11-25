@@ -217,6 +217,23 @@ function exceptionCode(response: Response): string | null {
 /** TOO_MANY_SIMULTANEOUS_QUERIES: the account's concurrent-query limit refused
  * the query at admission, before it ran, so repeating it is safe. */
 const SLOT_BUSY = "202";
+/** Exceptions that reject the submitted statement, not the source. ClickHouse
+ * answers HTTP 500 for every code it has no dedicated status for, so these
+ * would read as a source failure and be retried; they take the non-retryable
+ * caller-error path instead. */
+const CALLER_QUERY_CODES = new Set([
+  "158", // TOO_MANY_ROWS: read cap
+  "307", // TOO_MANY_BYTES: read cap
+  "42", // NUMBER_OF_ARGUMENTS_DOESNT_MATCH
+  "43", // ILLEGAL_TYPE_OF_ARGUMENT
+  "179", // MULTIPLE_EXPRESSIONS_FOR_ALIAS
+  "184", // ILLEGAL_AGGREGATION
+  "207", // AMBIGUOUS_IDENTIFIER
+  "215", // NOT_AN_AGGREGATE
+  "352", // AMBIGUOUS_COLUMN_NAME
+  "386", // NO_COMMON_TYPE
+  "403", // INVALID_JOIN_ON_EXPRESSION
+]);
 const QUERY_TIMEOUT_MS = 20000;
 const SLOT_RETRY_BASE_MS = 250;
 const SLOT_RETRY_MAX_MS = 2000;
@@ -225,8 +242,7 @@ async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
     const code = exceptionCode(response);
     const status =
-      // Read caps reject this query, so use the existing non-retryable caller-error path.
-      code === "307" || code === "158"
+      code !== null && CALLER_QUERY_CODES.has(code)
         ? 400
         : // A slot still busy after waiting is throttling, not a source failure.
           code === SLOT_BUSY
@@ -427,7 +443,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "2.0.2",
+    version: "2.0.3",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
     authSchema: {
