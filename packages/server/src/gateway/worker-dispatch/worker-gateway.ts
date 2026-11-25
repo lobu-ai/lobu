@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
 
-import type {
-  InstructionContext,
-  WorkerTokenData,
-} from "@lobu/core";
+import type { WorkerTokenData } from "@lobu/core";
 import {
   AgentErrorCode,
 	createLogger,
@@ -14,17 +11,7 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
-import {
-  AUTOMATION_RUN_SOURCE,
-  type AutomationRunSkillResolver,
-  formatAutomationRunSkillInstructions,
-  resolveAutomationRunSkills,
-} from "../automation-run-session.js";
-import { toPublicWebOrigin } from "../../utils/url-builder.js";
 import { getRevokedTokenStore } from "../auth/revoked-token-store.js";
-import type { McpConfigService } from "../auth/mcp/config-service.js";
-import type { McpProxy } from "../auth/mcp/proxy.js";
-import type { McpTool } from "../auth/mcp/tool-cache.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import {
   commitTerminalReply,
@@ -32,8 +19,6 @@ import {
   hasLiveTurnForMessage,
 } from "../orchestration/turn-liveness.js";
 import { agentTurnRunIdFromClaims, turnMarkerDeploymentFromClaims } from "../orchestration/deployment-identity.js";
-import type { InstructionService } from "../services/instruction-service.js";
-import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
 import { routeFailure } from "../../diagnostics.js";
 
@@ -58,30 +43,10 @@ export interface DeploymentActivityTracker {
 export class WorkerGateway {
   private app: Hono;
   private queue: IMessageQueue;
-  private mcpConfigService: McpConfigService;
-  private instructionService: InstructionService;
-  private publicGatewayUrl: string;
-  private mcpProxy?: McpProxy;
-  private agentSettingsStore?: AgentSettingsStore;
-  private automationRunSkillResolver: AutomationRunSkillResolver;
   private deploymentActivityTracker?: DeploymentActivityTracker;
 
-  constructor(
-    queue: IMessageQueue,
-    publicGatewayUrl: string,
-    mcpConfigService: McpConfigService,
-    instructionService: InstructionService,
-    mcpProxy?: McpProxy,
-    agentSettingsStore?: AgentSettingsStore,
-    automationRunSkillResolver: AutomationRunSkillResolver = resolveAutomationRunSkills
-  ) {
+  constructor(queue: IMessageQueue) {
     this.queue = queue;
-    this.publicGatewayUrl = publicGatewayUrl;
-    this.mcpConfigService = mcpConfigService;
-    this.instructionService = instructionService;
-    this.mcpProxy = mcpProxy;
-    this.agentSettingsStore = agentSettingsStore;
-    this.automationRunSkillResolver = automationRunSkillResolver;
 
     // Setup Hono app
     this.app = new Hono();
@@ -116,11 +81,6 @@ export class WorkerGateway {
     // HTTP POST endpoint for workers to send responses
     this.app.post("/response", (c) => this.handleWorkerResponse(c));
 
-    // Unified session context endpoint (includes MCP + instructions)
-    this.app.get("/session-context", (c) =>
-      this.handleSessionContextRequest(c)
-    );
-
     // Mint a fresh worker token while the deployment still has live work.
     // Lets a warm worker (or a single turn running past the 2h TTL) keep a
     // non-expired token without lengthening the TTL — see handler.
@@ -133,28 +93,6 @@ export class WorkerGateway {
     this.app.route("/transcript", createTranscriptRoutes());
 
     logger.debug("Worker gateway routes registered");
-  }
-
-  private enrichMcpStatus(
-    mcpStatus: Array<{
-      id: string;
-      name: string;
-      requiresAuth: boolean;
-      requiresInput: boolean;
-    }>
-  ): Array<{
-    id: string;
-    name: string;
-    requiresAuth: boolean;
-    requiresInput: boolean;
-    authenticated: boolean;
-    configured: boolean;
-  }> {
-    return mcpStatus.map((mcp) => ({
-      ...mcp,
-      authenticated: false,
-      configured: !mcp.requiresInput,
-    }));
   }
 
   /**
@@ -424,199 +362,6 @@ export class WorkerGateway {
     }
   }
 
-  /**
-   * Unified session context endpoint
-   */
-  private async handleSessionContextRequest(c: Context): Promise<Response> {
-    if (!this.mcpConfigService || !this.instructionService) {
-      return c.json({ error: "session_context_unavailable" }, 503);
-    }
-
-    const auth = await this.authenticateWorker(c);
-    if (!auth) {
-      return c.json({ error: "Invalid token" }, 401);
-    }
-
-    try {
-      const {
-        userId,
-        platform,
-        sessionKey,
-        conversationId,
-        agentId,
-        deploymentName,
-      } = auth.tokenData;
-      const baseUrl = this.getRequestBaseUrl(c);
-      if (!conversationId) {
-        return c.json({ error: "Invalid token (missing conversationId)" }, 401);
-      }
-
-      // CROSS-TENANT GUARD (hoisted): compute org-scope safety ONCE, before any
-      // agent-scoped read (instructions, MCP, skills). A DB-backed agent's
-      // settings read MUST be org-scoped — the worker token can be orgless, and a
-      // shared id (e.g. "lobu-builder", present in every org) would id-only read
-      // ANOTHER org's identity/soul/skills/MCP-slug and ship it to the worker.
-      // Declared (SDK-embedded) agents are org-agnostic, so they resolve without
-      // an org. When `!orgScopedOk` for a DB-backed agent we deny ALL agent-scoped
-      // reads (fail closed to generic/no-agent access semantics).
-      const tokenOrgId = auth.tokenData.organizationId;
-      // ORG-AWARE declared check: a declared id that ALSO has a real DB row in
-      // the token's org is DB-backed (the DB row wins), so a collision cannot
-      // flip the orgless guard open for a tenant's agent. Falls back to the
-      // synchronous membership check for a store without the org-aware method.
-      const store = this.agentSettingsStore;
-      const isDeclared =
-        !!agentId && store
-          ? store.isDeclaredAgentScoped
-            ? await store.isDeclaredAgentScoped(agentId, tokenOrgId)
-            : (store.isDeclaredAgent?.(agentId) ?? false)
-          : false;
-      const orgScopedOk = !!tokenOrgId || isDeclared;
-
-      // Build instruction context
-      const instructionContext: InstructionContext = {
-        userId,
-        agentId: agentId || "",
-        connectionId: auth.tokenData.connectionId,
-        organizationId: tokenOrgId,
-        // Instruction providers skip their by-id settings read when this is
-        // false (orgless DB-backed agent) and use the generic branch.
-        orgScoped: orgScopedOk,
-        sessionKey: sessionKey || "",
-        workingDirectory: "/workspace",
-        availableProjects: [],
-      };
-
-      // Build settings URL as a short-lived claim link so platform users
-      // can open it without a pre-existing browser session.
-      const CLAIM_TTL_MS = 10 * 60 * 1000; // 10 minutes
-      const claimToken = encrypt(
-        JSON.stringify({
-          userId,
-          platform: platform || "unknown",
-          agentId: agentId || undefined,
-          exp: Date.now() + CLAIM_TTL_MS,
-        })
-      );
-      const settingsUrl = new URL("/connect/claim", baseUrl);
-      settingsUrl.searchParams.set("claim", claimToken);
-      if (agentId) {
-        settingsUrl.searchParams.set("agent", agentId);
-      }
-
-      // Fetch MCP config and session context in parallel
-      const [mcpConfig, contextData] = await Promise.all([
-        this.mcpConfigService.getWorkerConfig({
-          baseUrl,
-          workerToken: auth.token,
-          deploymentName,
-        }),
-        this.instructionService.getSessionContext(
-          platform || "unknown",
-          instructionContext,
-          { settingsUrl: settingsUrl.toString() }
-        ),
-      ]);
-
-      const enrichedMcpStatus = this.enrichMcpStatus(contextData.mcpStatus);
-
-      // Fetch tool lists and instructions for ALL MCPs (unauthenticated ones
-      // will attempt discovery without credentials)
-      const mcpTools: Record<string, McpTool[]> = {};
-      const mcpInstructions: Record<string, string> = {};
-      if (this.mcpProxy && enrichedMcpStatus.length > 0) {
-        const toolResults = await Promise.allSettled(
-          enrichedMcpStatus.map(async (mcp) => {
-            const result = await this.mcpProxy?.fetchToolsForMcp(
-              mcp.id,
-              agentId || userId,
-              auth.tokenData,
-              auth.token
-            );
-            return { mcpId: mcp.id, ...(result || { tools: [] }) };
-          })
-        );
-
-        for (const result of toolResults) {
-          if (result.status === "fulfilled") {
-            if (result.value.tools && result.value.tools.length > 0) {
-              mcpTools[result.value.mcpId] = result.value.tools;
-            }
-            if (result.value.instructions) {
-              mcpInstructions[result.value.mcpId] = result.value.instructions;
-            }
-          } else {
-            logger.error("MCP tool fetch rejected", {
-              reason:
-                result.reason instanceof Error
-                  ? result.reason.message
-                  : String(result.reason),
-            });
-          }
-        }
-      }
-
-      // Enabled skills for worker filesystem sync. The settings read is
-      // org-scoped: it is null for an orgless DB-backed agent (the correct
-      // fail-closed value: NO skill content leaks cross-tenant).
-      const agentSettings =
-        this.agentSettingsStore && agentId && orgScopedOk
-          ? await this.agentSettingsStore.getSettings(agentId, {
-              organizationId: tokenOrgId,
-            })
-          : null;
-      // An Automation run uses version-pinned instructions, so the live library
-      // must not re-enter the turn. Replace both live surfaces with the pinned
-      // snapshot: `skillsConfig` syncs the frozen files, and the compact catalog
-      // tells the agent which of those files this version requires.
-      const automationRun = auth.tokenData.source === AUTOMATION_RUN_SOURCE;
-      let skillsConfig: Array<{ name: string; content: string }> = [];
-      const mcpContext: Record<string, string> = {};
-      if (automationRun) {
-        skillsConfig = await this.automationRunSkillResolver({
-          conversationId,
-          organizationId: tokenOrgId,
-          agentId,
-        });
-      } else if (agentSettings) {
-        const skills = agentSettings.skillsConfig?.skills || [];
-        skillsConfig = skills
-          .filter((s) => s.enabled && s.content)
-          .map((s) => ({ name: s.name, content: s.content! }));
-      }
-
-      const mergedSkillsInstructions = automationRun
-        ? formatAutomationRunSkillInstructions(skillsConfig)
-        : contextData.skillsInstructions || "";
-
-      logger.info(
-        `Session context for ${userId}: ${Object.keys(mcpConfig.mcpServers || {}).length} MCPs, ${contextData.agentLayers.identityMd.length}/${contextData.agentLayers.soulMd.length}/${contextData.agentLayers.userMd.length} chars identity/soul/user, ${contextData.platformInstructions.length} chars platform instructions, ${contextData.networkInstructions.length} chars network instructions, ${mergedSkillsInstructions.length} chars skills instructions, ${enrichedMcpStatus.length} MCP status entries, ${Object.keys(mcpTools).length} MCP tool lists, ${Object.keys(mcpInstructions).length} MCP instructions, ${skillsConfig.length} skills${automationRun ? " (Automation run — pinned snapshot)" : ""}`
-      );
-
-      return c.json({
-        mcpConfig,
-        agentLayers: contextData.agentLayers,
-        platformInstructions: contextData.platformInstructions,
-        networkInstructions: contextData.networkInstructions,
-        skillsInstructions: mergedSkillsInstructions,
-        mcpStatus: enrichedMcpStatus,
-        mcpTools,
-        mcpInstructions,
-        mcpContext,
-        skillsConfig,
-        // The origin an agent can build user-openable Lobu links against.
-        // Deliberately NOT `getRequestBaseUrl(c)`: this endpoint is called by
-        // the worker over the INTERNAL dispatcher address, so the request Host
-        // is a cluster name no user can reach. The configured public origin is
-        // the only value here that is correct off-cluster.
-        webOrigin: toPublicWebOrigin(this.publicGatewayUrl),
-      });
-    } catch (error) {
-      throw routeFailure(c, c.json({ error: "session_context_error" }, 500), error,
-        "Failed to generate session context");
-    }
-  }
-
   private async authenticateWorker(
     c: Context
   ): Promise<{ tokenData: WorkerTokenData; token: string } | null> {
@@ -769,26 +514,5 @@ export class WorkerGateway {
       "Issued refreshed worker token"
     );
     return c.json({ token: refreshed });
-  }
-
-  private getRequestBaseUrl(c: Context): string {
-    const forwardedProto = c.req.header("x-forwarded-proto");
-    const protocolCandidate = Array.isArray(forwardedProto)
-      ? forwardedProto[0]
-      : forwardedProto?.split(",")[0];
-    const protocol = (protocolCandidate || "http").trim();
-    const host = c.req.header("host");
-    if (host) {
-      // Preserve any base path from publicGatewayUrl (e.g. /lobu) when the
-      // gateway is mounted as a sub-app under a prefix path.
-      let basePath = "";
-      try {
-        basePath = new URL(this.publicGatewayUrl).pathname.replace(/\/$/, "");
-      } catch {
-        // publicGatewayUrl may not be a full URL in some configurations.
-      }
-      return `${protocol}://${host}${basePath}`;
-    }
-    return this.publicGatewayUrl;
   }
 }

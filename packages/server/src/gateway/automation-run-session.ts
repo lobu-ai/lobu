@@ -20,13 +20,6 @@
  * so suppressing their skills would only make them dumber. Ordinary chat is
  * excluded for the same reason even when an Automation is listening on the
  * conversation — a human is in that thread and the library is theirs.
- *
- * Why the worker's 5-minute session-context cache needs no isolation key: an
- * Automation run opens its own session (`thread: automation-<runId>`, `forceNew`,
- * see `automations/automation.ts`), and the deployment name hashes the
- * conversation id — so a run's worker process is never the process that also
- * serves that agent's chat. If a future dispatch path ever runs an Automation on
- * a shared conversation, that cache becomes the place this decision leaks.
  */
 
 import type { DbClient } from "../db/client.js";
@@ -68,30 +61,23 @@ export function isHeadlessSource(source: unknown): boolean {
 	return typeof source === "string" && HEADLESS_SOURCES.has(source);
 }
 
-export type AutomationRunSkillResolver = (args: {
+interface AutomationRunScope {
 	conversationId: string;
 	organizationId: string | undefined;
 	agentId: string | undefined;
-}) => Promise<AutomationSkillSnapshot[]>;
+}
 
 /**
- * Resolve the exact version pinned on an Automation run. The org, agent, Automation,
- * and run correlations all come from signed worker-token claims; keep every one
- * in the query so a malformed token can never read another tenant's snapshots.
+ * The pinned instructions and completion requirement of an Automation run. The
+ * org, agent, Automation, and run correlations all come from signed worker-token
+ * claims; keep every one in the query so a malformed token can never read
+ * another tenant's snapshots.
  *
  * Missing or malformed durable state fails closed. Returning an empty list for
  * a missing row would let a skills-only Automation execute without instructions.
  */
-export async function resolveAutomationRunSkills(
-	args: Parameters<AutomationRunSkillResolver>[0],
-	db: DbClient = getDb(),
-): Promise<AutomationSkillSnapshot[]> {
-	return (await resolveAutomationRunContext(args, db)).skills;
-}
-
-/** The pinned instructions and completion requirement of the same durable run. */
 export async function resolveAutomationRunContext(
-	args: Parameters<AutomationRunSkillResolver>[0],
+	args: AutomationRunScope,
 	db: DbClient = getDb(),
 ): Promise<{ skills: AutomationSkillSnapshot[]; requiresWindowCompletion: boolean }> {
 	const intent = parseAutomationRunConversationId(args.conversationId);
@@ -125,17 +111,4 @@ export async function resolveAutomationRunContext(
 		skills: parseAutomationSkillSnapshots(rows[0]?.skills),
 		requiresWindowCompletion: rows[0]?.trigger_execution !== "turn",
 	};
-}
-
-export function formatAutomationRunSkillInstructions(
-	skills: readonly AutomationSkillSnapshot[],
-): string {
-	if (skills.length === 0) return "";
-	return [
-		"## Pinned Automation skills",
-		"",
-		"Read every skill below before performing this Automation's task. These files are frozen to this run's version; do not substitute similarly named skills.",
-		"",
-		...skills.map((skill) => `- \`${skill.name}\`: \`.skills/${skill.name}/SKILL.md\``),
-	].join("\n");
 }

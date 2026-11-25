@@ -809,11 +809,8 @@ export class CoreServices {
 			},
 		});
 
-		// Initialize instruction service (needed by WorkerGateway)
-		this.instructionService = new InstructionService(
-			this.mcpConfigService,
-			this.agentSettingsStore,
-		);
+		// Initialize instruction service (platform identity blocks for agent turns)
+		this.instructionService = new InstructionService();
 		logger.debug("Instruction service initialized");
 
 		// Initialize MCP tool cache and proxy
@@ -830,14 +827,7 @@ export class CoreServices {
 		logger.debug("MCP proxy initialized");
 
 		// Initialize worker gateway
-		this.workerGateway = new WorkerGateway(
-			this.queue,
-			this.config.mcp.publicGatewayUrl,
-			this.mcpConfigService,
-			this.instructionService,
-			this.mcpProxy,
-			this.agentSettingsStore,
-		);
+		this.workerGateway = new WorkerGateway(this.queue);
 		logger.debug("Worker gateway initialized");
 
 		// Initialize all registered modules
