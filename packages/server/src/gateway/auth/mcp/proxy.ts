@@ -2,18 +2,12 @@ import {
 	createLogger,
 	getErrorMessage,
 	type GuardrailRegistry,
-	runGuardrailInstances,
 	type WorkerTokenData,
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { getDb } from "../../../db/client.js";
-import {
-	agentGuardrailPrincipal,
-	resolveGuardrails,
-} from "../../../guardrails/workspace-guardrails.js";
-import { buildGuardrailsByStage } from "../../guardrails/aggregator.js";
-import { recordGuardrailTrip } from "../../guardrails/audit.js";
+import { agentGuardrailPrincipal } from "../../../guardrails/workspace-guardrails.js";
+import { evaluatePreToolGuardrails } from "../../guardrails/pre-tool.js";
 import { parseJsonRpcResponse } from "../../../mcp-proxy/http-response.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { handleProxyRequest } from "./proxy-forward.js";
@@ -320,36 +314,18 @@ export class McpProxy {
 				);
 				return false;
 			}
-			const list = buildGuardrailsByStage(
-				await resolveGuardrails(
-					getDb(),
-					organizationId,
-					agentGuardrailPrincipal(agentId),
-				),
-				this.guardrailRegistry,
+			const tripped = await evaluatePreToolGuardrails({
+				registry: this.guardrailRegistry,
 				organizationId,
-			)["pre-tool"];
-			if (list.length === 0) return false;
-			const outcome = await runGuardrailInstances("pre-tool", list, {
-				agentId,
+				principal: agentGuardrailPrincipal(agentId),
 				userId: tokenData.userId,
+				conversationId: tokenData.conversationId,
 				toolName,
 				arguments: toolArgs,
-				conversationId: tokenData.conversationId,
 			});
-			if (!outcome.tripped) return false;
-			void recordGuardrailTrip({
-				organizationId,
-				agentId,
-				userId: tokenData.userId,
-				conversationId: tokenData.conversationId,
-				stage: "pre-tool",
-				guardrail: outcome.tripped.guardrail,
-				reason: outcome.tripped.reason,
-				metadata: outcome.tripped.metadata,
-			});
+			if (!tripped) return false;
 			logger.info(
-				{ agentId, toolName, guardrail: outcome.tripped.guardrail },
+				{ agentId, toolName, guardrail: tripped.guardrail },
 				"Pre-tool guardrail tripped — blocking tool call with generic policy message",
 			);
 			return true;

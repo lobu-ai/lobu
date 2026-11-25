@@ -9171,7 +9171,7 @@ export type CreateGuardrailData = {
             domains?: Array<string>;
           };
       /**
-       * Who the guardrail applies to: agent subjects only. Defaults to every agent.
+       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (a pre-tool judge or forbidden-tools). Defaults to every agent.
        */
       applies_to?: Array<
         | {
@@ -9471,7 +9471,7 @@ export type ReplaceGuardrailData = {
             domains?: Array<string>;
           };
       /**
-       * Who the guardrail applies to: agent subjects only. Defaults to every agent.
+       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (a pre-tool judge or forbidden-tools). Defaults to every agent.
        */
       applies_to?: Array<
         | {

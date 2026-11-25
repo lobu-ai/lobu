@@ -171,14 +171,26 @@ const forbiddenToolsGuardrail: Guardrail<"pre-tool"> = {
 
 // -- lookup tables ----------------------------------------------------------
 
+/** Every built-in, once per stage it implements. */
+const BUILTIN_GUARDRAILS: readonly Guardrail[] = [
+  secretScanGuardrail,
+  forbiddenToolsGuardrail,
+  createPiiScanGuardrail("input"),
+  createPiiScanGuardrail("output"),
+  createPiiScanGuardrail("pre-tool"),
+];
+
 /**
  * Register all gateway built-ins on the shared registry exactly once at boot.
  * Duplicate registration is a programmer error (the registry throws).
  */
 export function registerBuiltinGuardrails(registry: GuardrailRegistry): void {
-  registry.register(secretScanGuardrail);
-  registry.register(forbiddenToolsGuardrail);
-  registry.register(createPiiScanGuardrail("input"));
-  registry.register(createPiiScanGuardrail("output"));
-  registry.register(createPiiScanGuardrail("pre-tool"));
+  for (const guardrail of BUILTIN_GUARDRAILS) registry.register(guardrail);
+}
+
+/** The stages the built-in `name` runs at; empty for an unknown name. */
+export function builtinGuardrailStages(name: string): GuardrailStage[] {
+  return BUILTIN_GUARDRAILS.filter((guardrail) => guardrail.name === name).map(
+    (guardrail) => guardrail.stage
+  );
 }

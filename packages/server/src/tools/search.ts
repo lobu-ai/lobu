@@ -57,6 +57,7 @@ import { CrossOrgAccessDenied, requireWorkspaceContext, scopeRemedy, workspaceSc
 import { withAccessRemedy } from './access-fix';
 import { recordWorkspaceActivity } from '../sandbox/workspace-activity';
 import { resolveCrossOrgToolContext } from '../sandbox/client-sdk';
+import { enforceInboundPreToolGuardrails } from './inbound-guardrails';
 import { getContent } from './get_content';
 import type { AccountToolContext, ToolContext } from './registry';
 import { markAcceptedInternalFields, withValidatedArgs } from './validate-args';
@@ -2105,6 +2106,13 @@ async function searchImpl(
       suggestion: 'No accessible workspaces are granted to this connection.',
     });
   }
+  // Every workspace this search reads runs its inbound guardrails first; a
+  // block in any of them refuses the call rather than silently narrowing it.
+  await Promise.all(
+    targets.map((target) =>
+      enforceInboundPreToolGuardrails({ ...ctx, organizationId: target.id, memberRole: target.role })
+    )
+  );
   const sharedEmbedding = await sharedRecallEmbedding(args, env);
 
   // A narrowed direct search is still routed through the grant resolver, but

@@ -182,6 +182,13 @@ export interface ToolContext {
    * the reference, like {@link workspaceActivity}.
    */
   deviceWaits?: DeviceWaitActivity;
+  /**
+   * The directly invoked tool call, for inbound pre-tool guardrails
+   * (`tools/inbound-guardrails.ts`). `executeTool` creates one per invocation;
+   * every context copy shares the reference, so a nested `client.org(x)` is
+   * checked against the outer call and each workspace is checked once.
+   */
+  inboundToolCall?: InboundToolCall;
   /** True only for an MCP session that negotiated the standard Apps UI extension. */
   mcpAppsSupported?: boolean | null;
   /**
@@ -285,6 +292,13 @@ export type WorkspaceActivity = Map<string, Set<string>>;
 
 export type DeviceWaitPhase = 'waiting for claim' | 'executing';
 export type DeviceWaitActivity = Map<number, DeviceWaitPhase>;
+
+export interface InboundToolCall {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  /** Guardrail checks by organization id; a check runs once per workspace. */
+  checkedWorkspaces: Map<string, Promise<void>>;
+}
 
 /** Account dispatch may have no execution workspace; leaf handlers remain workspace-bound. */
 export type AccountToolContext = Omit<ToolContext, 'organizationId'> & { organizationId: string | null };

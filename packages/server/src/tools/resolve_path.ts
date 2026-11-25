@@ -37,6 +37,7 @@ import {
 } from './access-control';
 import { withAccessRemedy } from './access-fix';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
+import { enforceInboundPreToolGuardrails } from './inbound-guardrails';
 import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
 
@@ -419,6 +420,7 @@ async function _resolvePath(
   }
 
   const workspaceCtx = requireWorkspaceContext(resolvedCtx);
+  await enforceInboundPreToolGuardrails(workspaceCtx);
   const roleInResolvedWorkspace = memberReadRole(workspaceCtx);
   // Workspace-identity audit + template events: owner/admin of THIS workspace
   // (or trusted system) only.

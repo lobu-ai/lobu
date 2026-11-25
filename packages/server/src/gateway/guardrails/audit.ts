@@ -28,7 +28,10 @@ export async function flushPendingGuardrailAudits(): Promise<void> {
 
 interface RecordGuardrailTripParams {
   organizationId: string | undefined;
-  agentId: string;
+  /** The agent whose call tripped; null when a connected app's call did. */
+  agentId: string | null;
+  /** The verified app key (`ToolContext.appPrincipalId`) whose call tripped. */
+  appId?: string | null;
   userId?: string;
   conversationId?: string;
   stage: GuardrailStage;
@@ -67,6 +70,7 @@ async function doRecordGuardrailTrip(
     logger.error(
       {
         agentId: params.agentId,
+        appId: params.appId ?? null,
         guardrail: params.guardrail,
         stage: params.stage,
         reason: params.reason,
@@ -76,7 +80,7 @@ async function doRecordGuardrailTrip(
     return;
   }
 
-  const originId = `guardrail_trip_${params.stage}_${params.guardrail}_${params.agentId}_${Date.now()}`;
+  const originId = `guardrail_trip_${params.stage}_${params.guardrail}_${params.agentId ?? params.appId}_${Date.now()}`;
 
   try {
     await insertEvent({
@@ -91,6 +95,7 @@ async function doRecordGuardrailTrip(
         stage: params.stage,
         reason: params.reason ?? null,
         agent_id: params.agentId,
+        ...(params.appId ? { app_id: params.appId } : {}),
         user_id: params.userId ?? null,
         conversation_id: params.conversationId ?? null,
         ...(params.metadata !== undefined

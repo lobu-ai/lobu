@@ -1,3 +1,4 @@
+import { enforceInboundPreToolGuardrails } from '../../../inbound-guardrails';
 import type { ToolContext } from '../../../registry';
 import { withFailureCode } from '../../../../utils/errors';
 import { joinPublicOrganization } from '../../../../workspace/join-public';
@@ -47,6 +48,16 @@ export async function handleConnectManaged(
 		}, 'NOT_FOUND');
 	}
 
+	const managedCtx: ToolContext = {
+		...ctx,
+		organizationId: membership.organizationId,
+		memberRole: membership.role,
+		scopedToOrg: true,
+		allowCrossOrg: false,
+		grantedOrganizationIds: [membership.organizationId],
+		directSearchFederation: false,
+	};
+	await enforceInboundPreToolGuardrails(managedCtx);
 	return handleRequiredManagedConnect(
 		{
 			action: 'connect',
@@ -55,14 +66,6 @@ export async function handleConnectManaged(
 			...(args.slug ? { slug: args.slug } : {}),
 			...(args.config ? { config: args.config } : {}),
 		},
-		{
-			...ctx,
-			organizationId: membership.organizationId,
-			memberRole: membership.role,
-			scopedToOrg: true,
-			allowCrossOrg: false,
-			grantedOrganizationIds: [membership.organizationId],
-			directSearchFederation: false,
-		},
+		managedCtx,
 	);
 }
