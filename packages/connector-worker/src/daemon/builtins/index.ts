@@ -1,9 +1,16 @@
-import type { ToolErrorCode } from '@lobu/core/connector-query-errors';
+import { classifyToolError, type ToolErrorCode } from '@lobu/core/connector-query-errors';
 import { monitorActionRun } from '../action-monitor.js';
 import type { ExecutorClient, PollResponse } from '../client.js';
 import { log } from '../log.js';
 import { completeActionOnce } from '../terminal-delivery.js';
-import { ShellInputError, type ShellPlatform, type ShellRunOutput, runShellBuiltin } from './os-shell.js';
+import {
+  SHELL_DETACHED_WORK_HINT,
+  ShellInputError,
+  type ShellPlatform,
+  type ShellRunOutput,
+  runShellBuiltin,
+  shellTimeoutMs,
+} from './os-shell.js';
 
 export type DaemonBuiltinErrorCode =
   | 'invalid_operation_input'
@@ -24,18 +31,22 @@ export type DaemonBuiltinResult =
 /**
  * The typed cause of a failed shell run, from its exit structure. A command
  * that ran and exited non-zero was refused by its target; one that ran out of
- * its budget timed out. A spawn fault or a signal death is the host's, and
- * stays unclassified.
+ * its budget timed out, which the shared classifier maps exactly as it does
+ * for every other device action. A spawn fault or a signal death is the
+ * host's, and stays unclassified.
  */
 function shellFailureCode(output: ShellRunOutput): ToolErrorCode | undefined {
-  if (output.timed_out) return 'UPSTREAM_TIMEOUT';
+  if (output.timed_out) return classifyToolError({ exitReason: 'timeout' });
   if (output.process_error || output.exit_signal) return undefined;
   return output.exit_code !== 0 ? 'ACTION_FAILED' : undefined;
 }
 
-function describeShellFailure(output: ShellRunOutput): string {
+function describeShellFailure(output: ShellRunOutput, timeoutMs: number): string {
   if (output.timed_out) {
-    return `Shell command timed out after ${output.duration_ms}ms`;
+    // Name the budget the caller set. The wall time also covers the TERM
+    // grace before the process group is killed, so reporting it alone reads
+    // as a budget a few seconds larger than the one requested.
+    return `Shell command timed out after ${timeoutMs}ms (stopped at ${output.duration_ms}ms, including termination grace). ${SHELL_DETACHED_WORK_HINT}`;
   }
   if (output.process_error) {
     const code = output.process_error_code
@@ -62,7 +73,7 @@ function describeShellFailure(output: ShellRunOutput): string {
   // exits 0, so falling through would report "exited with code 0" as the
   // reason it failed, the silent loss #3629 exists to remove.
   if (output.reaped_descendants) {
-    return `Shell command exited with code ${output.exit_code} but left background processes running in its process group; they were killed when the command returned. A command's background work does not outlive the call -- hand a durable process to a host service manager instead.`;
+    return `Shell command exited with code ${output.exit_code} but left background processes running in its process group; they were killed when the command returned. A command's background work does not outlive the call. ${SHELL_DETACHED_WORK_HINT}`;
   }
   return `Shell command exited with code ${output.exit_code}`;
 }
@@ -132,7 +143,7 @@ export async function executeDaemonBuiltin(params: {
       return {
         ok: false,
         code: 'operation_execution_failed',
-        error: describeShellFailure(output),
+        error: describeShellFailure(output, shellTimeoutMs(params.input.timeout_ms)),
         output: { ...output },
         ...(errorCode ? { errorCode } : {}),
       };

@@ -26,7 +26,8 @@
  * report exit 0 while the poller it had just launched was being killed, so the
  * loss surfaced as an unrelated failure much later. A run that leaves
  * background work now reports `reaped_descendants` and fails. Callers that
- * need a durable process hand it to a host service manager; this contract
+ * need a durable process start it in a new session ({@link
+ * SHELL_DETACH_PREFIX}) or hand it to a host service manager; this contract
  * deliberately offers no detached-lifetime primitive.
  */
 import { existsSync } from 'node:fs';
@@ -96,6 +97,15 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 // for 3s TERM grace, up to 5s reaping, up to 15s terminal delivery, and
 // bounded network/server grace.
 const MAX_TIMEOUT_MS = 150_000;
+/**
+ * The one way a command starts work that outlives its call: enter a new
+ * session, then fork, so the call returns only after the work has left the
+ * run's process group. `nohup cmd &` stays in the group and is killed, and a
+ * backgrounded `setsid cmd &` races the cleanup. Perl ships on macOS, which
+ * has no `setsid` binary, and on common Linux hosts.
+ */
+export const SHELL_DETACH_PREFIX = `perl -MPOSIX -e 'setsid or die "setsid: $!"; fork and exit; exec @ARGV'`;
+export const SHELL_DETACHED_WORK_HINT = `Work longer than ${MAX_TIMEOUT_MS}ms must run outside the call: start it with \`${SHELL_DETACH_PREFIX} <command> > <log> 2>&1 < /dev/null\`, then read <log> with short commands.`;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const OUTPUT_DRAIN_GRACE_MS = 2_000;
 const TRUNCATED_MARKER = '\n... (output truncated)';
@@ -106,7 +116,8 @@ function appendCapped(current: string, chunk: string): string {
   return Buffer.from(next, 'utf8').subarray(0, MAX_OUTPUT_BYTES).toString('utf8') + TRUNCATED_MARKER;
 }
 
-function readTimeout(value: unknown): number {
+/** The command budget a run asked for, or the default when it named none. */
+export function shellTimeoutMs(value: unknown): number {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(value) || Number(value) < 100 || Number(value) > MAX_TIMEOUT_MS) {
     throw new ShellInputError(`timeout_ms must be an integer between 100 and ${MAX_TIMEOUT_MS}`);
@@ -157,7 +168,7 @@ export async function runShellBuiltin(
   if (!isAbsolute(cwd) || !existsSync(cwd)) {
     throw new ShellInputError(`cwd must be an existing absolute path (got '${cwd}')`);
   }
-  const timeoutMs = readTimeout(input.timeout_ms);
+  const timeoutMs = shellTimeoutMs(input.timeout_ms);
   const stdin = input.stdin;
   if (stdin !== undefined && typeof stdin !== 'string')
     throw new ShellInputError('stdin must be a string');
