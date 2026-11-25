@@ -25,7 +25,14 @@ function adapter(fetcher: (url: string, init?: any) => Promise<any>) {
   return { dom, api: (dom.window as any).__lobuLinkedInInboxV1 };
 }
 
-function flight(text = "Alex reacted to your post", age = "12h") {
+function flight(
+  text = "Alex reacted to your post",
+  age = "12h",
+  headlineProps: Record<string, unknown> = {
+    componentkey: "notification-card-headline_random",
+    children: "$2",
+  },
+) {
   const card = [
     "$",
     "div",
@@ -39,12 +46,7 @@ function flight(text = "Alex reacted to your post", age = "12h") {
         },
       },
       children: [
-        [
-          "$",
-          "p",
-          null,
-          { componentkey: "notification-card-headline_random", children: "$2" },
-        ],
+        ["$", "p", null, headlineProps],
         ["$", "p", null, { textProps: { children: [age] } }],
       ],
       triggers: [
@@ -950,6 +952,53 @@ describe("LinkedIn source adapter", () => {
       const result = await api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications", limit: 10 });
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0].text).toBe("Alex reacted to your post");
+      expect((dom.window as any).unexpectedExecution).toBeUndefined();
+    } finally {
+      dom.window.close();
+    }
+  });
+
+  test.each(["aria-labelledby", "aria-label"])("reads ordered notification chunks with a headline identified by %s", async (attribute) => {
+    const headline = `Alex's 👋 post says "hello" \\ <3`;
+    const headlineElement = ["$", "p", null, { textProps: { children: "$2" } }];
+    const stream = flight(headline, "12h", {
+      children: [
+        ["$", "div", null, {
+          className: "synthetic-card",
+          [attribute]: attribute === "aria-labelledby" ? "synthetic-headline" : headline,
+          children: attribute === "aria-labelledby" ? null : headlineElement,
+        }],
+        ["$", "p", null, { className: "unrelated", id: "other", children: "Unrelated text" }],
+        ...(attribute === "aria-labelledby"
+          ? [["$", "p", null, { className: "title", id: "synthetic-headline", children: "$2" }]]
+          : []),
+      ],
+    });
+    const split = stream.lastIndexOf(headline) + 5;
+    const chunkScripts = [stream.slice(0, split), stream.slice(split)].map((chunk) => {
+      const literal = JSON.stringify(chunk)
+        .slice(1, -1)
+        .replace(/\\"/g, '"')
+        .replace(/'/g, "\\'")
+        .replace(/</g, "\\x3c");
+      return `<script>window.__como_rehydration__.push('${literal}');</script>`;
+    });
+    let extraScript = "";
+    const { dom, api } = adapter(async () => ({
+      ok: true,
+      json: async () => ({
+        miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
+      }),
+      text: async () =>
+        `<script>window.__como_rehydration__ = [];</script>${chunkScripts.join("")}${extraScript}`,
+    }));
+    const read = () => api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
+    try {
+      const result = await read();
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0].text).toBe(headline);
+      extraScript = "<script>window.__como_rehydration__.push(globalThis.unexpectedExecution = true);</script>";
+      await expect(read()).rejects.toThrow("Invalid notification stream");
       expect((dom.window as any).unexpectedExecution).toBeUndefined();
     } finally {
       dom.window.close();

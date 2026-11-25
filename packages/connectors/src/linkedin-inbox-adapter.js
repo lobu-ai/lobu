@@ -242,6 +242,9 @@ export function linkedInInboxProgram() {
       const card = resolve(raw[0][1]);
       let id = null;
       let headline = "";
+      const accessibleHeadlines = new Set();
+      const headlineLabels = new Set();
+      const textById = new Map();
       let url = null;
       let age = null;
       walk(card, (node) => {
@@ -260,6 +263,23 @@ export function linkedInInboxProgram() {
         ) {
           headline ||= clean(text(props.children));
         }
+        if (typeof node.id === "string") {
+          const value = clean(text(node.children));
+          if (value) textById.set(node.id, value);
+        }
+        // The card wrapper labels the headline directly or references
+        // another element in the card. Buttons also have unrelated labels.
+        if (typeof node.className === "string" && Object.keys(node).length === 3) {
+          const labelledBy = node["aria-labelledby"];
+          if (typeof labelledBy === "string") headlineLabels.add(labelledBy);
+          const label = clean(node["aria-label"]);
+          if (label) {
+            walk(node.children, (child) => {
+              if (label === clean(text(child.textProps?.children)))
+                accessibleHeadlines.add(label);
+            });
+          }
+        }
         const ageText = clean(text(node.textProps?.children));
         if (/^\d+\s*(m|h|d|w|mo|yr)$/.test(ageText)) age ||= ageText;
         if (
@@ -268,6 +288,13 @@ export function linkedInInboxProgram() {
         )
           url ||= node.url;
       });
+      if (!headline) {
+        for (const label of headlineLabels) {
+          const value = textById.get(label);
+          if (value) accessibleHeadlines.add(value);
+        }
+        if (accessibleHeadlines.size === 1) [headline] = accessibleHeadlines;
+      }
       if (!id || !headline)
         fail("Notification card identity or headline is unavailable");
       // Unread state, relative age, and per-render tracking IDs are not content changes.
@@ -397,29 +424,35 @@ export function linkedInInboxProgram() {
       ).text();
     } else {
       const html = await (await request("/notifications/")).text();
-      // Extract JSON as text; the live page strips scripts during DOM parsing.
-      // This is not an HTML sanitizer: nothing is rendered or
-      // executed. Honor quoted attributes and whitespace on closing tags.
-      const assignment = [
-        ...html.matchAll(
-          /<script\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/script\b[^>]*>/gi
-        ),
-      ]
-        .map((match) => match[1].trimStart())
-        .find((value) => value.startsWith("window.__como_rehydration__"));
-      if (!assignment)
+      // Read the inline payload in document order as inert text. LinkedIn
+      // streams single-quoted literals after the initial JSON array.
+      let chunks = null;
+      for (const [, source] of html.matchAll(
+        /<script\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/script\b[^>]*>/gi
+      )) {
+        const script = source.trim();
+        if (!script.startsWith("window.__como_rehydration__")) continue;
+        const assignment = /^window\.__como_rehydration__\s*=\s*([\s\S]*?);?$/.exec(script);
+        if (!chunks && assignment) {
+          const initial = JSON.parse(assignment[1]);
+          if (!Array.isArray(initial) || initial.some((chunk) => typeof chunk !== "string"))
+            fail("Invalid notification stream");
+          chunks = initial;
+          continue;
+        }
+        const push = /^window\.__como_rehydration__\.push\('((?:[^'\\]|\\[\s\S])*)'\);?$/.exec(script);
+        if (!chunks || !push) fail("Invalid notification stream");
+        // Convert the provider's single-quoted and hex escapes to JSON escapes.
+        const literal = push[1].replace(/\\(?:x[0-9a-f]{2}|[\s\S])|"/gi, (token) => {
+          if (token === "\\'") return "'";
+          if (token === '"') return '\\"';
+          if (token.startsWith("\\x")) return "\\u00" + token.slice(2);
+          return token;
+        });
+        chunks.push(JSON.parse('"' + literal + '"'));
+      }
+      if (!chunks)
         fail("Notification source is unavailable; check sign-in");
-      const chunks = JSON.parse(
-        assignment
-          .slice(assignment.indexOf("=") + 1)
-          .trim()
-          .replace(/;$/, "")
-      );
-      if (
-        !Array.isArray(chunks) ||
-        chunks.some((chunk) => typeof chunk !== "string")
-      )
-        fail("Invalid notification stream");
       stream = chunks.join("");
     }
     return parseNotifications(stream, !!payload);
