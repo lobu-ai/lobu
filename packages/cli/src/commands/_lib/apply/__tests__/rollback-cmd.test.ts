@@ -175,6 +175,7 @@ describe("rollback pause ordering", () => {
           connector_versions: { "zz.probe": "1.0.0" },
         },
       })),
+      getLatestDeployment: mock(async () => null),
       listConnectors: mock(async () => [
         { key: "zz.probe", installed: true, version: "2.0.0" },
       ]),

@@ -7,6 +7,7 @@ import {
   type DesiredAgent,
   type DesiredState,
   extractDeclaredConnectorKey,
+  recordSkill,
 } from "../desired-state.js";
 import {
   type Baseline,
@@ -2356,7 +2357,7 @@ describe("apply diff — workspace skills", () => {
     recorded: true,
     attribution: { entityTypes: [], relationshipTypes: [], automations: [] },
     owned: new Set(),
-    ...(skills ? { skills } : {}),
+    ...(skills ? { skills: skills.map(recordSkill) } : {}),
   });
   const skillRows = (plan: DiffPlan) =>
     plan.rows.filter((row) => row.kind === "skill");

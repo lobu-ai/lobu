@@ -15,7 +15,11 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deepRedactSecrets, REDACTED_SENTINEL } from "@lobu/core";
-import type { DesiredSkill, DesiredState } from "./desired-state.js";
+import {
+  type DesiredState,
+  type RecordedSkill,
+  recordSkill,
+} from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
 import {
   canonical,
@@ -68,6 +72,14 @@ export function redactDesiredState(
 ): Record<string, unknown> {
   return deepRedactSecrets({
     ...state,
+    // A rollback re-records a snapshot whose skills are already digests.
+    ...(state.skills
+      ? {
+          skills: state.skills.map((skill) =>
+            typeof skill.content === "string" ? recordSkill(skill) : skill
+          ),
+        }
+      : {}),
     agents: state.agents.map((agent) => ({
       ...agent,
       providerKeys: agent.providerKeys.map((k) => ({
@@ -133,7 +145,7 @@ export interface DeploymentManifest {
    * apart from `attribution`: skills follow the agents that declare them, so
    * an `--only agents` run records them even when no memory attribution exists.
    */
-  skills?: DesiredSkill[];
+  skills?: RecordedSkill[];
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
    * `automation:b7-…`) this config actually applied — the delete-eligible set.
@@ -201,9 +213,9 @@ export function loadBaselineFromManifest(
 /** The recorded library skills; undefined before apply managed skills. */
 export function loadSkillsBaseline(
   manifest: { skills?: unknown[] } | null | undefined
-): DesiredSkill[] | undefined {
+): RecordedSkill[] | undefined {
   return Array.isArray(manifest?.skills)
-    ? (manifest.skills as DesiredSkill[])
+    ? (manifest.skills as RecordedSkill[])
     : undefined;
 }
 
@@ -213,7 +225,7 @@ export function loadSkillsBaseline(
  */
 export function toBaseline(
   record: BaselineRecord | null,
-  skills?: DesiredSkill[]
+  skills?: RecordedSkill[]
 ): Baseline {
   const recordedSkills = skills ? { skills } : {};
   if (!record) {
@@ -388,7 +400,7 @@ export function buildDeploymentManifest(
   state: DesiredState,
   connectorVersions: Record<string, string>,
   baseline?: BaselineRecord,
-  skills?: DesiredSkill[]
+  skills?: RecordedSkill[]
 ): DeploymentManifest {
   const redacted = redactDesiredState(state);
   const connectors = (redacted.connectors ?? {}) as Record<string, unknown>;

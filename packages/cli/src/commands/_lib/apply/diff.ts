@@ -26,20 +26,22 @@ import type {
   UpdateConnectionPayload,
   UpdateFeedPayload,
 } from "./client.js";
-import type {
-  DesiredAgent,
-  DesiredAuthProfile,
-  DesiredAutomation,
-  DesiredAutomationTrigger,
-  DesiredConnection,
-  DesiredConnectorDefinition,
-  DesiredEntityType,
-  DesiredFeed,
-  DesiredOrgProvider,
-  DesiredRelationshipType,
-  DesiredSkill,
-  DesiredState,
-  DesiredView,
+import {
+  type DesiredAgent,
+  type DesiredAuthProfile,
+  type DesiredAutomation,
+  type DesiredAutomationTrigger,
+  type DesiredConnection,
+  type DesiredConnectorDefinition,
+  type DesiredEntityType,
+  type DesiredFeed,
+  type DesiredOrgProvider,
+  type DesiredRelationshipType,
+  type DesiredSkill,
+  type DesiredState,
+  type DesiredView,
+  type RecordedSkill,
+  recordSkill,
 } from "./desired-state.js";
 import {
   type AutomationSource,
@@ -277,7 +279,7 @@ export interface Baseline {
    * independently of `recorded`. Absent before apply managed skills: two-way
    * convergence.
    */
-  skills?: DesiredSkill[];
+  skills?: RecordedSkill[];
 }
 
 export const ownedKey = (kind: string, id: number | string | undefined) =>
@@ -2189,7 +2191,7 @@ function skillWrite(
 function diffSkill(
   desired: DesiredSkill,
   remote: WorkspaceSkill | undefined,
-  applied: DesiredSkill[] | undefined,
+  applied: RecordedSkill[] | undefined,
   configAgents: ReadonlySet<string>
 ): { row: SkillDiffRow; blocking: BlockingDriftRow[] } {
   if (!remote) {
@@ -2206,13 +2208,23 @@ function diffSkill(
   }
   const current = projectSkill(remote, configAgents);
   const attribution = applied?.find((skill) => skill.name === desired.name);
-  const triples = SKILL_FIELDS.map((field) => ({
-    field,
-    desired: desired[field],
-    remote: current[field],
-    attribution: applied === undefined ? current[field] : attribution?.[field],
-  }));
-  const { changedFields, blockingFields } = classifyThreeWay(triples);
+  // The record holds the body as a digest, so bodies compare as digests.
+  const [want, have] = [recordSkill(desired), recordSkill(current)];
+  const triples = SKILL_FIELDS.map((field) => {
+    const key = field === "content" ? "content_sha256" : field;
+    return {
+      field,
+      desired: want[key],
+      remote: have[key],
+      attribution: applied === undefined ? have[key] : attribution?.[key],
+    };
+  });
+  const { changedFields, blockingFields: moved } = classifyThreeWay(triples);
+  const blockingFields = moved.map((b) =>
+    b.field === "content"
+      ? { ...b, remoteChange: current.content, desiredChange: desired.content }
+      : b
+  );
   if (blockingFields.length > 0) {
     return {
       row: { kind: "skill", verb: "noop", id: desired.name, desired, remote },
@@ -2254,7 +2266,7 @@ function diffSkill(
  */
 function diffUndeclaredSkill(
   remote: WorkspaceSkill,
-  applied: DesiredSkill[] | undefined,
+  applied: RecordedSkill[] | undefined,
   configAgents: ReadonlySet<string>
 ): { row?: SkillDiffRow; blocking: BlockingDriftRow[] } {
   const current = projectSkill(remote, configAgents);

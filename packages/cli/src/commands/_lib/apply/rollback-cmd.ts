@@ -39,6 +39,7 @@ import {
   buildDeploymentManifest,
   collectGitInfo,
   computeManifestHash,
+  loadSkillsBaseline,
   mintApplyId,
 } from "./deployment.js";
 import type { DesiredState } from "./desired-state.js";
@@ -126,6 +127,15 @@ export function sanitizeSnapshotState(
     }
   );
 
+  // A deployment records each library skill's body only as its digest, so a
+  // snapshot has no body to restore: the library stays as it is.
+  if (state.skills !== undefined) {
+    state.skills = undefined;
+    notes.push(
+      "library skills left at current values (a deployment records only each body's digest; re-apply that deployment's config to restore them)"
+    );
+  }
+
   for (const agent of state.agents) {
     // Provider keys are write-only pushes; a snapshot has no values to push.
     agent.providerKeys = [];
@@ -183,6 +193,11 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
   }
 
   const manifest = deployment.manifest;
+  // Rollback leaves library skills alone, so the latest record of them still
+  // holds once this run is recorded.
+  const skillsRecord = loadSkillsBaseline(
+    (await client.getLatestDeployment())?.manifest
+  );
   printText(
     chalk.bold(
       `\nRolling back to deployment ${opts.applyId}${deployment.createdAt ? ` (${deployment.createdAt})` : ""}`
@@ -372,7 +387,7 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
         targetState,
         connectorPins,
         baselineRecord,
-        rollbackErr ? undefined : sanitized.state.skills
+        skillsRecord
       ),
     });
   } catch (err) {

@@ -34,10 +34,11 @@ import {
 import {
   type DesiredAutomation,
   type DesiredConnectorDefinition,
-  type DesiredSkill,
   type DesiredState,
   loadDesiredStateFromConfig,
   normalizeConnectionConfigScope,
+  type RecordedSkill,
+  recordSkill,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
@@ -1768,10 +1769,10 @@ async function applyProject(
    */
   const recordableSkills = (
     snapshot: RemoteSnapshot
-  ): DesiredSkill[] | undefined => {
+  ): RecordedSkill[] | undefined => {
     if (opts.only === "memory") return skillsBaseline;
     if (snapshot.skills !== undefined && state.skills !== undefined)
-      return state.skills;
+      return state.skills.map(recordSkill);
     return opts.only === "agents" ? skillsBaseline : undefined;
   };
   /**

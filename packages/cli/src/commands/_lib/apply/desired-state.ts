@@ -1,4 +1,5 @@
 import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -316,6 +317,26 @@ export interface DesiredSkill {
   content: string;
   /** Declaring agent ids, sorted. */
   agents: string[];
+}
+
+/**
+ * A library skill as a deployment records it. Deployment events are readable
+ * by principals the `skill_config` read policy may deny, so the body is kept
+ * only as its digest: enough to tell whether the library moved since.
+ */
+export interface RecordedSkill {
+  name: string;
+  description: string;
+  content_sha256: string;
+  agents: string[];
+}
+
+export function recordSkill(skill: DesiredSkill): RecordedSkill {
+  const { content, ...rest } = skill;
+  return {
+    ...rest,
+    content_sha256: createHash("sha256").update(content).digest("hex"),
+  };
 }
 
 export interface DesiredAgent {

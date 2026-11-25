@@ -421,5 +421,22 @@ describe("manage_skills", () => {
 		expect(card?.interaction_input).toMatchObject({ write: { skill: { content: `${secret} Revised.`, enabled: false } } });
 		expect(JSON.stringify(await executeTool("get_approval", { run_id: pendingUpdate.run_id }, TEST_ENV, ownerCtx)))
 			.toContain(`${secret} Revised.`);
+
+		// A write answers with library state, so a write grant does not lift
+		// the read rule: an archive would return the body it removed.
+		const archiver = await createTestAgent({ organizationId: orgId, ownerUserId: ownerCtx.userId, agentId: "skills-blind-archiver" });
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "skill_config",
+			principalKind: "agent",
+			principalId: archiver.agentId,
+			effects: { read: "deny", delete: "auto" },
+		});
+		const unseen = (await put(ownerCtx, { expected_revision: 0, skill: body("unseen", { content: secret }) })) as SkillResult;
+		await expect(executeTool("manage_skills", {
+			action: "archive", id: unseen.skill.id, expected_revision: 1,
+		}, TEST_ENV, ctxFor(orgId, ownerCtx.userId, "owner", archiver.agentId, WRITE_SCOPES)))
+			.rejects.toMatchObject({ httpStatus: 403 });
+		expect(await executeTool("manage_skills", { action: "get", name: "unseen" }, TEST_ENV, ownerCtx))
+			.toMatchObject({ skill: { archived: false } });
 	});
 });

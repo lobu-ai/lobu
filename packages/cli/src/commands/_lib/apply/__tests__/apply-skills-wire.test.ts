@@ -270,25 +270,47 @@ describe("apply agent skills over the wire", () => {
     expect(store.skills).toMatchObject([{ content: "v1" }]);
   });
 
-  test("preserves a human skill edit made after rollback on the next apply", async () => {
+  test("rollback leaves library skills alone and keeps their record, so a later human edit still blocks", async () => {
     const store: Store = { skills: [] };
     const dir = mkProject("v1");
     await runApply(dir, makeFetch(store).fetchStub);
     store.rollbackManifest = structuredClone(store.latestManifest);
     await runApply(mkProject("v2"), makeFetch(store).fetchStub);
 
+    const rollback = makeFetch(store);
     await rollbackCommand({
       applyId: "apl_11111111-2222-3333-4444-555555555555",
       cwd: dir,
       yes: true,
       url: "https://app.lobu.ai",
       org: "acme",
-      fetchImpl: makeFetch(store).fetchStub,
+      fetchImpl: rollback.fetchStub,
     });
-    expect(store.skills).toMatchObject([{ content: "v1", revision: 3 }]);
+    expect(rollback.calls).toContainEqual(
+      expect.objectContaining({
+        url: "https://app.lobu.ai/api/acme/deployments",
+        body: expect.objectContaining({ status: "succeeded" }),
+      })
+    );
+    // A deployment holds only each body's digest, so there is nothing to restore.
+    expect(store.skills).toMatchObject([{ content: "v2", revision: 2 }]);
+    const manifest = store.latestManifest as {
+      skills?: Array<Record<string, unknown>>;
+      state?: { skills?: Array<Record<string, unknown>> };
+    };
+    for (const recorded of [
+      manifest.skills?.[0],
+      manifest.state?.skills?.[0],
+    ]) {
+      expect(recorded).toMatchObject({
+        name: "ops",
+        content_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+      expect(recorded).not.toHaveProperty("content");
+    }
 
     const skill = store.skills[0];
-    if (!skill) throw new Error("expected the restored skill");
+    if (!skill) throw new Error("expected the library skill");
     skill.content = "Edited after rollback.";
     skill.revision += 1;
 
@@ -298,7 +320,7 @@ describe("apply agent skills over the wire", () => {
     );
     expect(skillActions(stale.calls)).not.toContain("put");
     expect(store.skills).toMatchObject([
-      { content: "Edited after rollback.", revision: 4 },
+      { content: "Edited after rollback.", revision: 3 },
     ]);
   });
 

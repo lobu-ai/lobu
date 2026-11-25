@@ -38,7 +38,11 @@ import {
   resolveStoredActingPrincipal,
   resolveWritePolicyDecision,
 } from '../../authz/entity-policy';
-import { assertSkillConfigReadAllowed, skillConfigReadAllowed } from '../../authz/skill-config-access';
+import {
+  assertSkillConfigReadAllowed,
+  skillConfigReadAllowed,
+  skillConfigReadAllowedFor,
+} from '../../authz/skill-config-access';
 import { listCatalogEntries } from '../../catalog/load';
 import { createDbClientFromEnv, type DbClient, getDb, pgBigintArray } from '../../db/client';
 import type { Env } from '../../index';
@@ -192,7 +196,6 @@ async function applyAndAudit(
  * or is refused.
  */
 async function governSkillWrite(args: WriteArgs, ctx: ToolContext): Promise<ManageSkillsResult> {
-  const write = await prepareSkillWrite(args);
   const sql = getDb();
   const actor = await resolveActingPrincipal(sql, {
     organizationId: ctx.organizationId,
@@ -201,6 +204,13 @@ async function governSkillWrite(args: WriteArgs, ctx: ToolContext): Promise<Mana
     appId: ctx.appPrincipalId,
     sessionAutomationId: ctx.actingAutomationId ?? null,
   });
+  // A write answers with library state (an archive returns the stored body, a
+  // conflict names the current revision or a taken name), so the read rule
+  // gates writes too.
+  if (!(await skillConfigReadAllowedFor(ctx.organizationId, actor))) {
+    throw new ToolUserError('Policy denies reading workspace skills for this principal.', 403);
+  }
+  const write = await prepareSkillWrite(args);
   const policyAction = POLICY_ACTION[write.op];
   const decision =
     actor.kind === 'user'
