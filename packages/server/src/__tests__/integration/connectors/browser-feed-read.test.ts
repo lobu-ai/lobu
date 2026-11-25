@@ -607,7 +607,7 @@ describe('compiled browser source reads', () => {
     const failure = (await reading).results[0];
     expect(failure).toMatchObject({
       ok: false, error_code: 'UPSTREAM_TIMEOUT', retryable: true,
-      error: expect.stringContaining('Check the paired Chrome connection and inspect its tabs'),
+      error: expect.stringMatching(/\blist_tabs\b/),
     });
     expect(failure.interruption).toBeUndefined();
     expect(failure.rows).toBeUndefined();
