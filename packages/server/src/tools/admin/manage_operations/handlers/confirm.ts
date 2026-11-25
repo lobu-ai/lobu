@@ -6,6 +6,7 @@ import {
 	POLICY_CHECK_METADATA_KEY,
 	connectorPolicyNoteSuffix,
 	explainConnectorPolicy,
+	requesterPolicyExplanation,
 } from "../../../../authz/connector-policy";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
 import { resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
@@ -149,7 +150,7 @@ export async function handleConfirm(
 			await settle("rejected", why);
 			return withFailureCode({
 				error: why,
-				...(policy ? { policy: explainConnectorPolicy(policy, principal) } : {}),
+				...(policy ? { policy: requesterPolicyExplanation(explainConnectorPolicy(policy, principal)) } : {}),
 			}, "PERMISSION");
 		}
 		if (policy.effect === "approval" || deviceAccess === "ask_owner") {
@@ -158,7 +159,7 @@ export async function handleConfirm(
 			return withFailureCode({
 				error: `${why} Run ${run.id} was withdrawn; call operations.execute again to request approval.`,
 				reason: "policy_changed" as const,
-				policy: explainConnectorPolicy(policy, principal, deviceAccess === "ask_owner"),
+				policy: requesterPolicyExplanation(explainConnectorPolicy(policy, principal, deviceAccess === "ask_owner")),
 			}, "PRECONDITION_FAILED");
 		}
 

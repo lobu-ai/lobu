@@ -48,6 +48,7 @@ export function serializeEntityApprovalPolicy(policy: EntityApprovalPolicy) {
 		kind: policy.kind,
 		note: policy.note,
 		...(policy.audience === null ? {} : { audience: policy.audience }),
+		...(policy.condition === null ? {} : { when: policy.condition }),
 		approval_connection_id: policy.deliveryTarget.connectionId,
 		approval_channel_id: policy.deliveryTarget.channelId,
 		approval_team_id: policy.deliveryTarget.teamId,
@@ -268,6 +269,8 @@ export async function writePermissionPolicy(c: Context) {
 	}
 	if (!input || typeof input !== "object" || Array.isArray(input))
 		return invalid(c, "Request body must be a JSON object.");
+	// Conditions are set only through the connector rule collection; never drop one silently here.
+	if ("when" in input) return invalid(c, "when is only accepted by /write-permissions/connector-actions.");
 	let policy: EntityApprovalPolicyInput;
 	try {
 		policy = parsePolicy(input as Record<string, unknown>, deleting);

@@ -38,6 +38,7 @@ import {
 	type PolicyAudience,
 } from "./connector-policy";
 import { classifyDestination, type DestinationLookup } from "./destination-audience";
+import { parsePolicyConditions, type StoredPolicyConditions } from "./policy-conditions";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
@@ -124,6 +125,12 @@ export interface EntityApprovalPolicy extends Required<ConnectorPolicyScope> {
 	note: string | null;
 	/** Guardrails only: applies where at least this audience sees the write; null = every destination. */
 	audience: PolicyAudience | null;
+	/**
+	 * connector_action only: conditions on the operation input that must all
+	 * hold for the rule to apply (`when`); null = always. Kept as stored, so a
+	 * condition this runtime cannot read is evaluated as unknown, never dropped.
+	 */
+	condition: StoredPolicyConditions;
 	deliveryTarget: EntityApprovalDeliveryTarget;
 }
 
@@ -157,6 +164,8 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	note?: string | null;
 	/** Part of a guardrail's identity; only a guardrail may set it. */
 	audience?: PolicyAudience | null;
+	/** connector_action only, part of the rule's identity: the rule's `when`. */
+	condition?: StoredPolicyConditions;
 	approvalConnectionId?: string | null;
 	approvalChannelId?: string | null;
 	approvalTeamId?: string | null;
@@ -197,6 +206,7 @@ type EntityApprovalPolicyRow = {
 	kind: string;
 	note: string | null;
 	audience: string | null;
+	condition: unknown;
 	approval_connection_id: string | null;
 	approval_channel_id: string | null;
 	approval_team_id: string | null;
@@ -247,11 +257,13 @@ function normalizePolicyNote(value: unknown): string | null | undefined {
  * An audience narrows where a guardrail applies, so a grant cannot carry one.
  */
 export function validatePolicyKindAndNote(
-	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects" | "audience">,
+	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects" | "audience" | "condition">,
 ): { kind: ConnectorPolicyKind; note: string | null | undefined } {
 	const kind = normalizePolicyKind(input.kind);
 	if (kind === "guardrail" && input.resourceClass !== "connector_action")
 		throw new Error("Only connector action rules can be guardrails.");
+	if (input.condition != null && input.resourceClass !== "connector_action")
+		throw new Error("when is only valid on a connector action rule.");
 	if (input.audience != null && kind !== "guardrail")
 		throw new Error("audience is only valid on a guardrail.");
 	const execute = input.effects?.execute;
@@ -305,6 +317,9 @@ function rowToPolicy(row: EntityApprovalPolicyRow): EntityApprovalPolicy {
 		// Fail closed: an audience this runtime does not recognise matches every
 		// destination the workspace sees, the wider of the two.
 		audience: row.audience == null ? null : row.audience === "external" ? "external" : "workspace",
+		// Anything stored that is not a list still conditions the rule; the
+		// evaluator reads it as unknown and decides strictly.
+		condition: row.condition == null ? null : Array.isArray(row.condition) ? row.condition : [row.condition],
 		deliveryTarget: {
 			connectionId: row.approval_connection_id || null,
 			channelId: row.approval_channel_id,
@@ -342,6 +357,7 @@ export function defaultEntityApprovalPolicy(
 		kind: "grant",
 		note: null,
 		audience: null,
+		condition: null,
 		deliveryTarget: {
 			connectionId: null,
 			channelId: null,
@@ -843,7 +859,7 @@ async function loadCandidatePolicies(args: {
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience,
+       kind, note, audience, condition,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     FROM write_approval_policies
@@ -1139,7 +1155,7 @@ export async function listEntityApprovalPolicies(
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience,
+       kind, note, audience, condition,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name,
        COALESCE((SELECT jsonb_object_agg(e.action, e.effect)
@@ -1272,6 +1288,7 @@ export async function upsertEntityApprovalPolicy(
 	const entityId = resourceClass === "entity" ? (input.entityId ?? null) : null;
 	const { kind, note } = validatePolicyKindAndNote({ ...input, resourceClass });
 	const audience = input.audience ?? null;
+	const condition = input.condition == null ? null : JSON.stringify(parsePolicyConditions(input.condition));
 	const effectSet = actionEffectSetForInput(resourceClass, input);
 	const approvalConnectionId = input.approvalConnectionId?.trim() || null;
 	const approvalChannelId = input.approvalChannelId?.trim() || null;
@@ -1325,9 +1342,10 @@ export async function upsertEntityApprovalPolicy(
         AND entity_id IS NOT DISTINCT FROM ${entityId}
         AND kind = ${kind}
         AND audience IS NOT DISTINCT FROM ${audience}
+        AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience,
+       kind, note, audience, condition,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1340,13 +1358,13 @@ export async function upsertEntityApprovalPolicy(
       INSERT INTO write_approval_policies (
         organization_id, resource_class, principal_kind, principal_id,
         operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-        kind, note, audience,
+        kind, note, audience, condition,
         approval_connection_id, approval_channel_id, approval_team_id,
         approval_channel_name, created_at, updated_at
       ) VALUES (
         ${organizationId}, ${resourceClass}, ${principalKind}, ${principalId},
         ${operationKey}, ${connectorKey}, ${connectionId}, ${operationCategory}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
-        ${kind}, ${note ?? null}, ${audience},
+        ${kind}, ${note ?? null}, ${audience}, ${condition}::text::jsonb,
         ${approvalConnectionId},
         ${approvalChannelId}, ${approvalTeamId}, ${approvalChannelName},
         now(), now()
@@ -1354,7 +1372,7 @@ export async function upsertEntityApprovalPolicy(
       ON CONFLICT DO NOTHING
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience,
+       kind, note, audience, condition,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1387,10 +1405,12 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	entityId?: number | null;
 	kind?: ConnectorPolicyKind;
 	audience?: PolicyAudience | null;
+	condition?: StoredPolicyConditions;
 }, transaction?: DbClient): Promise<boolean> {
 	const resourceClass = normalizeResourceClass(args.resourceClass);
 	const kind = normalizePolicyKind(args.kind);
 	const audience = args.audience ?? null;
+	const condition = args.condition == null ? null : JSON.stringify(args.condition);
 	const principalKind = normalizePrincipalKind(args.principalKind);
 	const principalId = principalKind ? args.principalId?.trim() || null : null;
 	const operationKey =
@@ -1436,6 +1456,7 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
       AND entity_id IS NOT DISTINCT FROM ${entityId}
       AND kind = ${kind}
       AND audience IS NOT DISTINCT FROM ${audience}
+      AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
     RETURNING id
   `;
 	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"

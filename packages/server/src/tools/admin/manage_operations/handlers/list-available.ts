@@ -17,7 +17,7 @@ import { compileConnectionRowVisibility } from "../../../../authz/connection-vis
 import { resolveActingPrincipal, listEntityApprovalPolicies } from "../../../../authz/entity-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { getDb } from "../../../../db/client";
-import { evaluateConnectorPolicy, type ConnectorPolicyResult } from "../../../../authz/connector-policy";
+import { evaluateConnectorPolicy, type ConnectorPolicyResult, requesterPolicyExplanation, type UnknownConditionSide } from "../../../../authz/connector-policy";
 import { listOperations } from "../../../../operations/connector-operations";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
@@ -457,14 +457,17 @@ function buildAvailableOperation(args: {
 	callerLacksMembership: boolean;
 	/** Rendered once per listing: how this caller gets write access (see scopeDenialMessage). */
 	sessionScopeReason: string;
-	policyFor: (operation: OperationDescriptor, connectionId: number | null) => ConnectorPolicyResult;
+	policyFor: (operation: OperationDescriptor, connectionId: number | null, side?: UnknownConditionSide) => ConnectorPolicyResult;
 	hideBlocked: boolean;
 }): AvailableOperation & Record<string, unknown> {
 	const { operation, internalTargets, includeInputSchema, viewUrl, callerMax, callerLacksMembership } = args;
 	const { backend_config: _privateBackendConfig, discovery_connection_ids: _discoveryConnections, ...publicOperation } =
 		operation;
 	const requiredScopes = operation.required_scopes ?? [];
-	const targets = internalTargets.filter((target) => !args.hideBlocked || args.policyFor(operation, target.connection_id).effect !== "deny").map((target): ExecutionTarget => {
+	// Only an operation blocked for every input is hidden or marked blocked; the
+	// reported policy is the strict side, which a conditional Block may reach.
+	const blocked = (connectionId: number) => args.policyFor(operation, connectionId, "lenient").effect === "deny";
+	const targets = internalTargets.filter((target) => !args.hideBlocked || !blocked(target.connection_id)).map((target): ExecutionTarget => {
 		const {
 			auth_profile_kind: _authProfileKind,
 			browserVerificationReady,
@@ -479,8 +482,8 @@ function buildAvailableOperation(args: {
 		if (operation.operation_key === BROWSER_VERIFY_OPERATION && browserVerificationReady) {
 			publicTarget.status = "ready"; publicTarget.executable = true; publicTarget.reason = "The paired browser can verify this account.";
 		}
-		publicTarget.policy = args.policyFor(operation, target.connection_id);
-		if (publicTarget.policy.effect === "deny") {
+		publicTarget.policy = requesterPolicyExplanation(args.policyFor(operation, target.connection_id));
+		if (publicTarget.policy.effect === "deny" && blocked(target.connection_id)) {
 			return { ...publicTarget, status: "blocked", executable: false, reason: "Organization policy blocks this operation." };
 		}
 		const missing = getMissingKnownOAuthScopes(
@@ -564,7 +567,7 @@ function buildAvailableOperation(args: {
 			: [];
 	return {
 		...(publicOperation as AvailableOperation),
-		policy: readyTarget?.policy ?? remediationTarget?.policy ?? args.policyFor(operation, null),
+		policy: readyTarget?.policy ?? remediationTarget?.policy ?? requesterPolicyExplanation(args.policyFor(operation, null)),
 		...(includeInputSchema ? {} : { input_schema: undefined }),
 		executable,
 		readiness,
@@ -760,8 +763,9 @@ export async function handleListAvailable(
 		loadCallerActionAllowlists(ctx.organizationId, actor, ctx.appPrincipalId),
 	]);
 	const person = isPersonInWebApp(ctx);
-	const policyFor = (operation: OperationDescriptor, connectionId: number | null) =>
-		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlists, person });
+	const policyFor = (operation: OperationDescriptor, connectionId: number | null, side: UnknownConditionSide = "strict") =>
+		evaluateConnectorPolicy({ organizationId: ctx.organizationId, connectionId, operation, actor, policies, allowlists, person,
+			unknownConditions: side });
 	const operationTargets = (operation: OperationDescriptor) =>
 		(targetsByConnector.get(operation.connector_key) ?? []).filter((target) =>
 			operation.discovery_connection_ids === undefined || operation.discovery_connection_ids.includes(target.connection_id),
@@ -772,8 +776,8 @@ export async function handleListAvailable(
 		if (!hideBlocked) return true;
 		const targets = operationTargets(operation);
 		return targets.length
-			? targets.some((target) => policyFor(operation, target.connection_id).effect !== "deny")
-			: policyFor(operation, null).effect !== "deny";
+			? targets.some((target) => policyFor(operation, target.connection_id, "lenient").effect !== "deny")
+			: policyFor(operation, null, "lenient").effect !== "deny";
 	});
 
 	const queryTokens = (args.query ?? "")

@@ -414,6 +414,30 @@ without a marked input, or a connector without a source, never matches an
 audience rule. Sources are registered in the server next to the connector's
 other modules; Slack's `send_message` is the one shipped today.
 
+Any rule can also carry `when`, a list of 1-8 conditions on the action's input
+that must all hold for the rule to apply; otherwise it is ignored as if its
+scope did not match. A field condition is `{ field, op, value }`, where `field`
+is a JSON pointer such as `/to` and `op` is `eq`, `neq`, `in`, `not_in`,
+`contains`, `ends_with`, `not_ends_with`, or `exists` (no `value`). A missing
+field makes `exists` false and every other op false. On a present field, `neq`,
+`not_in`, and `not_ends_with` are exactly the negation of `eq`, `in`, and
+`ends_with`. On a list, `ends_with` holds only if the list is non-empty and every
+element is a string ending with the value, so `not_ends_with` holds if any
+element lacks it. String ops compare the raw value and never split a
+comma-joined string. Scope by recipient with the destination `audience` above
+(`external`), not with string field ops: a connector without a
+`DestinationAudienceSource` (only Slack has one today) never matches an audience
+rule, so its sends get only the plain rules at that scope. A scan condition is
+`{ scan: "secrets" | "pii", field }` and runs the same detectors as the
+built-in secret and PII scans. `when` is part of the rule's scope, so a rule
+sits beside the same rule with a different or no `when`; a malformed condition
+returns HTTP 400 naming the field, for example `rules[0].when[1].op`. Discovery
+and inspection have no input, so they report the strict side: a conditional
+hold or block counts, a conditional `auto` does not, and a conditional Always
+allow never lifts Ask there. Approvers see the condition on the approval card
+and in Activity; the caller gets only the rule's `note`. Only this collection
+accepts `when`.
+
 App and Automation collections hold guardrails. Their one grant is Always allow:
 an `auto` rule with a `principal_id`, one `connection_id` and one
 `operation_key`. It lifts Ask for that caller, including workspace Ask rules,
