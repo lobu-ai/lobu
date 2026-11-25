@@ -12,6 +12,7 @@ export interface HistoryEntry {
   role: "user" | "assistant";
   content: string;
   authorName?: string;
+  sourceMessageId?: string;
   timestamp: number;
 }
 

@@ -17,8 +17,10 @@ import type { PlatformConnection } from '../../gateway/connections/types';
 import type { AgentSettingsStore } from '../../gateway/auth/settings/agent-settings-store';
 import type { ProviderCatalogService } from '../../gateway/auth/provider-catalog';
 import type { ModelProviderModule } from '../../gateway/modules/module-system';
+import { googleChatRecentThreadContext } from '../../gateway/connections/platforms/gchat-history';
 import { enqueueAgentTurn } from '../../gateway/orchestration/agent-turn-producer';
 import { retryInterruptedAgentTurn } from '../../gateway/orchestration/agent-turn-retry';
+import { CHAT_TURN_CONTEXT_CHARS, CHAT_TURN_OPTIONAL_CONTEXT_CHARS } from '../../gateway/orchestration/chat-turn-limits';
 import { reapStaleRuns } from '../../scheduled/check-stalled-executions';
 import { authenticateWorker } from '../../gateway/routes/internal/middleware';
 import { AGENT_TURN_TOOL_LOG_MAX } from '../../runs/agent-turn-inputs';
@@ -391,6 +393,36 @@ describe('retry of an interrupted agent turn', () => {
     const context = String(retry.action_input.turn.ephemeral_context);
     expect(context.endsWith('NEVER APPROVE WITHOUT ASKING.')).toBe(true);
     expect(context.length).toBeLessThanOrEqual(2_048);
+  });
+
+  it('keeps the interrupted-turn note when Google Chat thread history filled its context budget', async () => {
+    const org = await createTestOrganization();
+    const history = googleChatRecentThreadContext({
+      entries: Array.from({ length: 30 }, (_, index) => ({
+        role: 'user' as const,
+        authorName: `Teammate ${index}`,
+        sourceMessageId: `spaces/synthetic/messages/history-${index}`,
+        content: `Status update ${index}: ${'the rollout waits on the audit. '.repeat(4)}`,
+        timestamp: index,
+      })),
+      unavailable: false,
+      budget: CHAT_TURN_OPTIONAL_CONTEXT_CHARS,
+    });
+    expect(history!.length).toBeGreaterThan(CHAT_TURN_OPTIONAL_CONTEXT_CHARS - 250);
+    const failed = await produce({ ...messageFor(org.id), ephemeralContext: history });
+    const { runId } = await claim('fleet-history');
+    await getTestDb()`UPDATE runs SET run_metadata = run_metadata || ${getTestDb().json({
+      turn_tool_started: true, turn_started_tools: ['send_message'],
+    })}::jsonb WHERE id = ${runId}`;
+    await killWorker(runId);
+
+    expect((await retryInterruptedAgentTurn({ organizationId: org.id, turnRunId: failed.id, actorUserId: SENDER })).status).toBe('started');
+    const [admitted] = await retryAdmissions();
+    const retry = await produce(admitted!.action_input, admitted!.id);
+    const context = String(retry.action_input.turn.ephemeral_context);
+    expect(context.startsWith('A previous attempt at this message was interrupted')).toBe(true);
+    expect(context.endsWith(history!)).toBe(true);
+    expect(context.length).toBeLessThanOrEqual(CHAT_TURN_CONTEXT_CHARS);
   });
 
   it('keeps the input message id, so the retry turn replays a write the failed turn made', async () => {

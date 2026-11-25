@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Chat } from "chat";
 import { InMemoryStateAdapter } from "../../../__tests__/fixtures/in-memory-state-adapter.js";
 import { gchatPlatform } from "../gchat.js";
+import { LobuGoogleChatAdapter } from "../gchat-adapter.js";
 import { googleChatEventSpace, scopeGoogleChatAdapter } from "../gchat-scope.js";
 import type { ChatRuntimeConfig } from "../types.js";
 
@@ -44,6 +45,34 @@ async function fixture() {
 }
 
 describe("Google Chat installed space isolation", () => {
+  test("a bounded app-authenticated backfill exposes only public messages in the exact thread", async () => {
+    const threadName = `${space}/threads/recent`;
+    const adapter = new LobuGoogleChatAdapter({
+      credentials: { client_email: "bot@example.test", private_key: "test-key" },
+      googleChatProjectNumber: "123456789",
+    }, space);
+    const calls: Array<{ parent: string; filter: string; orderBy: string; pageSize: number; auth: { scopes: string[] } }> = [];
+    (adapter as any).chatApi.spaces.messages.list = async (request: typeof calls[number]) => {
+      calls.push(request);
+      const record = { thread: { name: threadName }, sender: { name: "users/test" }, text: "Public source" };
+      return { data: { messages: [
+        { ...record, name: `${space}/messages/allowed` },
+        { ...record, name: `${space}/messages/other-thread`, thread: { name: `${space}/threads/other` } },
+        { ...record, name: `${space}/messages/private`, privateMessageViewer: { name: "users/other" } },
+        { ...record, name: "spaces/foreign/messages/other-space" },
+      ] } };
+    };
+    const scoped = scopeGoogleChatAdapter(adapter, { ...runtime, refresh: async () => runtime }, async () => adapter);
+    const recent = await scoped.fetchMessages(scoped.encodeThreadId({ spaceName: space, threadName }), {
+      direction: "backward",
+      limit: 100,
+    });
+    expect(recent.messages.map((message) => message.id)).toEqual([`${space}/messages/allowed`]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ parent: space, filter: `thread.name = ${threadName}`, orderBy: "createTime desc", pageSize: 50 });
+    expect(calls[0]?.auth.scopes).toEqual(["https://www.googleapis.com/auth/chat.app.messages.readonly"]);
+  });
+
   test("an installed Google Chat space cannot post into another space", async () => {
     const { adapter, calls } = await fixture();
     await expect(adapter.postChannelMessage("gchat:spaces/foreign", "hello")).rejects.toThrow();

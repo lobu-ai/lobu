@@ -67,11 +67,12 @@ import {
   UNLINKED_ORGANIZATION_TURNS_PER_HOUR,
   UNLINKED_SENDER_TURNS_PER_HOUR,
 } from "../orchestration/chat-turn-actor.js";
+import { CHAT_TURN_OPTIONAL_CONTEXT_CHARS } from "../orchestration/chat-turn-limits.js";
 import { buildCtaCardPayload } from "../platform/link-buttons.js";
 import { chatMessageSignal, resolveChatRoute } from "./chat-route.js";
 import { buildConversationUrl } from "./conversation-url.js";
 import { captureChannelMessage } from "./channel-transcript.js";
-import type { ConversationStateStore } from "./conversation-state-store.js";
+import { MAX_HISTORY_MESSAGES, type ConversationStateStore } from "./conversation-state-store.js";
 import type { ChatInstanceManager } from "./chat-instance-manager.js";
 import type { PlatformConnection } from "./types.js";
 import { getPlatformDescriptor } from "./platforms/index.js";
@@ -1010,6 +1011,10 @@ export class MessageHandlerBridge {
     // for the messages that preceded it. `claimThreadBackfill` is an
     // atomic per-thread one-shot guard — runs at most once per thread per
     // HISTORY_TTL_MS window, regardless of how many events race in.
+    const recentThreadContext = isGroup && !isPreview
+      ? getPlatformDescriptor(platform)?.recentThreadContext
+      : undefined;
+    let threadHistoryUnavailable = false;
     if (
       conversationState &&
       isGroup &&
@@ -1024,27 +1029,31 @@ export class MessageHandlerBridge {
         if (adapter?.fetchMessages) {
           const result = await adapter.fetchMessages(thread.id, {
             limit: 50,
-            direction: "forward",
+            direction: recentThreadContext ? "backward" : "forward",
           });
-          for (const prior of result.messages ?? []) {
-            if (prior.id === messageId) continue;
-            const text = (prior.text ?? "").trim();
-            if (!text) continue;
+          const priorMessages = (result.messages ?? []).filter((prior: { id?: string; text?: string }) =>
+            prior.id !== messageId && prior.text?.trim());
+          const firstRetained = recentThreadContext ? priorMessages.length - MAX_HISTORY_MESSAGES : 0;
+          for (const [index, prior] of priorMessages.entries()) {
+            const text = prior.text.trim();
             const sentAt =
               prior.metadata?.dateSent instanceof Date
                 ? prior.metadata.dateSent.getTime()
                 : Date.now();
-            await conversationState.appendHistory(
-              this.connection.id,
-              channelId,
-              conversationId,
-              {
-                role: prior.author?.isMe ? "assistant" : "user",
-                content: text,
-                authorName: prior.author?.fullName,
-                timestamp: sentAt,
-              }
-            );
+            if (index >= firstRetained) {
+              await conversationState.appendHistory(
+                this.connection.id,
+                channelId,
+                conversationId,
+                {
+                  role: prior.author?.isMe ? "assistant" : "user",
+                  content: text,
+                  authorName: prior.author?.fullName,
+                  ...(recentThreadContext && { sourceMessageId: prior.id }),
+                  timestamp: sentAt,
+                }
+              );
+            }
             // Seed the durable transcript from the thread's prior messages too.
             if (prior.id) {
               for (const organizationId of routingOrganizationIds) {
@@ -1079,6 +1088,7 @@ export class MessageHandlerBridge {
         );
       }
       if (!backfillSucceeded) {
+        threadHistoryUnavailable = true;
         await conversationState.releaseThreadBackfill(
           this.connection.id,
           thread.id
@@ -1153,6 +1163,9 @@ export class MessageHandlerBridge {
         channelId,
         conversationId
       )) ?? [];
+    const recentThreadEntries = recentThreadContext
+      ? await conversationState?.getEntries(this.connection.id, channelId, conversationId) ?? []
+      : [];
     await conversationState?.appendHistory(
       this.connection.id,
       channelId,
@@ -1161,6 +1174,7 @@ export class MessageHandlerBridge {
         role: "user",
         content: messageText,
         authorName: message.author?.fullName,
+        ...(recentThreadContext && { sourceMessageId: messageId }),
         timestamp: Date.now(),
       }
     );
@@ -1193,6 +1207,15 @@ export class MessageHandlerBridge {
         thread,
       });
       if (!admitted) continue;
+      const automationContext = "automationId" in target ? buildAutomationTurnContext(target) : undefined;
+      const historyContext = target.organizationId === this.connection.organizationId
+        ? recentThreadContext?.({
+            entries: recentThreadEntries,
+            unavailable: threadHistoryUnavailable || !conversationState,
+            // Leaves a retry room for its interrupted-turn note and the sender line.
+            budget: CHAT_TURN_OPTIONAL_CONTEXT_CHARS - (automationContext ? automationContext.length + 2 : 0),
+          })
+        : undefined;
       await this.enqueueUserTurn({
         agentId: target.agentId,
         organizationId: target.organizationId,
@@ -1215,10 +1238,7 @@ export class MessageHandlerBridge {
           "executionConfig" in target ? target.executionConfig : undefined,
         conversationHistory: sharedHistory,
         recordHistory: false,
-        ephemeralContext:
-          "automationId" in target
-            ? buildAutomationTurnContext(target)
-            : undefined,
+        ephemeralContext: [automationContext, historyContext].filter(Boolean).join("\n\n") || undefined,
         senderUsername: message.author?.userName,
         senderDisplayName: message.author?.fullName,
         responseThreadId: routing?.responseThreadId ?? thread.id,

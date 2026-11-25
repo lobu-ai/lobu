@@ -15,6 +15,7 @@ import type {
 import type { WebhookOptions } from "chat";
 import { googleChatResponseStrategy } from "../platform-strategies/gchat.js";
 import type { LobuGoogleChatAdapter } from "./gchat-adapter.js";
+import { googleChatRecentThreadContext } from "./gchat-history.js";
 import { extractWhatsAppStyleRoutingInfo } from "./shared.js";
 import { scopeGoogleChatAdapter } from "./gchat-scope.js";
 import {
@@ -522,6 +523,7 @@ async function createUnscopedAdapter(
   config: JsonObject,
   context?: AdapterCreationContext,
   alternateWebhookUrls: readonly string[] = [],
+  installedSpace?: string,
 ): Promise<LobuGoogleChatAdapter> {
   // Load the Google API client only when this platform is used.
   const { LobuGoogleChatAdapter } = await import("./gchat-adapter.js");
@@ -560,7 +562,8 @@ async function createUnscopedAdapter(
     : adapterConfig;
 
   const adapter = new LobuGoogleChatAdapter(
-    normalizedConfig as GoogleChatAdapterConfig
+    normalizedConfig as GoogleChatAdapterConfig,
+    installedSpace,
   );
   if (alternateWebhookUrls.length > 0) {
     // The SDK checks an endpoint token against `endpointUrl` alone. Widen only
@@ -633,6 +636,7 @@ async function createUnscopedAdapter(
 
 export const gchatPlatform: ChatPlatformDescriptor = {
   responseStrategy: googleChatResponseStrategy,
+  recentThreadContext: googleChatRecentThreadContext,
   // Either a service-account JSON key or ADC — never neither.
   requiredConfigKeys: [
     ["credentials", "useApplicationDefaultCredentials"],
@@ -646,10 +650,10 @@ export const gchatPlatform: ChatPlatformDescriptor = {
   },
 
   createAdapter: async (config, context) => {
-    const adapter = await createUnscopedAdapter(config, context, context?.runtime?.alternateWebhookUrls);
+    const adapter = await createUnscopedAdapter(config, context, context?.runtime?.alternateWebhookUrls, context?.runtime?.scope);
     if (!context?.runtime) return adapter;
     return scopeGoogleChatAdapter(adapter, context.runtime, (runtime) =>
-      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl, onWebhookAccepted: context.onWebhookAccepted }, runtime.alternateWebhookUrls));
+      createUnscopedAdapter(runtime.config, { webhookUrl: runtime.webhookUrl, onWebhookAccepted: context.onWebhookAccepted }, runtime.alternateWebhookUrls, runtime.scope));
   },
   resolveRuntimeConfig: resolveGoogleChatRuntime,
   routeWebhook: routeGoogleChatWebhook,
