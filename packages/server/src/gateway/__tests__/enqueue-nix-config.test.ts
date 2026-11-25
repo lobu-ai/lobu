@@ -28,23 +28,6 @@ const ORG_ID = "org-1";
 const AGENT_SETTINGS = {
   models: ["openai/gpt-5"],
   nixConfig: { packages: ["agent-pkg"] },
-  skillsConfig: {
-    skills: [
-      // Neither legacy entry may reach nixConfig.
-      {
-        repo: "lobu/skills",
-        name: "video",
-        enabled: true,
-        nixPackages: ["must-not-appear-enabled"],
-      },
-      {
-        repo: "lobu/skills",
-        name: "disabled-one",
-        enabled: false,
-        nixPackages: ["must-not-appear-disabled"],
-      },
-    ],
-  },
 };
 
 function makeAgentSettingsStore() {

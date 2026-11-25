@@ -36,11 +36,18 @@ type Sql = ReturnType<typeof getDb>;
 
 const synth = (prefix: string) => `${prefix}-${randomBytes(5).toString('hex')}`;
 
-/** Run `body` in a transaction that always rolls back, returning its result. */
+/**
+ * Run `body` in a transaction that always rolls back, returning its result.
+ * A later migration dropped the legacy agent column(s) this backfill reads, so
+ * the transaction first restores the schema the backfill ran against: an
+ * install upgrading from before the cutover still runs it on that schema.
+ */
 async function inRollback<T>(body: (tx: Sql) => Promise<T>): Promise<T> {
   let result: T | undefined;
   try {
     await getDb().begin(async (tx: Sql) => {
+      await tx.unsafe(`ALTER TABLE agents
+        ADD COLUMN skills_config jsonb DEFAULT '{"skills": []}'::jsonb`);
       result = await body(tx);
       throw new Rollback();
     });
