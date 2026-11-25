@@ -86,7 +86,8 @@ workspace skill library, and an Automation's `skills` names library skills that
 the server freezes into the version when it saves. Guardrails are not agent
 settings either: they live in the workspace guardrail library (Settings →
 Policies, or `client.guardrails`), and apply rejects an agent that still
-declares `guardrails`.
+declares `guardrails`. Declare library guardrails with `defineGuardrail` in
+the top-level `guardrails` array instead.
 
 ```ts
 const support = defineAgent({
@@ -203,6 +204,36 @@ The canonical contracts live in `@lobu/core/contracts/agent-settings` and
 response types from those schemas. A packed local client test does not establish
 that a new version has been published to npm; releases follow the protected
 versioned release pipeline.
+
+## Workspace guardrails
+
+```ts
+export default defineConfig({
+  agents: [support],
+  guardrails: [
+    defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }),
+    defineGuardrail({
+      name: "no-refunds",
+      judge: { stage: "output", policy: "Never promise a refund." },
+      appliesTo: [{ agent: "support" }],
+    }),
+  ],
+});
+```
+
+Each guardrail sets exactly one of `builtin`, `judge` or `requireTool`.
+`appliesTo` defaults to every agent; `enabled` defaults to true. Leave out
+`guardrails` and apply never reads or writes the library; `--only memory`
+skips it too. Apply owns each declared guardrail whole, matched by name, and
+refuses to overwrite one edited in the app since its last apply. A guardrail
+this config created and no longer declares is archived only with `prune`;
+guardrails it never created are left alone. The deployment record keeps a
+SHA-256 digest of each judge policy, never the text, and `lobu rollback`
+leaves the library as it is.
+
+Writing guardrails needs an owner or admin. A CLI login cannot write them: set
+`LOBU_API_TOKEN` to a personal access token with the `guardrails:write` scope,
+minted from a signed-in web session.
 
 ## Entity resolution
 

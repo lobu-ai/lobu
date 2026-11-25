@@ -7,6 +7,10 @@ import type {
   WorkspaceSkill,
 } from "@lobu/core/contracts/tools/manage-skills";
 import type {
+  GuardrailInput,
+  WorkspaceGuardrail,
+} from "@lobu/core/contracts/workspace-guardrails";
+import type {
   InferenceCapabilityBlock,
   InferenceModality,
 } from "../../../config/define.js";
@@ -35,12 +39,15 @@ import {
   type DesiredConnectorDefinition,
   type DesiredEntityType,
   type DesiredFeed,
+  type DesiredGuardrail,
   type DesiredOrgProvider,
   type DesiredRelationshipType,
   type DesiredSkill,
   type DesiredState,
   type DesiredView,
+  type RecordedGuardrail,
   type RecordedSkill,
+  recordGuardrailConfig,
   recordSkill,
 } from "./desired-state.js";
 import {
@@ -51,6 +58,7 @@ import {
   type EntityTypeDisplayFields,
   LEGACY_DISPLAY_FIELDS,
   referencedConnectorKeys,
+  sortGuardrailSubjects,
 } from "./shared.js";
 
 // ── Diff verbs ──────────────────────────────────────────────────────────────
@@ -222,6 +230,20 @@ export interface SkillDiffRow extends BaseRow {
 }
 
 /**
+ * A workspace library guardrail the config declares (create/update/noop), one
+ * it created and no longer declares (`delete` archives it, under prune only),
+ * or one it never created (non-blocking drift, left alone).
+ */
+export interface GuardrailDiffRow extends BaseRow {
+  kind: "guardrail";
+  desired?: DesiredGuardrail;
+  remote?: WorkspaceGuardrail;
+  changedFields?: string[];
+  /** The full replacement apply puts; present on create and update. */
+  write?: GuardrailInput;
+}
+
+/**
  * A blocking drift item: either a field moved remotely or a remote-only
  * definition is not safe to delete. Apply must not converge over it — the
  * whole run blocks and reports this.
@@ -235,7 +257,8 @@ export interface BlockingDriftRow extends BaseRow {
     | "relationship-type"
     | "automation"
     | "navigation"
-    | "skill";
+    | "skill"
+    | "guardrail";
   id: string;
   /** The moved field; absent for a whole remote-only definition. */
   field?: string;
@@ -280,6 +303,12 @@ export interface Baseline {
    * convergence.
    */
   skills?: RecordedSkill[];
+  /**
+   * The library guardrails this config applied, by id, recorded independently
+   * of `recorded`. Absent before apply managed guardrails: two-way convergence,
+   * and nothing is owned, so prune archives nothing.
+   */
+  guardrails?: RecordedGuardrail[];
 }
 
 export const ownedKey = (kind: string, id: number | string | undefined) =>
@@ -299,6 +328,7 @@ export type DiffRow =
   | ViewDiffRow
   | NavigationDiffRow
   | SkillDiffRow
+  | GuardrailDiffRow
   | BlockingDriftRow;
 
 export interface DiffPlan {
@@ -2306,6 +2336,153 @@ function diffUndeclaredSkill(
   };
 }
 
+// ── Workspace guardrails ───────────────────────────────────────────────────
+
+const GUARDRAIL_FIELDS = ["config", "applies_to", "enabled"] as const;
+type GuardrailField = (typeof GUARDRAIL_FIELDS)[number];
+
+/**
+ * The compared fields of a declaration, a stored row or a record: a judge's
+ * policy as its digest (a record holds no more) and subjects in one order.
+ */
+function comparableGuardrail(
+  guardrail: Pick<RecordedGuardrail, "applies_to" | "enabled"> & {
+    config: object;
+  }
+): Record<GuardrailField, unknown> {
+  return {
+    config: recordGuardrailConfig(guardrail.config as Record<string, unknown>),
+    applies_to: sortGuardrailSubjects(guardrail.applies_to),
+    enabled: guardrail.enabled,
+  };
+}
+
+function guardrailWrite(desired: DesiredGuardrail): GuardrailInput {
+  return {
+    name: desired.name,
+    config: desired.config,
+    applies_to: desired.applies_to,
+    enabled: desired.enabled,
+  };
+}
+
+/**
+ * Three-way when this config's last apply recorded guardrails: a field the
+ * library moved since then (or a same-name guardrail this config never
+ * applied) blocks; a field only the config moved converges. Without that
+ * record the compare is two-way and the config wins.
+ */
+function diffGuardrail(
+  desired: DesiredGuardrail,
+  remote: WorkspaceGuardrail | undefined,
+  applied: RecordedGuardrail[] | undefined
+): { row: GuardrailDiffRow; blocking: BlockingDriftRow[] } {
+  if (!remote) {
+    return {
+      row: {
+        kind: "guardrail",
+        verb: "create",
+        id: desired.name,
+        desired,
+        write: guardrailWrite(desired),
+      },
+      blocking: [],
+    };
+  }
+  const want = comparableGuardrail(desired);
+  const have = comparableGuardrail(remote);
+  const record = applied?.find((r) => r.id === remote.id);
+  const before = record ? comparableGuardrail(record) : undefined;
+  const { changedFields, blockingFields } = classifyThreeWay(
+    GUARDRAIL_FIELDS.map((field) => ({
+      field,
+      desired: want[field],
+      remote: have[field],
+      attribution: applied === undefined ? have[field] : before?.[field],
+    }))
+  );
+  const noop: GuardrailDiffRow = {
+    kind: "guardrail",
+    verb: "noop",
+    id: desired.name,
+    desired,
+    remote,
+  };
+  if (blockingFields.length > 0) {
+    return {
+      row: noop,
+      blocking: blockingFields.map((b) => ({
+        kind: "guardrail" as const,
+        verb: "drift" as const,
+        blocking: true as const,
+        id: desired.name,
+        field: b.field,
+        // Shown to the operator, who can read the library: the full config.
+        remoteChange: b.field === "config" ? remote.config : b.remoteChange,
+        desiredChange: b.field === "config" ? desired.config : b.desiredChange,
+      })),
+    };
+  }
+  if (changedFields.length === 0) return { row: noop, blocking: [] };
+  return {
+    row: {
+      ...noop,
+      verb: "update",
+      changedFields,
+      write: guardrailWrite(desired),
+    },
+    blocking: [],
+  };
+}
+
+/**
+ * A library guardrail the config does not declare. One this config created is
+ * archived under prune, unless it changed since (then it blocks); without
+ * prune it stays and stays recorded. Any other is left alone.
+ */
+function diffUndeclaredGuardrail(
+  remote: WorkspaceGuardrail,
+  applied: RecordedGuardrail[] | undefined,
+  prune: boolean
+): { row?: GuardrailDiffRow; blocking: BlockingDriftRow[]; note?: string } {
+  const drift: GuardrailDiffRow = {
+    kind: "guardrail",
+    verb: "drift",
+    id: remote.name,
+    remote,
+  };
+  const record = applied?.find((r) => r.id === remote.id);
+  if (!record) return { row: drift, blocking: [] };
+  if (!prune) {
+    return {
+      row: drift,
+      blocking: [],
+      note: `guardrail "${remote.name}" was applied from this config and is no longer declared; it stays in the library (set prune: true to archive it)`,
+    };
+  }
+  const have = comparableGuardrail(remote);
+  const before = comparableGuardrail(record);
+  const moved = GUARDRAIL_FIELDS.filter(
+    (field) => !deepEqual(have[field], before[field])
+  );
+  if (moved.length > 0) {
+    return {
+      blocking: moved.map((field) => ({
+        kind: "guardrail" as const,
+        verb: "drift" as const,
+        blocking: true as const,
+        id: remote.name,
+        field,
+        remoteChange: field === "config" ? remote.config : have[field],
+      })),
+    };
+  }
+  return {
+    row: { kind: "guardrail", verb: "delete", id: remote.name, remote },
+    blocking: [],
+  };
+}
+
 // ── Top-level diff ─────────────────────────────────────────────────────────
 
 export interface RemoteSnapshot {
@@ -2328,6 +2505,8 @@ export interface RemoteSnapshot {
   navigation?: { revision: number; config: NavigationConfig | null };
   /** Unarchived library skills; read only when the run reconciles skills. */
   skills?: WorkspaceSkill[];
+  /** Unarchived library guardrails; read only when the config manages them. */
+  guardrails?: WorkspaceGuardrail[];
 }
 
 /**
@@ -2344,6 +2523,7 @@ type DesiredStateForDiff = Pick<
   | "views"
   | "navigation"
   | "skills"
+  | "guardrails"
 >;
 
 interface ComputeDiffOptions {
@@ -2997,6 +3177,40 @@ export function computeDiff(
       notes.push(
         `skill "${skill.name}" was applied from this config but is no longer in the library (archived outside it); apply recreates it`
       );
+    }
+  }
+
+  // Workspace guardrails, after agents (a guardrail's subjects must exist).
+  // The config owns each declared row whole; prune archives only rows this
+  // config created (recorded by id).
+  if (desired.guardrails !== undefined) {
+    const applied = baseline?.guardrails;
+    const remoteGuardrails = remote.guardrails ?? [];
+    const byName = new Map(remoteGuardrails.map((g) => [g.name, g]));
+    const declared = new Set(desired.guardrails.map((g) => g.name));
+    const push = (result: {
+      row?: GuardrailDiffRow;
+      blocking: BlockingDriftRow[];
+      note?: string;
+    }) => {
+      if (result.row) rows.push(result.row);
+      rows.push(...result.blocking);
+      if (result.note) notes.push(result.note);
+    };
+    for (const guardrail of desired.guardrails) {
+      push(diffGuardrail(guardrail, byName.get(guardrail.name), applied));
+      if (
+        !byName.has(guardrail.name) &&
+        applied?.some((r) => r.name === guardrail.name)
+      ) {
+        notes.push(
+          `guardrail "${guardrail.name}" was applied from this config but is no longer in the library (archived outside it); apply recreates it`
+        );
+      }
+    }
+    for (const guardrail of remoteGuardrails) {
+      if (declared.has(guardrail.name)) continue;
+      push(diffUndeclaredGuardrail(guardrail, applied, prune));
     }
   }
 

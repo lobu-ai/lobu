@@ -15,9 +15,14 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deepRedactSecrets, REDACTED_SENTINEL } from "@lobu/core";
+import type { WorkspaceGuardrail } from "@lobu/core/contracts/workspace-guardrails";
 import {
+  type DesiredGuardrail,
   type DesiredState,
+  type RecordedGuardrail,
   type RecordedSkill,
+  recordGuardrail,
+  recordGuardrailConfig,
   recordSkill,
 } from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
@@ -78,6 +83,15 @@ export function redactDesiredState(
           skills: state.skills.map((skill) =>
             typeof skill.content === "string" ? recordSkill(skill) : skill
           ),
+        }
+      : {}),
+    // A judge's policy is recorded only as its digest.
+    ...(state.guardrails
+      ? {
+          guardrails: state.guardrails.map((guardrail) => ({
+            ...guardrail,
+            config: recordGuardrailConfig(guardrail.config),
+          })),
         }
       : {}),
     agents: state.agents.map((agent) => ({
@@ -147,6 +161,11 @@ export interface DeploymentManifest {
    */
   skills?: RecordedSkill[];
   /**
+   * The library guardrails this config applied, by id (a judge's policy as
+   * its digest): the rows prune may archive and the three-way baseline.
+   */
+  guardrails?: RecordedGuardrail[];
+  /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
    * `automation:b7-…`) this config actually applied — the delete-eligible set.
    */
@@ -210,13 +229,50 @@ export function loadBaselineFromManifest(
   };
 }
 
-/** The recorded library skills; undefined before apply managed skills. */
-export function loadSkillsBaseline(
-  manifest: { skills?: unknown[] } | null | undefined
-): RecordedSkill[] | undefined {
-  return Array.isArray(manifest?.skills)
-    ? (manifest.skills as RecordedSkill[])
-    : undefined;
+/**
+ * What a deployment recorded of the workspace libraries (skills, guardrails).
+ * A field is undefined before apply managed that library.
+ */
+export interface LibraryRecord {
+  skills?: RecordedSkill[];
+  guardrails?: RecordedGuardrail[];
+}
+
+export function loadLibraryRecord(
+  manifest: { skills?: unknown[]; guardrails?: unknown[] } | null | undefined
+): LibraryRecord {
+  return {
+    ...(Array.isArray(manifest?.skills)
+      ? { skills: manifest.skills as RecordedSkill[] }
+      : {}),
+    ...(Array.isArray(manifest?.guardrails)
+      ? { guardrails: manifest.guardrails as RecordedGuardrail[] }
+      : {}),
+  };
+}
+
+/**
+ * The guardrails record a run leaves: each declared guardrail under the id it
+ * has in the library, plus the rows this config created and no longer
+ * declares but has not archived (only prune archives them, so they stay
+ * owned, with the record of how this config left them).
+ */
+export function recordGuardrails(
+  desired: DesiredGuardrail[],
+  library: WorkspaceGuardrail[],
+  previous: RecordedGuardrail[] | undefined
+): RecordedGuardrail[] {
+  const byName = new Map(library.map((row) => [row.name, row]));
+  const declared = desired.flatMap((guardrail) => {
+    const row = byName.get(guardrail.name);
+    return row ? [recordGuardrail(row.id, guardrail)] : [];
+  });
+  const declaredNames = new Set(desired.map((guardrail) => guardrail.name));
+  const libraryIds = new Set(library.map((row) => row.id));
+  const kept = (previous ?? []).filter(
+    (record) => !declaredNames.has(record.name) && libraryIds.has(record.id)
+  );
+  return [...declared, ...kept];
 }
 
 /**
@@ -225,19 +281,22 @@ export function loadSkillsBaseline(
  */
 export function toBaseline(
   record: BaselineRecord | null,
-  skills?: RecordedSkill[]
+  library: LibraryRecord = {}
 ): Baseline {
-  const recordedSkills = skills ? { skills } : {};
+  const recordedLibrary = {
+    ...(library.skills ? { skills: library.skills } : {}),
+    ...(library.guardrails ? { guardrails: library.guardrails } : {}),
+  };
   if (!record) {
     return {
       recorded: false,
       attribution: { entityTypes: [], relationshipTypes: [], automations: [] },
       owned: new Set<string>(),
-      ...recordedSkills,
+      ...recordedLibrary,
     };
   }
   return {
-    ...recordedSkills,
+    ...recordedLibrary,
     recorded: true,
     attribution: record.attribution as unknown as Baseline["attribution"],
     owned: new Set(record.owned),
@@ -400,7 +459,7 @@ export function buildDeploymentManifest(
   state: DesiredState,
   connectorVersions: Record<string, string>,
   baseline?: BaselineRecord,
-  skills?: RecordedSkill[]
+  library: LibraryRecord = {}
 ): DeploymentManifest {
   const redacted = redactDesiredState(state);
   const connectors = (redacted.connectors ?? {}) as Record<string, unknown>;
@@ -428,7 +487,8 @@ export function buildDeploymentManifest(
     ...(baseline
       ? { attribution: baseline.attribution, owned: baseline.owned }
       : {}),
-    ...(skills ? { skills } : {}),
+    ...(library.skills ? { skills: library.skills } : {}),
+    ...(library.guardrails ? { guardrails: library.guardrails } : {}),
   };
 }
 

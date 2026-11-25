@@ -8,10 +8,9 @@
 import { randomBytes } from "node:crypto";
 import { isLibrarySkillName, LIBRARY_SKILL_NAME_MAX_CHARS } from "@lobu/core/agent-tooling";
 import {
-	BUILTIN_GUARDRAIL_NAMES,
-	type BuiltinGuardrailName,
 	type GuardrailSubject,
 	type ListGuardrailsResult,
+	parseGuardrailConfig,
 	type WorkspaceGuardrail,
 	type WorkspaceGuardrailConfig,
 } from "@lobu/core/contracts/workspace-guardrails";
@@ -275,86 +274,16 @@ export type GuardrailWrite =
 	| { op: "archive"; id: string; expected_revision: number; guardrail: null };
 
 const EVERY_AGENT: GuardrailSubject[] = [{ principal_kind: "agent", principal_id: null }];
-const GUARDRAIL_STAGES: readonly GuardrailStage[] = ["input", "output", "pre-tool", "egress"];
-const CUSTOM_CONFIG_KEYS = new Set(["kind", "stage", "policy", "model", "tools", "domains"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringList(value: unknown, field: string, { nonEmpty }: { nonEmpty: boolean }): string[] {
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-		throw new ToolUserError(`config.${field} must be an array of non-blank strings.`, 422);
-	}
-	const items = [...new Set((value as string[]).map((item) => item.trim()))];
-	if (nonEmpty && items.length === 0) throw new ToolUserError(`config.${field} must not be empty.`, 422);
-	return items;
-}
-
-/**
- * The config a guardrail stores, in one canonical key order, or a 422 naming
- * what is wrong. These are the rules the runtime relies on and the schema
- * cannot express: a `judge` needs a policy, `require-tool` runs only at
- * `output` and needs tools, and an `egress` judge needs the domains it
- * governs (one without any never runs).
- */
-export function normalizeGuardrailConfig(raw: unknown): WorkspaceGuardrailConfig {
-	if (!isPlainObject(raw)) throw new ToolUserError("config must be an object.", 422);
-	if ("builtin" in raw) {
-		const extra = Object.keys(raw).filter((key) => key !== "builtin");
-		if (extra.length > 0) {
-			throw new ToolUserError(`A built-in guardrail's config takes only "builtin"; remove ${extra.join(", ")}.`, 422);
-		}
-		if (!(BUILTIN_GUARDRAIL_NAMES as readonly unknown[]).includes(raw.builtin)) {
-			throw new ToolUserError(`config.builtin must be one of: ${BUILTIN_GUARDRAIL_NAMES.join(", ")}.`, 422);
-		}
-		return { builtin: raw.builtin as BuiltinGuardrailName };
-	}
-	const unknown = Object.keys(raw).filter((key) => !CUSTOM_CONFIG_KEYS.has(key));
-	if (unknown.length > 0) throw new ToolUserError(`config has unknown field(s): ${unknown.join(", ")}.`, 422);
-	if (raw.kind !== "judge" && raw.kind !== "require-tool") {
-		throw new ToolUserError('config.kind must be "judge" or "require-tool" (or pass config.builtin).', 422);
-	}
-	if (!GUARDRAIL_STAGES.includes(raw.stage as GuardrailStage)) {
-		throw new ToolUserError(`config.stage must be one of: ${GUARDRAIL_STAGES.join(", ")}.`, 422);
-	}
-	const stage = raw.stage as GuardrailStage;
-	if (raw.policy !== undefined && typeof raw.policy !== "string") {
-		throw new ToolUserError("config.policy must be a string.", 422);
-	}
-	if (raw.model !== undefined && typeof raw.model !== "string") {
-		throw new ToolUserError("config.model must be a string.", 422);
-	}
-	const model = typeof raw.model === "string" && raw.model.trim() !== "" ? raw.model.trim() : undefined;
-	if (raw.kind === "require-tool") {
-		if (stage !== "output") throw new ToolUserError('A require-tool guardrail runs only at stage "output".', 422);
-		if (raw.domains !== undefined) throw new ToolUserError("config.domains applies only to an egress judge.", 422);
-		return {
-			kind: "require-tool",
-			stage,
-			tools: stringList(raw.tools, "tools", { nonEmpty: true }),
-		};
-	}
-	if (typeof raw.policy !== "string" || raw.policy.trim() === "") {
-		throw new ToolUserError("A judge guardrail needs a non-blank config.policy.", 422);
-	}
-	if (raw.domains !== undefined && stage !== "egress") {
-		throw new ToolUserError("config.domains applies only to an egress judge.", 422);
-	}
-	if (raw.tools !== undefined && stage !== "pre-tool") {
-		throw new ToolUserError("config.tools applies to a judge only at stage pre-tool.", 422);
-	}
-	const domains =
-		stage === "egress" ? stringList(raw.domains ?? [], "domains", { nonEmpty: true }) : undefined;
-	const tools = raw.tools === undefined ? undefined : stringList(raw.tools, "tools", { nonEmpty: true });
-	return {
-		kind: "judge",
-		stage,
-		policy: raw.policy,
-		...(model ? { model } : {}),
-		...(tools ? { tools } : {}),
-		...(domains ? { domains } : {}),
-	};
+/** The config a guardrail stores, canonical, or a 422 naming what is wrong. */
+function normalizeGuardrailConfig(raw: unknown): WorkspaceGuardrailConfig {
+	const parsed = parseGuardrailConfig(raw);
+	if (!parsed.ok) throw new ToolUserError(parsed.error, 422);
+	return parsed.config;
 }
 
 /**
