@@ -143,6 +143,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
   let connectionDbId: number;
   let created: Array<Record<string, any>>;
   let updated: Array<Record<string, any>>;
+  let fetchedThreadFor: Array<string>;
   let accepted: Map<string, string>;
   let loseNextReceipt: boolean;
   let rejectThread: boolean;
@@ -179,6 +180,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     });
     created = [];
     updated = [];
+    fetchedThreadFor = [];
     accepted = new Map();
     loseNextReceipt = false;
     rejectThread = false;
@@ -198,6 +200,10 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
     adapter.chatApi.spaces.messages.update = mock(async (request: Record<string, any>) => {
       updated.push(request);
       return { data: { name: request.name } };
+    });
+    adapter.chatApi.spaces.messages.get = mock(async ({ name }: { name: string }) => {
+      fetchedThreadFor.push(name);
+      return { data: { thread: { name: THREAD } } };
     });
     adapter.fetchMessages = mock(async () => ({ messages: [] }));
     adapter.startTyping = mock(async () => undefined);
@@ -226,7 +232,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
    * Link the space, deliver one mention, and return the terminal-row payload
    * the worker would publish for the queued turn.
    */
-  async function queueLinkedSpaceTurn(messageId: string) {
+  async function queueLinkedSpaceTurn(messageId: string, inbound = spaceMention(messageId, "status?")) {
     await start(null);
     await createTestAutomationSubscription({
       organizationId: ORG_ID,
@@ -235,7 +241,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       platform: "gchat",
       channelId: SPACE,
     });
-    expect(await deliver(spaceMention(messageId, "status?"))).toBe(200);
+    expect(await deliver(inbound)).toBe(200);
     let input: Record<string, any> = {};
     await waitFor(async () => {
       const [row] = await getDb()<{ action_input: Record<string, any> }[]>`
@@ -529,6 +535,39 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       requestBody: { thread: { name: THREAD } },
     });
     expect(accepted.size).toBe(0);
+  });
+
+  test("an explicit space-level platform API target still receives its reply", async () => {
+    await start(OWNING_AGENT_ID);
+    const responses = new ChatResponseBridge(bridge.manager as never);
+    await responses.handleCompletion({
+      platform: "gchat",
+      userId: "platform-api-owner",
+      teamId: SPACE,
+      channelId: SPACE,
+      conversationId: SPACE,
+      messageId: "platform-api-request",
+      timestamp: Date.now(),
+      finalText: "Space announcement.",
+      platformMetadata: { connectionId: RUNTIME_CONNECTION_ID, source: "platform-cli" },
+    }, "s");
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ parent: SPACE, requestId: expect.any(String) });
+    expect(created[0]?.requestBody).toEqual({ text: "Space announcement.", thread: undefined });
+  });
+
+  test("a legacy webhook's message resource resolves to the original thread", async () => {
+    const inbound = spaceMention("inbound-legacy", "status?");
+    delete (inbound.message as { thread?: unknown }).thread;
+    const payload = await queueLinkedSpaceTurn("inbound-legacy", inbound);
+    const responses = new ChatResponseBridge(bridge.manager as never);
+    await responses.handleCompletion({ ...payload, finalText: "Stay in thread." }, "s");
+    expect(fetchedThreadFor).toEqual([`${SPACE}/messages/inbound-legacy`]);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      messageReplyOption: "REPLY_MESSAGE_OR_FAIL",
+      requestBody: { thread: { name: THREAD } },
+    });
   });
 
   test("a multibyte reply stays within Google's request limit and every part stays in thread", async () => {

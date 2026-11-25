@@ -9,13 +9,20 @@ export const googleChatResponseStrategy: PlatformResponseStrategy = {
   async handleDelta() { return null; },
   async handleCompletion({ ctx, payload }) {
     if (!payload.finalText?.trim()) return;
-    const threadId = platformMetadataString(payload.platformMetadata, "responseThreadId")
-      ?? payload.conversationId;
+    const replyThread = platformMetadataString(payload.platformMetadata, "responseThreadId");
+    // The authenticated platform API can explicitly target a space instead of
+    // answering an incoming message. Only that route may post without a thread.
+    const spaceTarget = !replyThread && payload.platformMetadata?.source === "platform-cli" &&
+      payload.conversationId === payload.channelId;
+    const conversationId = payload.conversationId;
+    const threadId = replyThread ?? (spaceTarget && !conversationId.startsWith("gchat:")
+      ? `gchat:${conversationId}`
+      : conversationId);
     if (!threadId?.startsWith("gchat:")) {
       throw new QueueTerminalError("Google Chat completion has no originating thread");
     }
     const adapter: Pick<LobuGoogleChatAdapter, "postTerminalReply"> = ctx.instance.chat.getAdapter("gchat");
     const deliveryKey = JSON.stringify([ctx.connectionId, payload.messageId, payload.turnRunId]);
-    await adapter.postTerminalReply(threadId, payload.finalText, deliveryKey);
+    await adapter.postTerminalReply(threadId, payload.finalText, deliveryKey, spaceTarget);
   },
 };

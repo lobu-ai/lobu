@@ -42,18 +42,25 @@ function createFailure(error: unknown): Error {
 }
 
 export class LobuGoogleChatAdapter extends GoogleChatAdapter {
-  async postTerminalReply(threadId: string, markdown: string, deliveryKey: string): Promise<void> {
+  async postTerminalReply(threadId: string, markdown: string, deliveryKey: string, spaceTarget = false): Promise<void> {
     const target = this.decodeThreadId(threadId);
-    const { spaceName, threadName, isDM } = target;
+    const { spaceName, isDM } = target;
     if (this.encodeThreadId(target) !== threadId || !/^spaces\/[\w-]+$/.test(spaceName)) {
       throw new QueueTerminalError("Google Chat reply has no valid space");
     }
-    if (threadName || !isDM) {
-      const threadResource = threadName?.slice(spaceName.length);
-      if (!threadName?.startsWith(`${spaceName}/threads/`) ||
-          !/^\/threads\/[\w.-]+$/.test(threadResource ?? "")) {
-        throw new QueueTerminalError("Google Chat reply has no valid originating thread");
-      }
+    let threadName = target.threadName;
+    const resource = threadName?.slice(spaceName.length);
+    if (threadName?.startsWith(`${spaceName}/messages/`) && /^\/messages\/[\w-][\w.-]*$/.test(resource ?? "")) {
+      // The SDK uses the original message resource when a webhook omits its
+      // thread. Ask Google for the exact thread attached to that message.
+      const original = await this.chatApi.spaces.messages.get({ name: threadName, fields: "thread" })
+        .catch((error: unknown) => { throw createFailure(error); });
+      threadName = original.data.thread?.name ?? undefined;
+    }
+    if ((target.threadName || (!isDM && !spaceTarget)) &&
+        (!threadName?.startsWith(`${spaceName}/threads/`) ||
+          !/^\/threads\/[\w-][\w.-]*$/.test(threadName.slice(spaceName.length)))) {
+      throw new QueueTerminalError("Google Chat reply has no valid originating thread");
     }
 
     const text = convertEmojiPlaceholders(this.formatConverter.renderPostable({ markdown }), "gchat");
