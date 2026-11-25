@@ -54,6 +54,8 @@ const SPACE = "spaces/AAAA-e2e-room";
 const DM_SPACE = "spaces/DDDD-e2e-dm";
 const THREAD = `${SPACE}/threads/thread-e2e`;
 
+type HistoryListRequest = { orderBy?: string; pageToken?: string; pageSize?: number };
+
 setDefaultTimeout(30_000);
 
 const credentials = JSON.stringify({
@@ -147,6 +149,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
   let accepted: Map<string, string>;
   let loseNextReceipt: boolean;
   let rejectThread: boolean;
+  let listHistory: ReturnType<typeof mock<(request: HistoryListRequest) => Promise<unknown>>>;
 
   /** Deliver a webhook and wait for the SDK's background dispatch. */
   async function deliver(body: Record<string, unknown>): Promise<number> {
@@ -205,7 +208,10 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       fetchedThreadFor.push(name);
       return { data: { thread: { name: THREAD } } };
     });
-    adapter.fetchMessages = mock(async () => ({ messages: [] }));
+    listHistory = mock(async (_request: HistoryListRequest): Promise<unknown> => ({
+      data: { messages: [] },
+    }));
+    adapter.chatApi.spaces.messages.list = (request: HistoryListRequest) => listHistory(request);
     adapter.startTyping = mock(async () => undefined);
     chat = new Chat({
       userName: "lobu",
@@ -232,8 +238,15 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
    * Link the space, deliver one mention, and return the terminal-row payload
    * the worker would publish for the queued turn.
    */
-  async function queueLinkedSpaceTurn(messageId: string, inbound = spaceMention(messageId, "status?")) {
+  async function queueLinkedSpaceTurn(
+    messageId: string,
+    { inbound = spaceMention(messageId, "status?"), prepare }: {
+      inbound?: Record<string, unknown>;
+      prepare?: () => void;
+    } = {},
+  ) {
     await start(null);
+    prepare?.();
     await createTestAutomationSubscription({
       organizationId: ORG_ID,
       agentId: AGENT_ID,
@@ -251,6 +264,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       input = row!.action_input;
     });
     return {
+      ephemeralContext: input.ephemeralContext as string | undefined,
       messageId: String(input.messageId),
       channelId: String(input.channelId),
       conversationId: String(input.conversationId),
@@ -261,6 +275,47 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
       platformMetadata: input.platformMetadata,
     };
   }
+
+  test("a first mention carries the newest prior thread evidence with its Google message reference", async () => {
+    const rows = Array.from({ length: 60 }, (_, index) => ({
+      name: `${SPACE}/messages/prior-${index}`,
+      createTime: new Date(Date.UTC(2026, 9, 12, 10, index)).toISOString(),
+      text: index === 59 ? "Latest decision: hold the rollout until the audit clears." : `Earlier update ${index}`,
+      sender,
+      thread: { name: THREAD },
+    }));
+    const payload = await queueLinkedSpaceTurn("inbound-recall", {
+      prepare: () => {
+        listHistory.mockImplementation(async ({ orderBy, pageToken, pageSize = 50 }) => {
+          const ordered = orderBy === "createTime desc" ? [...rows].reverse() : rows;
+          const offset = Number(pageToken ?? 0);
+          const end = offset + pageSize;
+          return { data: { messages: ordered.slice(offset, end), nextPageToken: end < ordered.length ? String(end) : undefined } };
+        });
+      },
+    });
+    expect(listHistory).toHaveBeenCalledTimes(1);
+    expect(payload.ephemeralContext).toContain("hold the rollout until the audit clears");
+    expect(payload.ephemeralContext).toContain(`${SPACE}/messages/prior-59`);
+    expect(payload.ephemeralContext).not.toMatch(/Earlier update 0\b/);
+    await waitFor(async () => {
+      const messages = await getDb()<{ platform_message_id: string }[]>`
+        SELECT platform_message_id FROM channel_messages WHERE connection_id = ${RUNTIME_CONNECTION_ID}
+      `;
+      const ids = messages.map((row) => row.platform_message_id);
+      expect(ids).toContain(`${SPACE}/messages/prior-59`);
+      expect(ids).not.toContain(`${SPACE}/messages/prior-0`);
+    });
+  });
+
+  test("a rejected history read leaves a visible limitation in the agent turn", async () => {
+    const payload = await queueLinkedSpaceTurn("inbound-no-history", {
+      prepare: () => {
+        listHistory.mockRejectedValue({ response: { status: 403 } });
+      },
+    });
+    expect(payload.ephemeralContext).toContain("could not load earlier Google Chat messages");
+  });
 
   beforeAll(async () => {
     await ensureDbForGatewayTests();
@@ -559,7 +614,7 @@ describe("Google Chat event -> chat Automation -> Google Chat reply", () => {
   test("a legacy webhook's message resource resolves to the original thread", async () => {
     const inbound = spaceMention("inbound-legacy", "status?");
     delete (inbound.message as { thread?: unknown }).thread;
-    const payload = await queueLinkedSpaceTurn("inbound-legacy", inbound);
+    const payload = await queueLinkedSpaceTurn("inbound-legacy", { inbound });
     const responses = new ChatResponseBridge(bridge.manager as never);
     await responses.handleCompletion({ ...payload, finalText: "Stay in thread." }, "s");
     expect(fetchedThreadFor).toEqual([`${SPACE}/messages/inbound-legacy`]);
