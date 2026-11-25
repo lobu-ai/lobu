@@ -19,6 +19,17 @@ import type { AccountToolContext, InboundToolCall } from './registry';
  * change. Unlike the proxy, this fails closed: when the guardrails cannot be
  * read or run, the call is refused rather than executed unchecked.
  *
+ * Invariant: every workspace a tool call acts in with the caller's identity
+ * passes this check before its first read or write there. Only the addressing
+ * lookup that names it (slug to id) may run first. That covers the call's own
+ * workspace (`executeTool`), a tool argument or `client.org(x)` switch,
+ * federated fan-out (search_memory, search_sdk connector discovery), a public
+ * workspace browsed by path (resolve_path), a public workspace joined for
+ * managed auth, and a notification inbox's receiving workspace. A fan-out
+ * denies the whole call when any workspace it reaches is blocked; it never
+ * narrows silently. Anonymous public reads (`publicVisitorContext`) carry no
+ * caller identity and are not an entry.
+ *
  * A no-op without `ctx.inboundToolCall` (contexts built outside `executeTool`).
  * Each workspace is checked once per invocation, since a script may switch
  * into the same workspace on every SDK call.

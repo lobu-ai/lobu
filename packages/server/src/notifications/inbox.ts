@@ -4,6 +4,8 @@ import { getDb } from '../db/client';
 import type { ToolContext } from '../tools/registry';
 import { isInProcessSystemCall } from '../tools/access-control';
 import { ToolUserError } from '../utils/errors';
+import { enforceInboundPreToolGuardrails } from '../tools/inbound-guardrails';
+import { getOrgBySlug } from '../workspace/multi-tenant';
 import { getAjv } from '../utils/ajv-singleton';
 import { exceedsValidationLimits } from '../utils/metadata-limits';
 import type { EventKindDefinition } from '../utils/event-kind-validation';
@@ -44,12 +46,23 @@ async function loadInboxKinds(organization: string, db: DbClient, lock = false) 
   return rows[0];
 }
 
+/**
+ * The receiving workspace's inbound guardrails run before its inbox registry is
+ * read or written. An unknown slug falls through to the existing not-found path.
+ */
+async function enforceReceiverGuardrails(organization: string, ctx: ToolContext): Promise<void> {
+  if (!ctx.inboundToolCall || !ctx.appPrincipalId) return;
+  const receiver = await getOrgBySlug(organization);
+  if (receiver) await enforceInboundPreToolGuardrails({ ...ctx, organizationId: receiver.id });
+}
+
 function published(kind: EventKindDefinition | undefined): boolean {
   return kind?.inbox?.accept_from === 'authenticated_workspaces' && kind.inbox.recipients === 'admins';
 }
 
 export async function listNotificationInboxes(organization: string, ctx: ToolContext): Promise<InboxListing> {
   requireSender(ctx);
+  await enforceReceiverGuardrails(organization, ctx);
   const row = await loadInboxKinds(organization, getDb());
   return { inboxes: Object.entries(row?.event_kinds ?? {}).filter(([, kind]) => published(kind))
     .map(([key, kind]) => ({ key, description: kind.description ?? '', input_schema: kind.metadataSchema ?? { type: 'object' } })) };
@@ -62,6 +75,7 @@ export async function submitNotificationInbox(input: InboxSubmitInput, ctx: Tool
     Buffer.byteLength(JSON.stringify(data), 'utf8') > 16384) {
     throw new ToolUserError('Inbox data must not exceed 16 KiB', 422, 'VALIDATION');
   }
+  await enforceReceiverGuardrails(input.organization, ctx);
   const sql = getDb();
   return sql.begin(async (tx) => {
     // Share the owning registry row's lock with schema updates: revocation and

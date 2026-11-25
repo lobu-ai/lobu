@@ -2,6 +2,7 @@ import { enforceInboundPreToolGuardrails } from '../../../inbound-guardrails';
 import type { ToolContext } from '../../../registry';
 import { withFailureCode } from '../../../../utils/errors';
 import { joinPublicOrganization } from '../../../../workspace/join-public';
+import { getOrgBySlug } from '../../../../workspace/multi-tenant';
 import { resolveManagedAuthConnectorOffer } from '../../../../workspace/managed-auth-discovery';
 import type { ConnectionsArgs, ManageConnectionsResult } from '../schemas';
 import { handleRequiredManagedConnect } from './connect';
@@ -38,6 +39,16 @@ export async function handleConnectManaged(
 		}, 'NOT_FOUND');
 	}
 
+	// The public org's inbound guardrails run before the join, which writes a
+	// member row, its projection and a membership event into that workspace.
+	const target = await getOrgBySlug(organizationSlug);
+	if (!target) {
+		return withFailureCode({
+			error: `Managed auth org '${args.managed_by_org}' is no longer available. Discover organizations.list again before retrying.`,
+		}, 'NOT_FOUND');
+	}
+	await enforceInboundPreToolGuardrails({ ...ctx, organizationId: target.id });
+
 	const membership = await joinPublicOrganization({
 		userId: ctx.userId,
 		orgSlug: organizationSlug,
@@ -57,7 +68,6 @@ export async function handleConnectManaged(
 		grantedOrganizationIds: [membership.organizationId],
 		directSearchFederation: false,
 	};
-	await enforceInboundPreToolGuardrails(managedCtx);
 	return handleRequiredManagedConnect(
 		{
 			action: 'connect',
