@@ -167,33 +167,44 @@ export function policyConditionsKey(conditions: StoredPolicyConditions): string 
 	return conditions === null ? "" : stableStringify(conditions);
 }
 
-function fieldHolds(condition: Extract<PolicyCondition, { op: string }>, value: unknown): boolean {
-	if (condition.op === "exists") return value !== undefined;
-	// A missing field makes every other comparison false.
-	if (value === undefined) return false;
-	const expected = condition.value;
-	switch (condition.op) {
+type PositiveOp = "eq" | "in" | "contains" | "ends_with";
+
+/** Each negative op is exactly the negation of its positive op on a present field. */
+const NEGATION_OF: Partial<Record<PolicyConditionOp, PositiveOp>> = {
+	neq: "eq",
+	not_in: "in",
+	not_ends_with: "ends_with",
+};
+
+function positiveHolds(op: PositiveOp, expected: unknown, value: unknown): boolean {
+	switch (op) {
 		case "eq":
 			return sameJson(value, expected);
-		case "neq":
-			return !sameJson(value, expected);
 		case "in":
 			return Array.isArray(expected) && expected.some((item) => sameJson(value, item));
-		case "not_in":
-			return Array.isArray(expected) && !expected.some((item) => sameJson(value, item));
 		case "contains":
 			if (typeof value === "string") return typeof expected === "string" && value.includes(expected);
 			return Array.isArray(value) && value.some((item) => sameJson(item, expected));
-		case "ends_with":
-		case "not_ends_with": {
+		case "ends_with": {
 			if (typeof expected !== "string") return false;
-			const want = condition.op === "ends_with";
-			const one = (item: unknown) => typeof item === "string" && item.endsWith(expected) === want;
-			// On an array, every element must hold; an empty list holds nothing.
+			// String ops compare the raw value: a comma-joined string is never split.
+			const one = (item: unknown) => typeof item === "string" && item.endsWith(expected);
+			// On an array, every element must end with it; an empty list does not.
 			if (Array.isArray(value)) return value.length > 0 && value.every(one);
 			return one(value);
 		}
 	}
+}
+
+function fieldHolds(condition: Extract<PolicyCondition, { op: string }>, value: unknown): boolean {
+	if (condition.op === "exists") return value !== undefined;
+	// A missing field makes every other comparison false, negative ops included.
+	if (value === undefined) return false;
+	const positive = NEGATION_OF[condition.op];
+	// So `not_ends_with` holds when any element lacks the suffix, or the list is
+	// empty or holds a non-string: the strict side for a restricting rule.
+	if (positive) return !positiveHolds(positive, condition.value, value);
+	return positiveHolds(condition.op as PositiveOp, condition.value, value);
 }
 
 function scanHolds(scan: PolicyConditionScan, value: unknown): boolean {

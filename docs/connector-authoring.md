@@ -419,8 +419,15 @@ that must all hold for the rule to apply; otherwise it is ignored as if its
 scope did not match. A field condition is `{ field, op, value }`, where `field`
 is a JSON pointer such as `/to` and `op` is `eq`, `neq`, `in`, `not_in`,
 `contains`, `ends_with`, `not_ends_with`, or `exists` (no `value`). A missing
-field makes `exists` false and every other op false. On a list, `ends_with` and
-`not_ends_with` hold only if every element does. A scan condition is
+field makes `exists` false and every other op false. On a present field, `neq`,
+`not_in`, and `not_ends_with` are exactly the negation of `eq`, `in`, and
+`ends_with`. On a list, `ends_with` holds only if the list is non-empty and every
+element is a string ending with the value, so `not_ends_with` holds if any
+element lacks it. String ops compare the raw value and never split a
+comma-joined string. Scope by recipient with the destination `audience` above
+(`external`), not with string field ops: a connector without a
+`DestinationAudienceSource` (only Slack has one today) never matches an audience
+rule, so its sends get only the plain rules at that scope. A scan condition is
 `{ scan: "secrets" | "pii", field }` and runs the same detectors as the
 built-in secret and PII scans. `when` is part of the rule's scope, so a rule
 sits beside the same rule with a different or no `when`; a malformed condition

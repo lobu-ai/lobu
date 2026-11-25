@@ -837,9 +837,13 @@ describe("connected app caller identity", () => {
     const [card] = await getTestDb()`SELECT metadata FROM events WHERE run_id = ${held.body.run_id}
       AND organization_id = ${org.id} AND superseded_by IS NULL AND metadata->>'status' = 'pending_approval'`;
     expect(card?.metadata?.policy?.rules).toEqual([{ id: expect.any(Number), kind: "guardrail", note: "Ask before mailing outside", when: [outside] }]);
-    // On a list, not_ends_with holds only when every recipient is outside.
-    expect((await execute(named.token, { to: ["someone@outside.example", "other@outside.example"] })).body.status).toBe("pending_approval");
-    for (const to of ["teammate@acme.example", ["teammate@acme.example", "lead@acme.example"], ["teammate@acme.example", "someone@outside.example"]]) {
+    // not_ends_with is exactly !ends_with: one outside recipient, an empty list or a non-string recipient holds it.
+    for (const to of [["someone@outside.example", "other@outside.example"], ["someone@outside.example", "teammate@acme.example"], [], ["teammate@acme.example", 7]]) {
+      expect((await execute(named.token, { to })).body.status, JSON.stringify(to)).toBe("pending_approval");
+    }
+    // String ops compare the raw value; a comma-joined list is one string.
+    expect((await execute(named.token, { to: "someone@outside.example, teammate@acme.example" })).body.status).not.toBe("pending_approval");
+    for (const to of ["teammate@acme.example", ["teammate@acme.example", "lead@acme.example"]]) {
       const internal = await execute(named.token, { to });
       expect(internal.status, JSON.stringify(internal.body)).toBe(200);
       expect(internal.body.status, JSON.stringify(to)).not.toBe("pending_approval");
