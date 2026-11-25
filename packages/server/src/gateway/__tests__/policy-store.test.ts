@@ -1,6 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { AgentInlineGuardrail } from "@lobu/core";
+import type { CustomGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import { getDb } from "../../db/client.js";
+import type { ApplyingGuardrail } from "../../guardrails/workspace-guardrails.js";
 import {
   egressJudgeRules,
   findSuppressedJudgedDomains,
@@ -13,28 +15,39 @@ import {
   seedAgentRow,
 } from "./helpers/db-setup.js";
 
-function guardrail(
-  over: Partial<AgentInlineGuardrail> & { name: string }
-): AgentInlineGuardrail {
+type EgressOver = Partial<CustomGuardrailConfig> & {
+  name: string;
+  enabled?: boolean;
+};
+
+/** A library row as `resolveEgressGuardrails` returns it. */
+function guardrail({ name, enabled = true, ...config }: EgressOver): ApplyingGuardrail {
   return {
-    enabled: true,
-    stage: "egress",
-    policy: "p",
-    ...over,
-  } as AgentInlineGuardrail;
+    id: `id-${name}`,
+    name,
+    enabled,
+    revision: 1,
+    config: { kind: "judge", stage: "egress", policy: "p", ...config },
+  };
 }
 
-describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
-  async function storeGuardrails(
-    guardrails: AgentInlineGuardrail[],
-    organizationId = "org-a",
-    agentId = "agent-a"
-  ): Promise<void> {
-    const sql = getDb();
-    await sql`
-      UPDATE agents SET guardrails_inline = ${sql.json(guardrails)}
-      WHERE organization_id = ${organizationId} AND id = ${agentId}
-    `;
+describe("PolicyStore.resolve (reads the workspace guardrail library)", () => {
+  async function storeGuardrail(
+    over: EgressOver,
+    options: {
+      organizationId?: string;
+      appliesTo?: Array<{ kind: "agent" | "app"; id: string | null }> | "everyone";
+    } = {}
+  ): Promise<string> {
+    const { config, enabled } = guardrail(over);
+    const { id } = await createTestWorkspaceGuardrail({
+      organizationId: options.organizationId ?? "org-a",
+      name: over.name,
+      config,
+      enabled,
+      appliesTo: options.appliesTo ?? [{ kind: "agent", id: "agent-a" }],
+    });
+    return id;
   }
 
   beforeAll(async () => {
@@ -53,14 +66,12 @@ describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
   });
 
   test("matches an exact domain rule and carries its policy and model", async () => {
-    await storeGuardrails([
-      guardrail({
-        name: "default",
-        policy: "  Only allow read-only GET requests.  ",
-        model: "model-x",
-        domains: ["api.github.com"],
-      }),
-    ]);
+    await storeGuardrail({
+      name: "default",
+      policy: "  Only allow read-only GET requests.  ",
+      model: "model-x",
+      domains: ["api.github.com"],
+    });
     const [rule, ...rest] = await new PolicyStore().resolve(
       "org-a",
       "agent-a",
@@ -73,7 +84,7 @@ describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
   });
 
   test("a wildcard covers its subdomains and apex, on a label boundary", async () => {
-    await storeGuardrails([guardrail({ name: "j", domains: ["*.example.com"] })]);
+    await storeGuardrail({ name: "j", domains: ["*.example.com"] });
     const store = new PolicyStore();
     expect(await store.resolve("org-a", "agent-a", "foo.example.com")).toHaveLength(1);
     expect(await store.resolve("org-a", "agent-a", "example.com")).toHaveLength(1);
@@ -82,12 +93,10 @@ describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
   });
 
   test("returns EVERY covering rule: exact, longer and shorter wildcards all apply", async () => {
-    await storeGuardrails([
-      guardrail({ name: "short", policy: "short", domains: [".example.com"] }),
-      guardrail({ name: "long", policy: "long", domains: [".api.example.com"] }),
-      guardrail({ name: "exact", policy: "exact", domains: ["v1.api.example.com"] }),
-      guardrail({ name: "other", policy: "other", domains: ["example.org"] }),
-    ]);
+    await storeGuardrail({ name: "short", policy: "short", domains: [".example.com"] });
+    await storeGuardrail({ name: "long", policy: "long", domains: [".api.example.com"] });
+    await storeGuardrail({ name: "exact", policy: "exact", domains: ["v1.api.example.com"] });
+    await storeGuardrail({ name: "other", policy: "other", domains: ["example.org"] });
     const rules = await new PolicyStore().resolve(
       "org-a",
       "agent-a",
@@ -96,78 +105,93 @@ describe("PolicyStore.resolve (reads agents.guardrails_inline)", () => {
     expect(rules.map((r) => r.judgeName).sort()).toEqual(["exact", "long", "short"]);
   });
 
-  test("every covering guardrail is its own judge, even an exact duplicate", async () => {
-    await storeGuardrails([
-      guardrail({ name: "dup", policy: "first", domains: ["x.com"] }),
-      guardrail({ name: "dup", policy: "second", domains: ["x.com"] }),
-      guardrail({ name: "dup", policy: "first", domains: [".x.com"] }),
-    ]);
+  test("guardrails accumulate across subjects: everyone, every agent, and this agent", async () => {
+    await seedAgentRow("agent-b", { organizationId: "org-a" });
+    await storeGuardrail({ name: "everyone", domains: ["x.com"] }, { appliesTo: "everyone" });
+    await storeGuardrail({ name: "all-agents", domains: ["x.com"] }, { appliesTo: [{ kind: "agent", id: null }] });
+    await storeGuardrail({ name: "mine", domains: ["x.com"] });
+    await storeGuardrail({ name: "other-agent", domains: ["x.com"] }, { appliesTo: [{ kind: "agent", id: "agent-b" }] });
+    await storeGuardrail({ name: "apps-only", domains: ["x.com"] }, { appliesTo: [{ kind: "app", id: null }] });
     const rules = await new PolicyStore().resolve("org-a", "agent-a", "x.com");
-    expect(rules.map((r) => r.policy)).toEqual(["first", "second", "first"]);
-    // The duplicate shares the first one's verdict-cache key (same verdict).
-    expect(rules[2]?.policyHash).toBe(rules[0]?.policyHash as string);
+    expect(rules.map((r) => r.judgeName)).toEqual(["all-agents", "everyone", "mine"]);
   });
 
   test("distinct judges never share a verdict-cache key", async () => {
-    await storeGuardrails([
-      // Reads the same as the next one once name and policy are space-joined.
-      guardrail({ name: "owner check", policy: "Only allow reads.", domains: ["x.com"] }),
-      guardrail({ name: "owner", policy: "check Only allow reads.", domains: ["x.com"] }),
-      // Same name and policy, different model: the verdict can differ.
-      guardrail({ name: "owner", policy: "Only allow reads.", model: "m-1", domains: ["x.com"] }),
-      guardrail({ name: "owner", policy: "Only allow reads.", model: "m-2", domains: ["x.com"] }),
-    ]);
+    await storeGuardrail({ name: "owner-check", policy: "Only allow reads.", domains: ["x.com"] });
+    // Reads the same as the previous one once name and policy are space-joined.
+    await storeGuardrail({ name: "owner", policy: "-check Only allow reads.", domains: ["x.com"] });
+    // Same policy, different model: the verdict can differ.
+    await storeGuardrail({ name: "m1", policy: "Only allow reads.", model: "m-1", domains: ["x.com"] });
+    await storeGuardrail({ name: "m2", policy: "Only allow reads.", model: "m-2", domains: ["x.com"] });
     const rules = await new PolicyStore().resolve("org-a", "agent-a", "x.com");
     expect(rules).toHaveLength(4);
     expect(new Set(rules.map((r) => r.policyHash)).size).toBe(4);
   });
 
-  test("ignores disabled, non-egress and policy-less guardrails", async () => {
-    await storeGuardrails([
-      guardrail({ name: "off", enabled: false, domains: ["x.com"] }),
-      guardrail({ name: "in", stage: "input", domains: ["x.com"] }),
-      guardrail({ name: "blank", policy: "  ", domains: ["x.com"] }),
-    ]);
+  test("ignores disabled, non-egress, policy-less and built-in guardrails", async () => {
+    await storeGuardrail({ name: "off", enabled: false, domains: ["x.com"] });
+    await storeGuardrail({ name: "in", stage: "input", domains: ["x.com"] });
+    await storeGuardrail({ name: "blank", policy: "  ", domains: ["x.com"] });
+    await createTestWorkspaceGuardrail({
+      organizationId: "org-a",
+      name: "secrets",
+      config: { builtin: "secret-scan" },
+    });
     expect(await new PolicyStore().resolve("org-a", "agent-a", "x.com")).toEqual([]);
   });
 
-  test("a warm store follows every change to the stored policy", async () => {
+  test("a warm store follows every change to the library", async () => {
+    const sql = getDb();
     const store = new PolicyStore();
-    await storeGuardrails([guardrail({ name: "j", policy: "first", domains: ["x.com"] })]);
+    const id = await storeGuardrail({ name: "j", policy: "first", domains: ["x.com"] });
     const first = await store.resolve("org-a", "agent-a", "x.com");
     const again = await store.resolve("org-a", "agent-a", "x.com");
     expect(again[0]?.policyHash).toBe(first[0]?.policyHash as string);
 
-    await storeGuardrails([guardrail({ name: "j", policy: "second", domains: ["x.com"] })]);
+    await sql`
+      UPDATE workspace_guardrails
+      SET config = jsonb_set(config, '{policy}', '"second"'), revision = revision + 1
+      WHERE id = ${id}
+    `;
     const changed = await store.resolve("org-a", "agent-a", "x.com");
     expect(changed[0]?.policy).toBe("second");
     expect(changed[0]?.policyHash).not.toBe(first[0]?.policyHash as string);
 
-    await storeGuardrails([]);
+    await sql`UPDATE workspace_guardrails SET enabled = false WHERE id = ${id}`;
     expect(await store.resolve("org-a", "agent-a", "x.com")).toEqual([]);
 
-    // Deleting the agent row leaves nothing to judge with.
-    await storeGuardrails([guardrail({ name: "j", domains: ["x.com"] })]);
+    await sql`UPDATE workspace_guardrails SET enabled = true WHERE id = ${id}`;
     expect(await store.resolve("org-a", "agent-a", "x.com")).toHaveLength(1);
-    await getDb()`DELETE FROM agents WHERE organization_id = 'org-a' AND id = 'agent-a'`;
+    await sql`DELETE FROM workspace_guardrail_subjects WHERE guardrail_id = ${id}`;
+    expect(await store.resolve("org-a", "agent-a", "x.com")).toEqual([]);
+
+    await sql`
+      INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
+      VALUES (${id}, 'org-a', 'agent', 'agent-a')
+    `;
+    expect(await store.resolve("org-a", "agent-a", "x.com")).toHaveLength(1);
+    await sql`UPDATE workspace_guardrails SET archived_at = now() WHERE id = ${id}`;
     expect(await store.resolve("org-a", "agent-a", "x.com")).toEqual([]);
   });
 
   test("is scoped by organization: the same agent id elsewhere owns nothing here", async () => {
     await seedAgentRow("agent-a", { organizationId: "org-b" });
-    await storeGuardrails([guardrail({ name: "a-only", domains: ["x.com"] })]);
+    await storeGuardrail({ name: "a-only", domains: ["x.com"] });
+    await storeGuardrail(
+      { name: "everyone-in-a", domains: ["x.com"] },
+      { appliesTo: "everyone" }
+    );
     const store = new PolicyStore();
-    expect(await store.resolve("org-a", "agent-a", "x.com")).toHaveLength(1);
+    expect(await store.resolve("org-a", "agent-a", "x.com")).toHaveLength(2);
     expect(await store.resolve("org-b", "agent-a", "x.com")).toEqual([]);
   });
 
   test("the verdict-cache key differs across orgs and agents for an identical policy", async () => {
     await seedAgentRow("agent-a", { organizationId: "org-b" });
     await seedAgentRow("agent-b", { organizationId: "org-a" });
-    const same = [guardrail({ name: "j", policy: "same", domains: ["x.com"] })];
-    await storeGuardrails(same, "org-a");
-    await storeGuardrails(same, "org-b");
-    await storeGuardrails(same, "org-a", "agent-b");
+    const same = { name: "j", policy: "same", domains: ["x.com"] };
+    await storeGuardrail(same, { appliesTo: [{ kind: "agent", id: null }] });
+    await storeGuardrail(same, { organizationId: "org-b" });
     const store = new PolicyStore();
     const hashes = await Promise.all(
       [
@@ -212,20 +236,24 @@ describe("egressJudgeRules / judgedEgressDomains", () => {
       ])
     ).toEqual([".example.com"]);
   });
+
+  test("skips built-in rows", () => {
+    expect(
+      egressJudgeRules([
+        { id: "b", name: "secrets", enabled: true, revision: 1, config: { builtin: "secret-scan" } },
+      ])
+    ).toEqual([]);
+  });
 });
 
 describe("findSuppressedJudgedDomains", () => {
-  const judge = (
-    over: Partial<AgentInlineGuardrail> = {}
-  ): AgentInlineGuardrail =>
-    ({
+  const judge = (over: Partial<EgressOver> = {}): ApplyingGuardrail =>
+    guardrail({
       name: "watchdog",
-      stage: "egress",
-      enabled: true,
       policy: "Allow read-only GETs.",
       domains: ["example.com"],
       ...over,
-    }) as AgentInlineGuardrail;
+    });
 
   test("reports an exact judged domain shadowed by an exact grant", () => {
     const found = findSuppressedJudgedDomains([judge()], ["example.com"]);
@@ -336,7 +364,7 @@ describe("findSuppressedJudgedDomains", () => {
   test("ignores a non-egress guardrail", () => {
     expect(
       findSuppressedJudgedDomains(
-        [judge({ stage: "ingress" } as Partial<AgentInlineGuardrail>)],
+        [judge({ stage: "input" })],
         ["example.com"]
       )
     ).toEqual([]);

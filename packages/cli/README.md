@@ -79,11 +79,14 @@ docker run -d --name lobu-pg -p 5432:5432 \
 
 `defineAgent` accepts `settings: Omit<AgentSettingsStored, "updatedAt">`, derived
 from the canonical settings schema. The existing `providers`, `network`,
-`guardrails`, `nixPackages`, and `starters` helpers remain supported. Choose one
-source for each setting: apply rejects overlaps between `settings`, a helper,
-or a prompt file such as `IDENTITY.md`. Skills are not agent settings: they live
-in the workspace skill library, and an Automation's `skills` names library
-skills that the server freezes into the version when it saves.
+`nixPackages`, and `starters` helpers remain supported. Choose one source for
+each setting: apply rejects overlaps between `settings`, a helper, or a prompt
+file such as `IDENTITY.md`. Skills are not agent settings: they live in the
+workspace skill library, and an Automation's `skills` names library skills that
+the server freezes into the version when it saves. Guardrails are not agent
+settings either: they live in the workspace guardrail library (Settings →
+Policies, or `client.guardrails`), and apply rejects an agent that still
+declares `guardrails`.
 
 ```ts
 const support = defineAgent({

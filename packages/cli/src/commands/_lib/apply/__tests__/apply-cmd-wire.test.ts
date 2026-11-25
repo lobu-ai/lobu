@@ -462,7 +462,7 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
       mkProject(`import { defineConfig, defineAgent } from "@lobu/cli/config";
 export default defineConfig({ agents: [defineAgent({
   id: "triage", name: "Triage", providers: [], skills: [],
-  network: { allowed: [], denied: [] }, guardrails: [], nixPackages: [],
+  network: { allowed: [], denied: [] }, nixPackages: [],
 })] });`);
     for (const filename of ["SOUL.md", "IDENTITY.md", "USER.md"]) {
       writeFileSync(join(dir, "agents", "triage", filename), " \n");
@@ -473,7 +473,6 @@ export default defineConfig({ agents: [defineAgent({
         allowedDomains: ["example.com"],
         deniedDomains: ["blocked.example.com"],
       },
-      guardrails: ["old-guardrail"],
       nixConfig: { packages: ["ffmpeg"] },
       soulMd: "Old soul",
       identityMd: "Old identity",
@@ -503,7 +502,6 @@ export default defineConfig({ agents: [defineAgent({
       {
         models: [],
         networkConfig: { allowedDomains: [], deniedDomains: [] },
-        guardrails: [],
         nixConfig: { packages: [] },
         soulMd: "",
         identityMd: "",

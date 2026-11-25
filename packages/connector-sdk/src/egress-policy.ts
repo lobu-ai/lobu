@@ -160,28 +160,6 @@ export function wildcardParentPatterns(hostname: string): string[] {
 }
 
 /**
- * Pick the rule whose pattern covers `hostname`, preferring an exact pattern
- * over any wildcard and a longer wildcard over a shorter one
- * (`.api.example.com` beats `.example.com`). Wildcards cover their apex.
- */
-export function findLongestMatchingPattern<T>(
-  hostname: string,
-  rules: readonly T[],
-  patternOf: (rule: T) => string,
-): T | undefined {
-  const host = hostname.toLowerCase();
-  const exact = rules.find((rule) => {
-    const pattern = patternOf(rule);
-    return wildcardSuffix(pattern) === null && pattern.toLowerCase() === host;
-  });
-  if (exact) return exact;
-  return rules
-    .filter((rule) => wildcardSuffix(patternOf(rule)) !== null)
-    .sort((a, b) => patternOf(b).length - patternOf(a).length)
-    .find((rule) => patternCovers(patternOf(rule), host));
-}
-
-/**
  * Whether an `allow` pattern reaches any host a `covering` pattern covers.
  *
  * Used to refuse an allow entry that would shadow a judged domain, and to

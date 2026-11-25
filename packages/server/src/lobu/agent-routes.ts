@@ -1445,7 +1445,6 @@ routes.patch("/:agentId/config", async (c) => {
 		if (conflict) return c.json(conflict, conflict.status);
 		const validationError = await validateAgentSettingsUpdate(
 			updates,
-			before,
 			orgId,
 			agentId
 		);

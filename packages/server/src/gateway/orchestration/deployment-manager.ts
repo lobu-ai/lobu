@@ -2,7 +2,7 @@ import { type MessagePayload, normalizeDomainPattern } from "@lobu/core";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import type { GrantStore } from "../permissions/grant-store.js";
 import { patternReaches } from "@lobu/connector-sdk/egress-policy";
-import { judgedEgressDomains } from "../permissions/policy-store.js";
+import { readJudgedEgressDomains } from "../permissions/policy-store.js";
 import type { WritableSecretStore } from "../secrets/index.js";
 import type { CredentialLeaseRegistry } from "../agent-tooling/credential-lease.js";
 import { resolveAgentToolingDeclaration } from "../agent-tooling/resolver.js";
@@ -306,7 +306,7 @@ export class DeploymentManager {
    * Sync per-agent network and Nix cache domain grants to the grant store.
    * Called on worker create and every message so config changes pick up without
    * redeploying. The egress judge policy itself is not synced anywhere: the
-   * HTTP proxy reads it from `agents.guardrails_inline` per request.
+   * HTTP proxy reads it from the workspace guardrail library per request.
    *
    * Domains reconcile against Postgres UNCONDITIONALLY — the pod-local
    * cache is never trusted for them. Non-expiring domain rows are written
@@ -323,9 +323,10 @@ export class DeploymentManager {
 
     if (!this.grantStore) return;
 
-    const judgedDomains = judgedEgressDomains(messageData.guardrailsInline ?? []);
-
     const orgId = messageData.organizationId;
+    const judgedDomains = orgId
+      ? await readJudgedEgressDomains(orgId, agentId)
+      : [];
 
     // ── Domains: PG-reconciled ──────────────────────────────────────────
     // pattern → denied flag, keyed in NORMALIZED form so alias spellings

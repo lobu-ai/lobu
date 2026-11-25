@@ -10,7 +10,7 @@ import {
   wildcardParentPatterns,
 } from "@lobu/connector-sdk/egress-policy";
 import { getDb, pgTextArray } from "../../db/client.js";
-import { judgedEgressDomains } from "./policy-store.js";
+import { readJudgedEgressDomains } from "./policy-store.js";
 import { orgScope, requireOrgId } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("grant-store");
@@ -27,34 +27,6 @@ function getDomainGrantCandidates(pattern: string): string[] {
   }
 
   return [...candidates];
-}
-
-/**
- * The agent's judged egress domains, read from its DURABLE config
- * (`agents.guardrails_inline`, the one source every replica agrees on and the
- * one the proxy's `PolicyStore` reads too).
- *
- * Routed through `judgedEgressDomains`, the same builder the runtime uses, so
- * the enabled / stage / non-empty-policy filtering and the pattern
- * normalization match everywhere.
- *
- * Errors PROPAGATE. If we cannot tell whether a domain is judged, granting it
- * risks silently disabling a policy control, while refusing surfaces loudly and
- * the dispatch reconcile simply retries on the next message.
- */
-async function readJudgedDomains(
-  agentId: string,
-  organizationId: string
-): Promise<string[]> {
-  const sql = getDb();
-  const rows = (await sql`
-    SELECT guardrails_inline
-    FROM agents
-    WHERE organization_id = ${organizationId} AND id = ${agentId}
-  `) as Array<{ guardrails_inline: unknown }>;
-  const inline = rows[0]?.guardrails_inline;
-  if (!Array.isArray(inline)) return [];
-  return judgedEgressDomains(inline);
 }
 
 /**
@@ -146,7 +118,7 @@ export class GrantStore {
     // kinds (MCP tool patterns, which is what interactive tool approvals
     // write) cannot shadow a domain judge at all.
     if (kind === "domain" && !denied) {
-      const judged = await readJudgedDomains(agentId, orgId);
+      const judged = await readJudgedEgressDomains(orgId, agentId);
       if (judged.some((j) => patternReaches(j, pattern))) {
         logger.info(
           "Skipped allow grant — the egress judge governs this domain",

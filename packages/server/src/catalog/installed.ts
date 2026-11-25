@@ -1,4 +1,5 @@
 import type { GuardrailStage } from "@lobu/core";
+import { isBuiltinGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
 import { assertAgentConfigReadAllowed } from "../authz/agent-config-access";
 import { assertSkillConfigReadAllowed } from "../authz/skill-config-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
@@ -10,6 +11,10 @@ import type { Env } from "../index";
 import { getLobuCoreServices } from "../lobu/gateway";
 import { orgContext } from "../lobu/stores/org-context";
 import { librarySkillsApplyingTo } from "../skills/workspace-skills";
+import {
+	agentGuardrailPrincipal,
+	guardrailsApplyingTo,
+} from "../guardrails/workspace-guardrails";
 import { createPostgresAgentConfigStore } from "../lobu/stores/postgres-stores";
 import {
 	EMPTY_SUMMARY,
@@ -52,6 +57,9 @@ function automationEventsForUi(
 }
 
 const configStore = createPostgresAgentConfigStore();
+
+/** The message stages a built-in guardrail can be registered at. */
+const BUILTIN_STAGES: GuardrailStage[] = ["input", "output", "pre-tool"];
 
 /** Only MCP routing fields are public catalog metadata; credentials never are. */
 function publicMcpConfig(
@@ -289,34 +297,26 @@ export async function listAgentInstalled(
 	}
 
 	if (wanted.has("guardrails")) {
-		const enabled = new Set(settings.guardrails ?? []);
-		const core = getLobuCoreServices();
-		const registry = core?.getGuardrailRegistry?.();
-		// The guardrail *name* is the unit of configuration — `settings.guardrails`
-		// is a flat name list, so enabling a name arms it at every stage it is
-		// registered for. A single name can be registered at multiple stages (the
-		// built-in `pii-scan` runs at input/output/pre-tool), so the per-stage scan
-		// below would otherwise emit the same name three times: duplicate `id`s
-		// break the InstalledItem contract and the UI's name-keyed rows (React key
-		// collision, inflated count, one toggle flipping every copy). Collapse by
-		// name and carry the union of stages instead. Insertion order follows the
-		// stage scan so each name lists its stages input→output→pre-tool.
-		const byName = new Map<string, GuardrailStage[]>();
-		if (registry) {
-			const stages: GuardrailStage[] = ["input", "output", "pre-tool"];
-			for (const stage of stages) {
-				for (const guardrail of registry.list(stage)) {
-					const existing = byName.get(guardrail.name);
-					if (existing) existing.push(stage);
-					else byName.set(guardrail.name, [stage]);
-				}
-			}
-		}
-		const items: InstalledItem[] = Array.from(byName, ([name, stages]) => ({
-			id: name,
-			name,
-			detail: { stages, enabled: enabled.has(name) },
-		}));
+		// The workspace library guardrails that apply to this agent, enabled or
+		// not. A built-in carries every stage it is registered at (`pii-scan`
+		// runs at input, output and pre-tool); a custom check carries its own.
+		const registry = getLobuCoreServices()?.getGuardrailRegistry?.();
+		const guardrails = await guardrailsApplyingTo(
+			getDb(),
+			ctx.organizationId,
+			agentGuardrailPrincipal(agentId),
+		);
+		const items: InstalledItem[] = guardrails.map((guardrail) => {
+			const config = guardrail.config;
+			const stages: GuardrailStage[] = isBuiltinGuardrailConfig(config)
+				? BUILTIN_STAGES.filter((stage) => registry?.get(stage, config.builtin))
+				: [config.stage];
+			return {
+				id: guardrail.id,
+				name: guardrail.name,
+				detail: { guardrail_id: guardrail.id, stages, enabled: guardrail.enabled },
+			};
+		});
 		result.guardrails = { kind: "guardrails", items };
 	}
 

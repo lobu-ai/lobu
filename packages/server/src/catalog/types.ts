@@ -16,7 +16,7 @@
  *   | automations   | Automation inventory rows                               | yes (rows)  |
  *   | skills      | workspace skill library rows that apply to the agent  | no          |
  *   | providers   | agent `models` slug prefixes + module registry metadata | no        |
- *   | guardrails  | agent `guardrails` enable list + gateway registry     | no          |
+ *   | guardrails  | workspace guardrail library rows that apply to the agent | no       |
  *
  * Only connector *definitions* are persisted as installable catalog entries in
  * Postgres. Everything else is manifest/registry + settings overlay.

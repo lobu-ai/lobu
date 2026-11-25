@@ -1048,8 +1048,6 @@ export interface Agent {
   skills?: Skill[];
   providers?: ProviderConfig[];
   network?: NetworkConfig;
-  /** Guardrails enabled for this agent, by registered name. */
-  guardrails?: string[];
   /** Nix packages provisioned into the worker environment. */
   nixPackages?: string[];
   /**

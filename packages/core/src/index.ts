@@ -111,7 +111,6 @@ export { extractTraceId, generateTraceId } from "./trace";
 // Core types
 export type {
   AgentErrorContext,
-  AgentInlineGuardrail,
   AgentOptions,
   AuthProfile,
   DeclaredCredential,

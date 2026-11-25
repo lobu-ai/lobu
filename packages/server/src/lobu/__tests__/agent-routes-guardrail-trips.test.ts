@@ -12,21 +12,12 @@
  * the genuine `events` table; no network.
  */
 
-import {
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  spyOn,
-  test,
-} from 'bun:test';
+import { beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
   seedOrgMembership,
 } from '../../gateway/__tests__/helpers/db-setup.js';
-import { resolveSystemJudgeTarget } from '../../gateway/inference/system-judge-target.js';
 import { authStash, installRouteTestMocks } from './helpers/route-test-mocks';
 
 installRouteTestMocks();
@@ -42,14 +33,6 @@ const OTHER_AGENT = 'other-agent';
 beforeAll(async () => {
   await ensureDbForGatewayTests();
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
-  // Guardrail judge models are resolved against the provider registry at write
-  // time, so the persistence tests below need a registry and a system key or
-  // their fixture model is rejected before it is ever stored.
-  process.env.LOBU_PROVIDER_REGISTRY_PATH = new URL(
-    '../../../../../config/providers.json',
-    import.meta.url
-  ).pathname;
-  process.env.OPENAI_API_KEY ||= 'sk-test-deployment-owned';
 }, 60_000);
 
 async function seedOrgAndAgent(
@@ -119,261 +102,33 @@ beforeEach(async () => {
   authStash.mcpAuthInfo = null;
 }, 30_000);
 
-describe('custom guardrails persist through PATCH/GET /config', () => {
-  test('guardrailsInline round-trips and merges without clobbering other settings', async () => {
-    const app = await importAgentRoutes();
-    const inline = [
-      {
-        name: 'no-competitors',
-        enabled: true,
-        stage: 'output',
-        policy: 'Deny any response that names a competitor.',
-        model: 'openai/gpt-4o-mini',
-      },
-    ];
-
-    // Seed an unrelated setting first so we can prove the partial merge.
-    const seedIdentity = await app.request(`/${AGENT}/config`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ identityMd: 'You are a helpful agent.' }),
-    });
-    expect(seedIdentity.status).toBe(200);
-
-    const patch = await app.request(`/${AGENT}/config`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ guardrailsInline: inline }),
-    });
-    expect(patch.status).toBe(200);
-
-    const get = await app.request(`/${AGENT}/config`);
-    expect(get.status).toBe(200);
-    const body = (await get.json()) as {
-      guardrailsInline?: unknown;
-      identityMd?: string;
-    };
-    expect(body.guardrailsInline).toEqual(inline);
-    // The earlier identity write survived the guardrail patch (partial merge).
-    expect(body.identityMd).toBe('You are a helpful agent.');
-  });
-
-  test('disabling a custom guardrail persists the enabled=false flag', async () => {
-    const app = await importAgentRoutes();
-    const inline = [
-      {
-        name: 'tone-check',
-        enabled: false,
-        stage: 'input',
-        policy: 'Deny hostile messages.',
-        // A model is required (the test org has no default provider model).
-        model: 'openai/gpt-4o-mini',
-      },
-    ];
-    await app.request(`/${AGENT}/config`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ guardrailsInline: inline }),
-    });
-    const get = await app.request(`/${AGENT}/config`);
-    const body = (await get.json()) as {
-      guardrailsInline?: Array<{ enabled: boolean }>;
-    };
-    expect(body.guardrailsInline?.[0]?.enabled).toBe(false);
-  });
-
-  test('refuses the retired skillsConfig key with a 422 naming manage_skills and persists nothing', async () => {
-    // Skills moved to the workspace library. A caller still sending the old
-    // key learns where they went instead of having the key silently dropped.
+describe('retired agent settings keys answer 422 naming their new home', () => {
+  test.each([
+    { key: 'skillsConfig', value: { skills: [] }, names: 'manage_skills' },
+    { key: 'guardrails', value: ['secret-scan'], names: 'client.guardrails' },
+    {
+      key: 'guardrailsInline',
+      value: [{ name: 'tone', enabled: true, stage: 'output', policy: 'deny' }],
+      names: 'client.guardrails',
+    },
+  ])('refuses $key and persists nothing', async ({ key, value, names }) => {
+    // A caller still sending the old key learns where it went instead of
+    // having the key silently dropped, and the rest of the patch is not saved.
     const app = await importAgentRoutes();
     const res = await app.request(`/${AGENT}/config`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ soulMd: 'Must not persist', skillsConfig: { skills: [] } }),
+      body: JSON.stringify({ soulMd: 'Must not persist', [key]: value }),
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error?: string; error_description?: string };
     expect(body.error).toBe('setting_moved');
-    expect(body.error_description).toContain('manage_skills');
+    expect(body.error_description).toContain(names);
 
     const get = await app.request(`/${AGENT}/config`);
-    const after = (await get.json()) as { soulMd?: string; skillsConfig?: unknown };
+    const after = (await get.json()) as Record<string, unknown>;
     expect(after.soulMd).not.toBe('Must not persist');
-    expect(after).not.toHaveProperty('skillsConfig');
-  });
-
-  test('rejects a custom guardrail with no model when the org has no default model', async () => {
-    // The test org has no default provider model, so a model is required.
-    const app = await importAgentRoutes();
-    const res = await app.request(`/${AGENT}/config`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        guardrailsInline: [
-          { name: 'needs-model', enabled: true, stage: 'output', policy: 'deny' },
-        ],
-      }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBe('guardrail_model_required');
-  });
-
-  // A judge model that cannot resolve used to SAVE and then deny every request
-  // the guardrail covers at runtime, with only a log line to explain it. These
-  // two pin the write-time gate that replaced that silent failure.
-  describe('judge model resolution at write time', () => {
-    const REGISTRY_ENV = 'LOBU_PROVIDER_REGISTRY_PATH';
-    const REGISTRY_PATH = new URL(
-      '../../../../../config/providers.json',
-      import.meta.url
-    ).pathname;
-    let undo: Array<() => void> = [];
-
-    function setEnv(key: string, value: string | undefined) {
-      const prev = process.env[key];
-      undo.push(() => {
-        if (prev === undefined) delete process.env[key];
-        else process.env[key] = prev;
-      });
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-
-    afterEach(() => {
-      for (const fn of undo.reverse()) fn();
-      undo = [];
-    });
-
-    test('rejects a judge model this deployment can never run', async () => {
-      // `claude` is sdkCompat "anthropic" in the shipped registry, and the
-      // judge transport speaks only OpenAI-compatible /chat/completions. The
-      // key being SET is the point: presence of a credential must not be
-      // mistaken for the model being runnable.
-      setEnv(REGISTRY_ENV, REGISTRY_PATH);
-      setEnv('ANTHROPIC_API_KEY', 'sk-ant-still-configured');
-      const app = await importAgentRoutes();
-      const res = await app.request(`/${AGENT}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          guardrailsInline: [
-            {
-              name: 'anthropic-judge',
-              enabled: true,
-              stage: 'output',
-              policy: 'deny',
-              model: 'claude/claude-haiku-4-5-20251001',
-            },
-          ],
-        }),
-      });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { error?: string };
-      expect(body.error).toBe('guardrail_model_unresolvable');
-    });
-
-    test('an already-stored model that stopped resolving stays editable', async () => {
-      // The lockout this prevents: every PATCH carries the whole
-      // guardrailsInline array, so re-validating stored values would make an
-      // agent holding a now-unrunnable model impossible to edit — including to
-      // remove the offending guardrail. Save a valid model, take its credential
-      // away, then prove the agent can still be saved.
-      setEnv(REGISTRY_ENV, REGISTRY_PATH);
-      setEnv('OPENAI_API_KEY', 'sk-deployment-owned');
-      const app = await importAgentRoutes();
-      const inline = [
-        {
-          name: 'grandfathered',
-          enabled: true,
-          stage: 'output',
-          policy: 'deny',
-          model: 'openai/gpt-4o-mini',
-        },
-      ];
-      const saved = await app.request(`/${AGENT}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ guardrailsInline: inline }),
-      });
-      expect(saved.status).toBe(200);
-
-      // The credential goes away; the stored model can no longer resolve.
-      setEnv('OPENAI_API_KEY', undefined);
-      expect(
-        (await resolveSystemJudgeTarget('openai/gpt-4o-mini')).ok
-      ).toBe(false);
-
-      const again = await app.request(`/${AGENT}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ identityMd: 'edited', guardrailsInline: inline }),
-      });
-      expect(again.status).toBe(200);
-
-      // But a NEWLY named bad model is still refused — grandfathering is scoped
-      // to the exact stored value, not a blanket amnesty.
-      const changed = await app.request(`/${AGENT}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          guardrailsInline: [
-            { ...inline[0], model: 'claude/claude-haiku-4-5-20251001' },
-          ],
-        }),
-      });
-      expect(changed.status).toBe(400);
-    });
-
-    test('rejects a model-less guardrail when the org default model cannot run the judge', async () => {
-      // A model-less guardrail runs on the org default. A Claude (Anthropic
-      // protocol) default is not judge-eligible, so saving it would only deny
-      // every covered request at runtime.
-      const providerSecrets = await import('../stores/provider-secrets.js');
-      const spy = spyOn(providerSecrets, 'getOrgDefaultModel').mockResolvedValue(
-        'claude/claude-haiku-4-5-20251001'
-      );
-      try {
-        const app = await importAgentRoutes();
-        const res = await app.request(`/${AGENT}/config`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            guardrailsInline: [
-              { name: 'no-model', enabled: true, stage: 'output', policy: 'deny' },
-            ],
-          }),
-        });
-        expect(res.status).toBe(400);
-        expect((await res.json()).error).toBe('guardrail_model_unresolvable');
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    test('accepts a judge model backed by an operator system key', async () => {
-      // POSITIVE CONTROL. A validator that rejected every model would pass the
-      // test above while making the Guardrails tab unusable.
-      setEnv(REGISTRY_ENV, REGISTRY_PATH);
-      setEnv('OPENAI_API_KEY', 'sk-deployment-owned');
-      const app = await importAgentRoutes();
-      const res = await app.request(`/${AGENT}/config`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          guardrailsInline: [
-            {
-              name: 'openai-judge',
-              enabled: true,
-              stage: 'output',
-              policy: 'deny',
-              model: 'openai/gpt-4o-mini',
-            },
-          ],
-        }),
-      });
-      expect(res.status).toBe(200);
-    });
+    expect(after).not.toHaveProperty(key);
   });
 
   test('guardrail-judge-default reports null when the org has no default model', async () => {

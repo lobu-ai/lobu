@@ -60,46 +60,6 @@ const _stageCheck: _StageCheck = true;
 void _stageCheck;
 
 /**
- * Operator-authored guardrail on an agent.
- *
- * - `kind: "judge"` (default when omitted) — LLM text judge; needs `policy`.
- * - `kind: "require-tool"` — pure lookup against this turn's `toolsUsed`;
- *   needs `tools` (manual tool names). Fixed policy: missing tool trips;
- *   an unreported toolsUsed value passes. No model call.
- */
-/**
- * NOTE: this is a permissive object, not a discriminated union — `policy` and
- * `tools` are optional here even though each variant requires one of them.
- * Narrowing the shape would force every one of the ~37 read sites to discriminate
- * before touching a field, for no safety gain: `guardrailsInline` is only ever
- * written through `validateGuardrailsInline` (server/src/lobu/agent-settings.ts),
- * which rejects a judge with no policy AND a require-tool with no tools before
- * anything is persisted. Both write paths (the PATCH config route and the
- * `manage_agents` tool) reach it through `validateAgentSettingsUpdate`; a new
- * write path must do the same.
- */
-export const AgentInlineGuardrailSchema = Type.Object({
-  name: Type.String(),
-  enabled: Type.Boolean(),
-  stage: GuardrailStageSchema,
-  /** Defaults to `"judge"` when omitted (backward compatible). */
-  kind: Type.Optional(
-    Type.Union([Type.Literal("judge"), Type.Literal("require-tool")])
-  ),
-  /** Required for `kind: "judge"` (enforced by validateGuardrailsInline). */
-  policy: Type.Optional(Type.String()),
-  model: Type.Optional(Type.String()),
-  /**
-   * For `judge` pre-tool: optional tool-name filter (run only for these tools).
-   * For `require-tool`: the tool name(s) that must appear in this turn's
-   * `toolsUsed` (manual, e.g. `["send_message"]`).
-   */
-  tools: Type.Optional(Type.Array(Type.String())),
-  domains: Type.Optional(Type.Array(Type.String())),
-});
-export type AgentInlineGuardrail = Static<typeof AgentInlineGuardrailSchema>;
-
-/**
  * A skill as `lobu.config.ts` declares it. Agent settings no longer carry
  * skills: they live in the workspace skill library (`manage_skills`). A skill
  * is its `content` body only; there is no `instructions` alternate and no
@@ -150,8 +110,6 @@ export const AgentSettingsStoredSchema = Type.Object({
   soulMd: Type.Optional(Type.String()),
   userMd: Type.Optional(Type.String()),
   identityMd: Type.Optional(Type.String()),
-  guardrails: Type.Optional(Type.Array(Type.String())),
-  guardrailsInline: Type.Optional(Type.Array(AgentInlineGuardrailSchema)),
   sandboxId: Type.Optional(Type.String()),
   verboseLogging: Type.Optional(Type.Boolean()),
   showToolCalls: Type.Optional(Type.Boolean()),

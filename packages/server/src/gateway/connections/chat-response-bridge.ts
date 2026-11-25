@@ -28,7 +28,6 @@ import {
   type RenderedAgentError,
   renderAgentError,
 } from "../../utils/url-builder.js";
-import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { InteractionService } from "../interactions.js";
 import {
   isRetryableTurnError,
@@ -121,14 +120,11 @@ export class ChatResponseBridge implements ResponseRenderer {
   constructor(private manager: ChatInstanceManager) {}
 
   /**
-   * Wire output-stage guardrails. Both must be set for guardrails to run;
-   * with neither, the bridge behaves as before.
+   * Wire output-stage guardrails. Without a registry the bridge behaves as
+   * before (no output guardrails run).
    */
-  setGuardrails(
-    registry?: GuardrailRegistry,
-    settingsStore?: AgentSettingsStore
-  ): void {
-    this.outputGuardrail.setGuardrails(registry, settingsStore);
+  setGuardrails(registry?: GuardrailRegistry): void {
+    this.outputGuardrail.setGuardrails(registry);
   }
 
   setInteractionService(interactionService: InteractionService): void {

@@ -4,18 +4,19 @@
  * that is both judged and allow-granted returns `source: "grant"` and its judge
  * policy never runs. The request still succeeds, which is why nobody notices.
  *
- * PATCH `/:agentId/config` rejects that combination (400
- * `guardrail_domain_shadowed_by_grant`). These tests drive the real `agentRoutes`
- * Hono app over the embedded-PG harness, because the part that cannot be
- * covered by a pure unit test is the MERGE: a PATCH may carry `guardrailsInline`
- * alone, `networkConfig` alone, or both, and the hole only exists in the
- * combination of the patch with what is already stored.
+ * PATCH `/:agentId/config` rejects an allow list that collides with an egress
+ * judge from the workspace guardrail library that applies to the agent (400
+ * `guardrail_domain_shadowed_by_grant`). These tests drive the real
+ * `agentRoutes` Hono app over the embedded-PG harness, because the part a pure
+ * unit test cannot cover is the read: which library guardrails apply to the
+ * agent being patched.
  *
  * Pure matching/normalization coverage for `findSuppressedJudgedDomains` lives
  * in `gateway/__tests__/policy-store.test.ts`.
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -34,15 +35,26 @@ const TEST_ENCRYPTION_KEY =
 const ORG = "org-judge-shadow";
 const AGENT = "judge-shadow-agent";
 
-const JUDGE = {
-  name: "watchdog",
-  stage: "egress",
-  enabled: true,
-  policy: "Allow read-only GETs.",
-  domains: ["example.com"],
-  // Named explicitly so the route's judge-model check cannot be what rejects.
-  model: "openai/gpt-4o-mini",
-};
+const OTHER_AGENT = "judge-shadow-other";
+
+/** Seed an egress judge in the library, applying to `agentId` (AGENT by default). */
+function seedJudge(
+  name: string,
+  domains: string[],
+  agentId: string = AGENT
+): Promise<unknown> {
+  return createTestWorkspaceGuardrail({
+    organizationId: ORG,
+    name,
+    config: {
+      kind: "judge",
+      stage: "egress",
+      policy: "Allow read-only GETs.",
+      domains,
+    },
+    appliesTo: [{ kind: "agent", id: agentId }],
+  });
+}
 
 async function seedOrgAndAgent(): Promise<void> {
   const { getDb } = await import("../../db/client.js");
@@ -51,26 +63,22 @@ async function seedOrgAndAgent(): Promise<void> {
     INSERT INTO organization (id, name, slug)
     VALUES (${ORG}, ${ORG}, ${ORG}) ON CONFLICT (id) DO NOTHING
   `;
-  await sql`
-    INSERT INTO agents (id, organization_id, name)
-    VALUES (${AGENT}, ${ORG}, 'Judge Shadow Agent')
-    ON CONFLICT (organization_id, id) DO NOTHING
-  `;
-}
-
-/** Write settings straight to the row, bypassing the route's validation. */
-async function storeSettings(settings: Record<string, unknown>): Promise<void> {
-  const { getDb } = await import("../../db/client.js");
-  const sql = getDb();
-  for (const [column, value] of Object.entries({
-    guardrails_inline: settings.guardrailsInline ?? [],
-    network_config: settings.networkConfig ?? {},
-  })) {
+  for (const id of [AGENT, OTHER_AGENT]) {
     await sql`
-      UPDATE agents SET ${sql(column)} = ${sql.json(value as object)}
-      WHERE organization_id = ${ORG} AND id = ${AGENT}
+      INSERT INTO agents (id, organization_id, name)
+      VALUES (${id}, ${ORG}, ${id})
+      ON CONFLICT (organization_id, id) DO NOTHING
     `;
   }
+}
+
+/** Write the allow list straight to the row, bypassing the route's validation. */
+async function storeAllowedDomains(allowedDomains: string[]): Promise<void> {
+  const { getDb } = await import("../../db/client.js");
+  await getDb()`
+    UPDATE agents SET network_config = ${getDb().json({ allowedDomains })}
+    WHERE organization_id = ${ORG} AND id = ${AGENT}
+  `;
 }
 
 async function patchConfig(body: unknown) {
@@ -85,14 +93,6 @@ async function patchConfig(body: unknown) {
 beforeAll(async () => {
   await ensureDbForGatewayTests();
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
-  // The route resolves every NEW judge model against the provider registry
-  // before it reaches the shadowing check, so `JUDGE.model` needs a registry
-  // and a system key or `guardrail_model_unresolvable` is the rejection.
-  process.env.LOBU_PROVIDER_REGISTRY_PATH = new URL(
-    "../../../../../config/providers.json",
-    import.meta.url
-  ).pathname;
-  process.env.OPENAI_API_KEY ||= "sk-test-deployment-owned";
 }, 60_000);
 
 beforeEach(async () => {
@@ -112,9 +112,9 @@ beforeEach(async () => {
 }, 30_000);
 
 describe("PATCH /config — a judged domain must not be allow-granted", () => {
-  test("rejects when ONE patch carries both sides", async () => {
+  test("rejects an allow list that collides with a library judge", async () => {
+    await seedJudge("watchdog", ["example.com"]);
     const res = await patchConfig({
-      guardrailsInline: [JUDGE],
       networkConfig: { allowedDomains: ["example.com"] },
     });
     expect(res.status).toBe(400);
@@ -128,14 +128,12 @@ describe("PATCH /config — a judged domain must not be allow-granted", () => {
     expect(body.error_description).toContain("example.com");
   });
 
-  test("names EVERY judge a grant silences, not just the last one declared", async () => {
+  test("names EVERY judge a grant silences, not just one", async () => {
     // Every judge covering a host runs, so one grant over a domain judged by
     // two guardrails hides both — the operator must see both to repair it.
+    await seedJudge("watchdog", ["example.com"]);
+    await seedJudge("second-watch", ["example.com"]);
     const res = await patchConfig({
-      guardrailsInline: [
-        JUDGE,
-        { ...JUDGE, name: "second-watch", policy: "Deny uploads." },
-      ],
       networkConfig: { allowedDomains: ["example.com"] },
     });
     expect(res.status).toBe(400);
@@ -144,32 +142,10 @@ describe("PATCH /config — a judged domain must not be allow-granted", () => {
     expect(body.error_description).toContain("second-watch");
   });
 
-  test("rejects a guardrail patch that collides with the STORED allow list", async () => {
-    await storeSettings({ networkConfig: { allowedDomains: ["example.com"] } });
-    const res = await patchConfig({ guardrailsInline: [JUDGE] });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error?: string }).error).toBe(
-      "guardrail_domain_shadowed_by_grant"
-    );
-  });
-
-  test("rejects a networkConfig patch that collides with the STORED guardrail", async () => {
-    await storeSettings({ guardrailsInline: [JUDGE] });
+  test("rejects a WILDCARD grant that covers a judged subdomain", async () => {
+    await seedJudge("watchdog", ["api.example.com"]);
     const res = await patchConfig({
-      networkConfig: { allowedDomains: ["example.com"] },
-    });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error?: string }).error).toBe(
-      "guardrail_domain_shadowed_by_grant"
-    );
-  });
-
-  test("rejects when a stored WILDCARD grant covers a newly judged subdomain", async () => {
-    await storeSettings({
       networkConfig: { allowedDomains: ["*.example.com"] },
-    });
-    const res = await patchConfig({
-      guardrailsInline: [{ ...JUDGE, domains: ["api.example.com"] }],
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error?: string }).error).toBe(
@@ -179,46 +155,39 @@ describe("PATCH /config — a judged domain must not be allow-granted", () => {
 
   // ── the config must still be repairable, and healthy configs must save ──
   test("accepts a judged domain with NO grant (the correct shape)", async () => {
-    const res = await patchConfig({
-      guardrailsInline: [JUDGE],
-      networkConfig: { allowedDomains: [] },
-    });
+    await seedJudge("watchdog", ["example.com"]);
+    const res = await patchConfig({ networkConfig: { allowedDomains: [] } });
     expect(res.status).toBe(200);
   });
 
   test("accepts a grant for an UNRELATED domain alongside a judge", async () => {
+    await seedJudge("watchdog", ["example.com"]);
     const res = await patchConfig({
-      guardrailsInline: [JUDGE],
       networkConfig: { allowedDomains: ["example.org"] },
     });
     expect(res.status).toBe(200);
   });
 
-  test("REPAIR: removing the grant saves, even from a shadowed stored state", async () => {
-    await storeSettings({
-      guardrailsInline: [JUDGE],
+  test("a judge that applies to ANOTHER agent does not block this one", async () => {
+    await seedJudge("watchdog", ["example.com"], OTHER_AGENT);
+    const res = await patchConfig({
       networkConfig: { allowedDomains: ["example.com"] },
     });
-    const res = await patchConfig({ networkConfig: { allowedDomains: [] } });
     expect(res.status).toBe(200);
   });
 
-  test("REPAIR: dropping the guardrail saves, even from a shadowed stored state", async () => {
-    await storeSettings({
-      guardrailsInline: [JUDGE],
-      networkConfig: { allowedDomains: ["example.com"] },
-    });
-    const res = await patchConfig({ guardrailsInline: [] });
+  test("REPAIR: removing the grant saves, even from a shadowed stored state", async () => {
+    await seedJudge("watchdog", ["example.com"]);
+    await storeAllowedDomains(["example.com"]);
+    const res = await patchConfig({ networkConfig: { allowedDomains: [] } });
     expect(res.status).toBe(200);
   });
 
   test("an UNRELATED patch is not blocked by a pre-existing shadowed state", async () => {
     // Rejecting here would lock the agent out of edits it cannot use to repair
-    // the overlap — the same reasoning that grandfathers stored judge models.
-    await storeSettings({
-      guardrailsInline: [JUDGE],
-      networkConfig: { allowedDomains: ["example.com"] },
-    });
+    // the overlap.
+    await seedJudge("watchdog", ["example.com"]);
+    await storeAllowedDomains(["example.com"]);
     const res = await patchConfig({ soulMd: "An unrelated edit." });
     expect(res.status).toBe(200);
   });

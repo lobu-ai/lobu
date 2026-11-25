@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { MessagePayload } from "@lobu/core";
+import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
 import {
   type DeploymentInfo,
   DeploymentManager,
@@ -385,15 +386,20 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
   const isDenied = (pattern: string, organizationId = "test-org") =>
     grantStore.isDenied("agent-1", pattern, organizationId);
 
-  const judgeOn = (...domains: string[]) => [
-    {
+  /** Seed an egress judge from the workspace guardrail library on agent-1. */
+  const judgeOn = (domains: string[], enabled = true) =>
+    createTestWorkspaceGuardrail({
+      organizationId: "test-org",
       name: "watchdog",
-      stage: "egress" as const,
-      enabled: true,
-      policy: "Allow read-only GETs.",
-      domains,
-    },
-  ];
+      config: {
+        kind: "judge",
+        stage: "egress",
+        policy: "Allow read-only GETs.",
+        domains,
+      },
+      enabled,
+      appliesTo: [{ kind: "agent", id: "agent-1" }],
+    });
 
   beforeAll(async () => {
     await ensureDbForGatewayTests();
@@ -408,22 +414,22 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
   });
 
   test("skips the allow grant for a domain its own judge governs", async () => {
+    await judgeOn(["api.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
-        guardrailsInline: judgeOn("api.example.com"),
       })
     );
     expect(await hasGrant("api.example.com")).toBe(false);
   });
 
   test("still grants an UNJUDGED domain in the same payload", async () => {
+    await judgeOn(["api.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: {
           allowedDomains: ["api.example.com", "plain.example.net"],
         },
-        guardrailsInline: judgeOn("api.example.com"),
       })
     );
     expect(await hasGrant("api.example.com")).toBe(false);
@@ -436,20 +442,20 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
     // the saved agent config, so PR #3299's write-time guard never saw it.
     // Mechanically identical to a config domain — which is the point: the
     // reconcile cannot tell them apart, so enforcing here covers both.
+    await judgeOn(["contributed.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["contributed.example.com"] },
-        guardrailsInline: judgeOn("contributed.example.com"),
       })
     );
     expect(await hasGrant("contributed.example.com")).toBe(false);
   });
 
   test("skips a Nix cache domain the judge governs, keeps the rest", async () => {
+    await judgeOn(["cache.nixos.org"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         nixConfig: { packages: ["python311"] },
-        guardrailsInline: judgeOn("cache.nixos.org"),
       })
     );
     expect(await hasGrant("cache.nixos.org")).toBe(false);
@@ -457,33 +463,33 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
   });
 
   test("matches a judged WILDCARD against a specific allowed host", async () => {
+    await judgeOn(["*.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
-        guardrailsInline: judgeOn("*.example.com"),
       })
     );
     expect(await hasGrant("api.example.com")).toBe(false);
   });
 
   test("normalizes both sides — alias spellings still collapse", async () => {
+    await judgeOn([".EXAMPLE.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["*.example.com"] },
-        guardrailsInline: judgeOn(".EXAMPLE.com"),
       })
     );
     expect(await hasGrant(".example.com")).toBe(false);
   });
 
   test("DENY still wins over the judge", async () => {
+    await judgeOn(["api.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: {
           allowedDomains: ["api.example.com"],
           deniedDomains: ["api.example.com"],
         },
-        guardrailsInline: judgeOn("api.example.com"),
       })
     );
     expect(await isDenied("api.example.com")).toBe(true);
@@ -500,22 +506,20 @@ describe("syncNetworkConfigGrants — a judged domain gets no allow grant", () =
 
     // Adding a judge over it must reconcile the stale grant AWAY, or the
     // judge stays inert for every agent that was already in this state.
+    await judgeOn(["api.example.com"]);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
-        guardrailsInline: judgeOn("api.example.com"),
       })
     );
     expect(await hasGrant("api.example.com")).toBe(false);
   });
 
   test("a DISABLED judge does not suppress the grant", async () => {
+    await judgeOn(["api.example.com"], false);
     await manager.syncNetworkConfigGrants(
       buildPayload({
         networkConfig: { allowedDomains: ["api.example.com"] },
-        guardrailsInline: [
-          { ...judgeOn("api.example.com")[0], enabled: false },
-        ],
       })
     );
     expect(await hasGrant("api.example.com")).toBe(true);

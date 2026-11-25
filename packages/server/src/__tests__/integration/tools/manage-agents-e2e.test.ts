@@ -257,7 +257,6 @@ describe("manage_agents — builder gate e2e", () => {
     for (const settings of [
       { invented: true }, { identityMd: "duplicate" }, { updatedAt: 0 },
       { networkConfig: { allowedDomains: ["invalid host"] } },
-      { guardrailsInline: [{ name: "bad", enabled: true, stage: "input" }] },
       { models: ["unconnected/model"] },
     ]) {
       await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", name: "Changed", settings }, TEST_ENV, ownerCtx)).rejects.toThrow();
@@ -267,6 +266,12 @@ describe("manage_agents — builder gate e2e", () => {
     await expect(executeTool("manage_agents", {
       action: "update", agent_id: "invalid-settings-bot", settings: { skillsConfig: { skills: [] } },
     }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/manage_skills/) });
+    // Guardrails moved to the workspace guardrail library the same way.
+    for (const settings of [{ guardrails: ["secret-scan"] }, { guardrailsInline: [] }]) {
+      await expect(executeTool("manage_agents", {
+        action: "update", agent_id: "invalid-settings-bot", settings,
+      }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/client\.guardrails/) });
+    }
     await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", settings: { soulMd: "Denied" } }, TEST_ENV, memberCtx)).rejects.toThrow();
     expect(await sdk.get("invalid-settings-bot")).toEqual(before);
   });

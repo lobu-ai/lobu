@@ -288,12 +288,19 @@ function mapAgent(
       `Agent "${agent.id}" settings${error?.path ?? ""}: ${error?.message ?? "invalid settings"}`
     );
   }
+  // Guardrails are workspace items now, not agent fields. A JavaScript config
+  // reaches here without TypeScript checking, so refuse the old field by name
+  // instead of silently dropping the checks it declared.
+  if (Object.hasOwn(agent, "guardrails")) {
+    throw new ValidationError(
+      `Agent "${agent.id}" declares guardrails, which are no longer agent fields: guardrails live in the workspace guardrail library. Declare them with defineGuardrail() in the config's top-level guardrails once it ships; until then, read them with client.guardrails or in Settings → Policies.`
+    );
+  }
   const settings: Partial<AgentSettings> = { ...agent.settings };
   for (const [helper, key] of [
     ["providers", "models"],
     ["network", "networkConfig"],
     ["nixPackages", "nixConfig"],
-    ["guardrails", "guardrails"],
     ["starters", "starters"],
   ] as const) {
     if (agent[helper] !== undefined && settings[key] !== undefined) {
@@ -337,10 +344,6 @@ function mapAgent(
         : {}),
       ...(denied !== undefined ? { deniedDomains: [...new Set(denied)] } : {}),
     };
-  }
-
-  if (agent.guardrails !== undefined) {
-    settings.guardrails = [...new Set(agent.guardrails)];
   }
 
   if (agent.nixPackages !== undefined) {

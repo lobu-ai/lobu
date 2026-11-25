@@ -1624,18 +1624,23 @@ describe("mapProjectToDesiredState", () => {
     expect(net?.deniedDomains).toEqual(["evil.example.com"]);
   });
 
-  test("maps guardrails and nix packages", () => {
+  test("maps nix packages", () => {
     const agent = defineAgent({
       id: "a",
-      guardrails: ["secret-scan", "secret-scan", "pii-scan"],
       nixPackages: ["ffmpeg", "ffmpeg", "python311"],
     });
     const settings = mapProjectToDesiredState(
       defineConfig({ agents: [agent] }),
       env
     ).agents[0]?.settings;
-    expect(settings?.guardrails).toEqual(["secret-scan", "pii-scan"]);
     expect(settings?.nixConfig).toEqual({ packages: ["ffmpeg", "python311"] });
+  });
+
+  test("rejects an agent that still declares guardrails, naming the library", () => {
+    const agent = { ...defineAgent({ id: "a" }), guardrails: ["secret-scan"] };
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ agents: [agent] }), env)
+    ).toThrow(/declares guardrails.*defineGuardrail/);
   });
 
   test("maps starters, and leaves them undeclared when absent", () => {
@@ -1675,7 +1680,6 @@ describe("mapProjectToDesiredState", () => {
     ).agents[0]?.settings;
     expect(settings).not.toHaveProperty("networkConfig");
     expect(settings).not.toHaveProperty("toolsConfig");
-    expect(settings).not.toHaveProperty("guardrails");
     expect(settings).not.toHaveProperty("nixConfig");
   });
 

@@ -308,7 +308,6 @@ async function handleSend(
   const scanTerminalText = async (text: string): Promise<string> => {
     const trip = await runOutputGuardrailScan(
       guardrailRegistry,
-      agentSettingsStore,
       text,
       {
         agentId: args.agent_id,

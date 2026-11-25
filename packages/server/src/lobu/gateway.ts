@@ -461,10 +461,7 @@ export async function initLobuGateway(options?: {
 			const unifiedConsumer = gateway.getUnifiedConsumer();
 			if (unifiedConsumer) {
 				const bridge = new ChatResponseBridge(chatInstanceManager);
-				bridge.setGuardrails(
-					coreServices.getGuardrailRegistry(),
-					coreServices.getAgentSettingsStore(),
-				);
+				bridge.setGuardrails(coreServices.getGuardrailRegistry());
 				bridge.setInteractionService(coreServices.getInteractionService());
 				unifiedConsumer.setChatResponseBridge(bridge);
 				// Cross-pod fan-out for chat-platform interaction cards (ask_user,

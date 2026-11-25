@@ -14,12 +14,7 @@
  * silently lied. Hoisting closes the gap.
  */
 
-import type {
-  AgentInlineGuardrail,
-  AgentOptions,
-  NetworkConfig,
-  NixConfig,
-} from "../types";
+import type { AgentOptions, NetworkConfig, NixConfig } from "../types";
 
 /**
  * Job type for queue messages.
@@ -111,17 +106,6 @@ export interface MessagePayload {
    * deployment reused across conversations pinned to different realms.
    */
   runtimeProviderId?: string;
-
-  /**
-   * Per-agent operator-authored inline guardrails. Threaded alongside
-   * `networkConfig` so the deployment manager's grant sync can keep the
-   * domains of `egress`-stage judges out of the agent's allow grants (an allow
-   * grant outranks the judge). The proxy-plane judge itself reads the policy
-   * from `agents.guardrails_inline`, not from this payload. The
-   * input/output/pre-tool entries are resolved separately by the message
-   * pipeline from agent settings; they ride here only for the grant sync.
-   */
-  guardrailsInline?: AgentInlineGuardrail[];
 
   /** Nix environment configuration for the agent workspace. */
   nixConfig?: NixConfig;
