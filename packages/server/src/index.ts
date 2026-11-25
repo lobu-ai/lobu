@@ -114,6 +114,8 @@ import {
 	publicRestSearchKnowledge,
 	restGetAutomations,
 	restGetGuardrail,
+	restPutGuardrail,
+	restDeleteGuardrail,
 	restListGuardrails,
 	restGetViewShell,
 	restHealth,
@@ -1085,6 +1087,9 @@ app.patch(
 app.get("/api/:orgSlug/automations", mcpAuth, restGetAutomations);
 app.get("/api/:orgSlug/guardrails", mcpAuth, restListGuardrails);
 app.get("/api/:orgSlug/guardrails/:id", mcpAuth, restGetGuardrail);
+app.put("/api/:orgSlug/guardrails", mcpAuth, restPutGuardrail);
+app.put("/api/:orgSlug/guardrails/:id", mcpAuth, restPutGuardrail);
+app.delete("/api/:orgSlug/guardrails/:id", mcpAuth, restDeleteGuardrail);
 app.get("/api/:orgSlug/public/automations", publicRestGetAutomations);
 
 async function handleContentDistribution(c: Context<{ Bindings: Env }>) {

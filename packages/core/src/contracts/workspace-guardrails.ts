@@ -102,6 +102,45 @@ export interface GetGuardrailResult {
   guardrail: WorkspaceGuardrail;
 }
 
+/**
+ * A guardrail's writable fields. `applies_to` defaults to every agent;
+ * `enabled` defaults to true. Subjects name agents only: every agent
+ * (`principal_id: null`) or one agent.
+ */
+export const GuardrailInputSchema = Type.Object({
+  name: Type.String({
+    description:
+      "Lowercase letters, digits and single inner hyphens, at most 64 characters. Fixed once created: a rename is archive plus create.",
+  }),
+  config: WorkspaceGuardrailConfigSchema,
+  applies_to: Type.Optional(
+    Type.Array(GuardrailSubjectSchema, {
+      description:
+        "Who the guardrail applies to: agent subjects only. Defaults to every agent.",
+    })
+  ),
+  enabled: Type.Optional(Type.Boolean({ description: "Default true" })),
+});
+export type GuardrailInput = Static<typeof GuardrailInputSchema>;
+
+/**
+ * `PUT /api/:org/guardrails` (create, `expected_revision: 0`) and
+ * `PUT /api/:org/guardrails/:id` (full replace at the current revision).
+ */
+export const PutGuardrailBodySchema = Type.Object({
+  guardrail: GuardrailInputSchema,
+  expected_revision: Type.Integer({
+    minimum: 0,
+    description:
+      "0 to create; otherwise the revision being replaced (409 when stale)",
+  }),
+});
+export type PutGuardrailBody = Static<typeof PutGuardrailBodySchema>;
+
+export interface PutGuardrailResult {
+  guardrail: WorkspaceGuardrail;
+}
+
 /** True when `config` is a built-in toggle rather than a custom check. */
 export function isBuiltinGuardrailConfig(
   config: WorkspaceGuardrailConfig

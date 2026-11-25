@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { isTokenDerivedSession, POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
+import { type HumanMintedPatScope, isTokenDerivedSession } from "../auth/oauth/scopes";
 import {
 	canonicalConnectorPolicyScope,
 	CONNECTOR_POLICY_CATEGORIES,
@@ -102,23 +102,27 @@ export async function requireOrganizationSettingsAdmin(c: Context) {
  * Workspace changes only a person may make: an owner/admin's own web session,
  * not one exchanged from a token. OAuth apps, PATs, and agent/worker tokens are
  * refused even with `mcp:admin`, so a connected app cannot widen its own
- * access. `acceptPolicyToken` also admits a `policies:write` PAT, which only
- * such a session can mint; it is scoped to organization connector rules and
- * never reaches other settings.
+ * access. `acceptScopedToken` also admits an org-bound PAT carrying that
+ * human-minted scope (`policies:write` for organization connector rules,
+ * `guardrails:write` for the guardrail library), which only such a session can
+ * mint; it never reaches other settings.
  */
-export function requireHumanWorkspaceAdmin(c: Context, { acceptPolicyToken = false } = {}) {
+export function requireHumanWorkspaceAdmin(
+	c: Context,
+	{ acceptScopedToken }: { acceptScopedToken?: HumanMintedPatScope } = {},
+) {
 	const org = c.get("organizationId");
 	if (!org || !c.get("user")?.id) return c.json({ error: "unauthorized" }, 401);
 	if (!["owner", "admin"].includes(c.get("memberRole") ?? "")) return c.json({ error: "forbidden" }, 403);
 	const auth = c.get("mcpAuthInfo");
 	if (c.get("authSource") === "session" && !auth && !isTokenDerivedSession(c.get("session"))) return null;
-	if (acceptPolicyToken && c.get("authSource") === "pat" && auth?.organizationId === org &&
-		auth.scopes.includes(POLICY_WRITE_SCOPE) && !auth.agentId && !auth.workerId &&
+	if (acceptScopedToken && c.get("authSource") === "pat" && auth?.organizationId === org &&
+		auth.scopes.includes(acceptScopedToken) && !auth.agentId && !auth.workerId &&
 		!auth.scopes.includes("device_worker:run")) return null;
 	return c.json({
 		error: "forbidden",
-		message: acceptPolicyToken
-			? "Use an owner/admin web session or an explicitly granted policies:write token."
+		message: acceptScopedToken
+			? `Use an owner/admin web session or an explicitly granted ${acceptScopedToken} token.`
 			: "This requires an owner/admin web session; connected apps and tokens cannot use it.",
 	}, 403);
 }

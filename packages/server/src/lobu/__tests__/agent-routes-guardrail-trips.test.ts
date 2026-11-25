@@ -130,13 +130,6 @@ describe('retired agent settings keys answer 422 naming their new home', () => {
     expect(after.soulMd).not.toBe('Must not persist');
     expect(after).not.toHaveProperty(key);
   });
-
-  test('guardrail-judge-default reports null when the org has no default model', async () => {
-    const app = await importAgentRoutes();
-    const res = await app.request(`/${AGENT}/guardrail-judge-default`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ defaultModel: null });
-  });
 });
 
 describe('GET /agents/:agentId/guardrail-trips', () => {

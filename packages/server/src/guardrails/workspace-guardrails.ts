@@ -2,14 +2,18 @@
  * The workspace guardrail library (`workspace_guardrails` +
  * `workspace_guardrail_subjects`). Every reader goes through here: the message
  * pipeline (chat input/output, pre-tool on the outbound MCP proxy), the egress
- * policy store and grant guards, the catalog's installed view, and the
- * read-only REST/SDK list/get.
+ * policy store and grant guards, and the read-only REST/SDK list/get; the
+ * REST writers apply through here too.
  */
-import type {
-	GuardrailSubject,
-	ListGuardrailsResult,
-	WorkspaceGuardrail,
-	WorkspaceGuardrailConfig,
+import { randomBytes } from "node:crypto";
+import { isLibrarySkillName, LIBRARY_SKILL_NAME_MAX_CHARS } from "@lobu/core/agent-tooling";
+import {
+	BUILTIN_GUARDRAIL_NAMES,
+	type BuiltinGuardrailName,
+	type GuardrailSubject,
+	type ListGuardrailsResult,
+	type WorkspaceGuardrail,
+	type WorkspaceGuardrailConfig,
 } from "@lobu/core/contracts/workspace-guardrails";
 import type { GuardrailStage } from "@lobu/core";
 import type { ActingPrincipal } from "../authz/entity-policy";
@@ -35,7 +39,6 @@ export interface ApplyingGuardrail {
 }
 
 interface ApplyingQuery {
-	enabledOnly: boolean;
 	/** Only custom checks at this stage (built-ins carry no stage). */
 	stage?: GuardrailStage;
 	/** Skip transferring rows while the set still hashes to this revision. */
@@ -43,7 +46,7 @@ interface ApplyingQuery {
 }
 
 /**
- * The unarchived guardrails that apply to `principal`, plus a content revision
+ * The enabled, unarchived guardrails that apply to `principal`, plus a content revision
  * of exactly that set. One indexed read over a bounded config table; the
  * subject predicate is `principalMatches` in SQL: everyone, the principal's
  * kind, the principal itself, or (for an Automation) its owner agent. `rows`
@@ -63,7 +66,7 @@ async function queryApplying(
 			FROM workspace_guardrails g
 			WHERE g.organization_id = ${organizationId}
 			  AND g.archived_at IS NULL
-			  AND (${!query.enabledOnly} OR g.enabled)
+			  AND g.enabled
 			  AND (${query.stage ?? null}::text IS NULL OR g.config ->> 'stage' = ${query.stage ?? null})
 			  AND EXISTS (
 			    SELECT 1 FROM workspace_guardrail_subjects gs
@@ -110,16 +113,7 @@ export async function resolveGuardrails(
 	organizationId: string,
 	principal: GuardrailPrincipal,
 ): Promise<ApplyingGuardrail[]> {
-	return (await queryApplying(sql, organizationId, principal, { enabledOnly: true })).rows ?? [];
-}
-
-/** Every unarchived guardrail applying to `principal`, disabled ones included (the installed view). */
-export async function guardrailsApplyingTo(
-	sql: DbClient,
-	organizationId: string,
-	principal: GuardrailPrincipal,
-): Promise<ApplyingGuardrail[]> {
-	return (await queryApplying(sql, organizationId, principal, { enabledOnly: false })).rows ?? [];
+	return (await queryApplying(sql, organizationId, principal, {})).rows ?? [];
 }
 
 /**
@@ -133,7 +127,6 @@ export function resolveEgressGuardrails(
 	knownRevision: string | null,
 ): Promise<{ revision: string; rows: ApplyingGuardrail[] | null }> {
 	return queryApplying(sql, organizationId, principal, {
-		enabledOnly: true,
 		stage: "egress",
 		knownRevision,
 	});
@@ -258,4 +251,343 @@ export async function getWorkspaceGuardrail(
 	const [guardrail] = await withSubjects(sql, organizationId, rows);
 	if (!guardrail) throw new ToolUserError(`Guardrail "${id}" not found`, 404);
 	return guardrail;
+}
+
+// ============================================
+// Library writes (REST PUT / DELETE)
+// ============================================
+
+/** A guardrail's writable fields with every default applied. */
+export interface GuardrailBody {
+	name: string;
+	config: WorkspaceGuardrailConfig;
+	applies_to: GuardrailSubject[];
+	enabled: boolean;
+}
+
+/**
+ * One library write, validated and ready to apply: a create (revision 0), a
+ * full replace of guardrail `id` at `expected_revision`, or an archive.
+ */
+export type GuardrailWrite =
+	| { op: "create"; id: null; expected_revision: 0; guardrail: GuardrailBody }
+	| { op: "update"; id: string; expected_revision: number; guardrail: GuardrailBody }
+	| { op: "archive"; id: string; expected_revision: number; guardrail: null };
+
+const EVERY_AGENT: GuardrailSubject[] = [{ principal_kind: "agent", principal_id: null }];
+const GUARDRAIL_STAGES: readonly GuardrailStage[] = ["input", "output", "pre-tool", "egress"];
+const CUSTOM_CONFIG_KEYS = new Set(["kind", "stage", "policy", "model", "tools", "domains"]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringList(value: unknown, field: string, { nonEmpty }: { nonEmpty: boolean }): string[] {
+	if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+		throw new ToolUserError(`config.${field} must be an array of non-blank strings.`, 422);
+	}
+	const items = [...new Set((value as string[]).map((item) => item.trim()))];
+	if (nonEmpty && items.length === 0) throw new ToolUserError(`config.${field} must not be empty.`, 422);
+	return items;
+}
+
+/**
+ * The config a guardrail stores, in one canonical key order, or a 422 naming
+ * what is wrong. These are the rules the runtime relies on and the schema
+ * cannot express: a `judge` needs a policy, `require-tool` runs only at
+ * `output` and needs tools, and an `egress` judge needs the domains it
+ * governs (one without any never runs).
+ */
+export function normalizeGuardrailConfig(raw: unknown): WorkspaceGuardrailConfig {
+	if (!isPlainObject(raw)) throw new ToolUserError("config must be an object.", 422);
+	if ("builtin" in raw) {
+		const extra = Object.keys(raw).filter((key) => key !== "builtin");
+		if (extra.length > 0) {
+			throw new ToolUserError(`A built-in guardrail's config takes only "builtin"; remove ${extra.join(", ")}.`, 422);
+		}
+		if (!(BUILTIN_GUARDRAIL_NAMES as readonly unknown[]).includes(raw.builtin)) {
+			throw new ToolUserError(`config.builtin must be one of: ${BUILTIN_GUARDRAIL_NAMES.join(", ")}.`, 422);
+		}
+		return { builtin: raw.builtin as BuiltinGuardrailName };
+	}
+	const unknown = Object.keys(raw).filter((key) => !CUSTOM_CONFIG_KEYS.has(key));
+	if (unknown.length > 0) throw new ToolUserError(`config has unknown field(s): ${unknown.join(", ")}.`, 422);
+	if (raw.kind !== "judge" && raw.kind !== "require-tool") {
+		throw new ToolUserError('config.kind must be "judge" or "require-tool" (or pass config.builtin).', 422);
+	}
+	if (!GUARDRAIL_STAGES.includes(raw.stage as GuardrailStage)) {
+		throw new ToolUserError(`config.stage must be one of: ${GUARDRAIL_STAGES.join(", ")}.`, 422);
+	}
+	const stage = raw.stage as GuardrailStage;
+	if (raw.policy !== undefined && typeof raw.policy !== "string") {
+		throw new ToolUserError("config.policy must be a string.", 422);
+	}
+	if (raw.model !== undefined && typeof raw.model !== "string") {
+		throw new ToolUserError("config.model must be a string.", 422);
+	}
+	const model = typeof raw.model === "string" && raw.model.trim() !== "" ? raw.model.trim() : undefined;
+	if (raw.kind === "require-tool") {
+		if (stage !== "output") throw new ToolUserError('A require-tool guardrail runs only at stage "output".', 422);
+		if (raw.domains !== undefined) throw new ToolUserError("config.domains applies only to an egress judge.", 422);
+		return {
+			kind: "require-tool",
+			stage,
+			tools: stringList(raw.tools, "tools", { nonEmpty: true }),
+		};
+	}
+	if (typeof raw.policy !== "string" || raw.policy.trim() === "") {
+		throw new ToolUserError("A judge guardrail needs a non-blank config.policy.", 422);
+	}
+	if (raw.domains !== undefined && stage !== "egress") {
+		throw new ToolUserError("config.domains applies only to an egress judge.", 422);
+	}
+	if (raw.tools !== undefined && stage !== "pre-tool") {
+		throw new ToolUserError("config.tools applies to a judge only at stage pre-tool.", 422);
+	}
+	const domains =
+		stage === "egress" ? stringList(raw.domains ?? [], "domains", { nonEmpty: true }) : undefined;
+	const tools = raw.tools === undefined ? undefined : stringList(raw.tools, "tools", { nonEmpty: true });
+	return {
+		kind: "judge",
+		stage,
+		policy: raw.policy,
+		...(model ? { model } : {}),
+		...(tools ? { tools } : {}),
+		...(domains ? { domains } : {}),
+	};
+}
+
+/**
+ * Fold duplicate subjects and accept agent subjects only: every agent
+ * (`principal_id: null`) or one agent. Everyone and app subjects are 422.
+ */
+function normalizeGuardrailSubjects(subjects: unknown): GuardrailSubject[] {
+	if (!Array.isArray(subjects) || subjects.length === 0) {
+		throw new ToolUserError("applies_to must list at least one agent subject; disable or archive the guardrail instead.", 422);
+	}
+	const seen = new Set<string>();
+	const out: GuardrailSubject[] = [];
+	for (const subject of subjects) {
+		if (
+			!isPlainObject(subject) ||
+			subject.principal_kind !== "agent" ||
+			!(subject.principal_id === null || (typeof subject.principal_id === "string" && subject.principal_id.trim() !== ""))
+		) {
+			throw new ToolUserError(
+				'applies_to takes agent subjects only: { "principal_kind": "agent", "principal_id": null } for every agent, or an agent id.',
+				422,
+			);
+		}
+		const key = subject.principal_id ?? "";
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push({ principal_kind: "agent", principal_id: subject.principal_id as string | null });
+	}
+	return out;
+}
+
+/** Apply defaults and validate a guardrail's writable fields; 422 on bad input. */
+export function normalizeGuardrailInput(input: unknown): GuardrailBody {
+	if (!isPlainObject(input)) throw new ToolUserError("guardrail must be an object.", 422);
+	const unknown = Object.keys(input).filter((key) => !["name", "config", "applies_to", "enabled"].includes(key));
+	if (unknown.length > 0) throw new ToolUserError(`guardrail has unknown field(s): ${unknown.join(", ")}.`, 422);
+	if (typeof input.name !== "string" || !isLibrarySkillName(input.name)) {
+		throw new ToolUserError(
+			`Guardrail name "${String(input.name)}" is invalid: use lowercase letters, digits and single inner hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`,
+			422,
+		);
+	}
+	if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+		throw new ToolUserError("enabled must be a boolean.", 422);
+	}
+	return {
+		name: input.name,
+		config: normalizeGuardrailConfig(input.config),
+		applies_to: normalizeGuardrailSubjects(input.applies_to ?? EVERY_AGENT),
+		enabled: input.enabled ?? true,
+	};
+}
+
+/** 422 when a subject names an agent this workspace does not have. */
+async function assertSubjectAgentsExist(
+	sql: DbClient,
+	organizationId: string,
+	subjects: readonly GuardrailSubject[],
+): Promise<void> {
+	const ids = subjects.flatMap((subject) =>
+		subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
+	);
+	if (ids.length === 0) return;
+	const rows = await sql<{ id: string }>`
+		SELECT id FROM agents
+		WHERE organization_id = ${organizationId} AND id = ANY(${pgTextArray(ids)}::text[])
+	`;
+	const found = new Set(rows.map((row) => row.id));
+	const missing = ids.filter((id) => !found.has(id));
+	if (missing.length > 0) {
+		throw new ToolUserError(`applies_to names agent(s) not in this workspace: ${missing.join(", ")}`, 422);
+	}
+}
+
+/**
+ * The agents a guardrail's subjects cover: every agent of the workspace for
+ * an every-agent subject (a bounded config table), else the named ones.
+ */
+export async function guardrailSubjectAgentIds(
+	sql: DbClient,
+	organizationId: string,
+	subjects: readonly GuardrailSubject[],
+): Promise<string[]> {
+	const everyAgent = subjects.some(
+		(subject) => subject.principal_kind === null || (subject.principal_kind === "agent" && subject.principal_id === null),
+	);
+	if (everyAgent) {
+		const rows = await sql<{ id: string }>`SELECT id FROM agents WHERE organization_id = ${organizationId}`;
+		return rows.map((row) => row.id);
+	}
+	return [
+		...new Set(
+			subjects.flatMap((subject) =>
+				subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
+			),
+		),
+	];
+}
+
+/**
+ * Check a write against the library's current state and return the guardrail
+ * it replaces (null for a create): 404 for a missing or foreign id, 409 for an
+ * archived target, a stale `expected_revision` or a taken name, 422 for a
+ * rename. `lock` takes the target row's write lock for the applying
+ * transaction.
+ */
+export async function checkGuardrailWrite(
+	sql: DbClient,
+	organizationId: string,
+	write: GuardrailWrite,
+	options: { lock: boolean },
+): Promise<WorkspaceGuardrail | null> {
+	if (write.guardrail) await assertSubjectAgentsExist(sql, organizationId, write.guardrail.applies_to);
+	if (write.op === "create") {
+		const [taken] = await sql<{ id: string }>`
+			SELECT id FROM workspace_guardrails
+			WHERE organization_id = ${organizationId} AND name = ${write.guardrail.name} AND archived_at IS NULL
+		`;
+		if (taken) {
+			throw new ToolUserError(`A guardrail named "${write.guardrail.name}" already exists (id ${taken.id}).`, 409);
+		}
+		return null;
+	}
+	const rows = options.lock
+		? await sql<GuardrailRow>`
+			SELECT id, name, config, enabled, revision, archived_at FROM workspace_guardrails
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+			FOR UPDATE
+		`
+		: await sql<GuardrailRow>`
+			SELECT id, name, config, enabled, revision, archived_at FROM workspace_guardrails
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+		`;
+	const [current] = await withSubjects(sql, organizationId, rows);
+	if (!current) throw new ToolUserError(`Guardrail "${write.id}" not found`, 404);
+	if (current.archived) throw new ToolUserError(`Guardrail "${write.id}" is archived.`, 409);
+	if (current.revision !== write.expected_revision) {
+		throw new ToolUserError(
+			`Guardrail "${current.name}" is at revision ${current.revision}, not ${write.expected_revision}; re-read it and retry.`,
+			409,
+		);
+	}
+	if (write.op === "update" && write.guardrail.name !== current.name) {
+		throw new ToolUserError(
+			`Guardrail names are fixed: "${current.name}" cannot become "${write.guardrail.name}". Archive it and create a new guardrail instead.`,
+			422,
+		);
+	}
+	return current;
+}
+
+/** JSON with object keys sorted, so two configs compare by content, not key order. */
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	if (isPlainObject(value)) {
+		return `{${Object.keys(value)
+			.filter((key) => value[key] !== undefined)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+function subjectKeys(subjects: readonly GuardrailSubject[]): string {
+	return subjects
+		.map((subject) => (subject.principal_kind === null ? "*" : `${subject.principal_kind}:${subject.principal_id ?? "*"}`))
+		.sort()
+		.join("\n");
+}
+
+function sameGuardrailBody(current: WorkspaceGuardrail, next: GuardrailBody): boolean {
+	return (
+		current.enabled === next.enabled &&
+		stableJson(current.config) === stableJson(next.config) &&
+		subjectKeys(current.applies_to) === subjectKeys(next.applies_to)
+	);
+}
+
+/**
+ * Apply a write inside the caller's transaction, re-checking it under the row
+ * lock first. Returns the guardrail before and after; `changed` is false for a
+ * put that matches the stored guardrail, which then keeps its revision.
+ */
+export async function applyGuardrailWrite(
+	tx: DbClient,
+	organizationId: string,
+	write: GuardrailWrite,
+): Promise<{ before: WorkspaceGuardrail | null; after: WorkspaceGuardrail; changed: boolean }> {
+	const before = await checkGuardrailWrite(tx, organizationId, write, { lock: true });
+	if (write.op === "archive") {
+		await tx`
+			UPDATE workspace_guardrails
+			SET archived_at = now(), revision = revision + 1, updated_at = now()
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+		`;
+		return { before, after: await getWorkspaceGuardrail(tx, organizationId, write.id), changed: true };
+	}
+	const guardrail = write.guardrail;
+	if (write.op === "update" && before && sameGuardrailBody(before, guardrail)) {
+		return { before, after: before, changed: false };
+	}
+	let id: string;
+	if (write.op === "create") {
+		id = `guardrail_${randomBytes(16).toString("hex")}`;
+		// A concurrent create can take the name between the check and here; the
+		// partial unique index on unarchived names turns that into no row.
+		const inserted = await tx`
+			INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled)
+			VALUES (${id}, ${organizationId}, ${guardrail.name}, ${tx.json(guardrail.config)}, ${guardrail.enabled})
+			ON CONFLICT DO NOTHING
+			RETURNING id
+		`;
+		if (inserted.length === 0) throw new ToolUserError(`A guardrail named "${guardrail.name}" already exists.`, 409);
+	} else {
+		id = write.id;
+		await tx`
+			UPDATE workspace_guardrails
+			SET config = ${tx.json(guardrail.config)}, enabled = ${guardrail.enabled},
+			    revision = revision + 1, updated_at = now()
+			WHERE organization_id = ${organizationId} AND id = ${id}
+		`;
+		await tx`
+			DELETE FROM workspace_guardrail_subjects
+			WHERE organization_id = ${organizationId} AND guardrail_id = ${id}
+		`;
+	}
+	for (const subject of guardrail.applies_to) {
+		await tx`
+			INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
+			VALUES (${id}, ${organizationId}, ${subject.principal_kind},
+			        ${subject.principal_kind === null ? null : subject.principal_id})
+		`;
+	}
+	return { before, after: await getWorkspaceGuardrail(tx, organizationId, id), changed: true };
 }

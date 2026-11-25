@@ -12,6 +12,7 @@ import {
   withConnectorPolicyTransaction,
 } from "../authz/entity-policy";
 import { appKeyProblem, resolvePolicyPrincipal } from "../authz/policy-principal";
+import { POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { type DbClient, getDb } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
 import { parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy, validateConnectorPolicyTarget } from "./permission-policy-write";
@@ -98,7 +99,7 @@ async function readSnapshot(org: string, principal: CollectionPrincipal, tx?: Db
 
 /** Saved rules only: catalog metadata belongs to the existing inspection endpoint. */
 export async function readConnectorPolicyCollection(c: Context) {
-  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
+  const denied = requireHumanWorkspaceAdmin(c, { acceptScopedToken: POLICY_WRITE_SCOPE });
   if (denied) return denied;
   const principal = collectionPrincipal(c);
   if (typeof principal === "string") return c.json({ error: "invalid_request", message: principal }, 400);
@@ -111,7 +112,7 @@ export async function readConnectorPolicyCollection(c: Context) {
  * caller's collection GET returns, so edits go through the collection PUT.
  */
 export async function readConnectorPolicyCallers(c: Context) {
-  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
+  const denied = requireHumanWorkspaceAdmin(c, { acceptScopedToken: POLICY_WRITE_SCOPE });
   if (denied) return denied;
   if (Object.keys(c.req.queries()).length) return c.json({ error: "invalid_request", message: "This endpoint takes no query parameters." }, 400);
   const org = c.get("organizationId")!;
@@ -138,7 +139,7 @@ export async function readConnectorPolicyCallers(c: Context) {
 
 /** Replace the org's connector rules as one compare-and-swap, preserving every other policy class/principal. */
 export async function replaceConnectorPolicyCollection(c: Context) {
-  const denied = requireHumanWorkspaceAdmin(c, { acceptPolicyToken: true });
+  const denied = requireHumanWorkspaceAdmin(c, { acceptScopedToken: POLICY_WRITE_SCOPE });
   if (denied) return denied;
   const org = c.get("organizationId")!;
   const principal = collectionPrincipal(c);
