@@ -2,36 +2,24 @@ import crypto from "node:crypto";
 import type { AgentInlineGuardrail } from "@lobu/core";
 import { createLogger, normalizeDomainPattern } from "@lobu/core";
 import {
-  findLongestMatchingPattern,
+  matchesDomainPattern,
   patternReaches,
 } from "@lobu/connector-sdk/egress-policy";
+import { getDb } from "../../db/client.js";
 
 const logger = createLogger("policy-store");
 
 /**
- * Per-domain rule that routes matching requests through a named egress judge.
- * Internal to the egress policy plane (the public agent-facing surface is the
- * `egress`-stage inline guardrail + its `domains` selector).
+ * One enabled `egress`-stage judge guardrail, as the egress plane evaluates it:
+ * the guardrail's own policy and model gating its normalized `domains`.
  */
-interface JudgedDomainRule {
-  /** Domain pattern — exact or `.wildcard`, same format as allow/deny lists. */
-  domain: string;
-  /** Named judge policy key. */
-  judge?: string;
-}
-
-/**
- * Per-agent bundle of egress judge policies. Populated by the deployment
- * manager when syncing agent settings; read by the HTTP proxy when a
- * request needs judge evaluation.
- */
-interface JudgePolicyBundle {
-  /** Domain rules that require a judge verdict. */
-  judgedDomains: JudgedDomainRule[];
-  /** Named judge policy texts. */
-  judges: Record<string, string>;
-  /** Optional per-judge model override, keyed by judge name. */
-  judgeModels?: Record<string, string>;
+interface EgressJudgeRule {
+  judgeName: string;
+  /** Normalized, deduplicated domain patterns (`example.com`, `.example.com`). */
+  domains: string[];
+  /** Trimmed policy text. */
+  policy: string;
+  model?: string;
 }
 
 /**
@@ -47,136 +35,149 @@ export interface ResolvedJudgeRule {
   judgeModel?: string;
 }
 
-interface PreparedJudge {
-  policy: string;
-  policyHash: string;
-  model?: string;
+interface PreparedRule {
+  domains: string[];
+  resolved: ResolvedJudgeRule;
 }
 
-interface PreparedBundle {
-  judgedDomains: JudgedDomainRule[];
-  preparedJudges: Record<string, PreparedJudge>;
+interface CachedPolicy {
+  /** `md5(agents.guardrails_inline::text)` the rules were prepared from. */
+  revision: string;
+  rules: PreparedRule[];
 }
 
 /**
- * In-memory store of per-agent egress-judge policies. Thread-safe by virtue
- * of single-threaded Node event loop; syncs happen on deploy/reload.
+ * The agent's egress judge policy, read from Postgres (`agents.guardrails_inline`,
+ * the one copy every replica agrees on) on each judged request.
  *
- * Composed policy text and its hash are computed once at `set()` time and
- * reused on every `resolve()` so the hot path does no SHA256 work.
+ * The per-instance Map is a revision-checked cache, never a source of truth:
+ * every lookup reads the stored revision of the agent's guardrail column, and
+ * a cached entry is reused only while that revision is unchanged. The column
+ * itself crosses the wire only when the revision moved, so the steady-state
+ * cost is one primary-key read with no JSON transfer and no re-hashing. A
+ * policy saved through any replica is visible to every replica on its next
+ * judged request, with no deploy-time sync and no warm-up.
  *
- * Keyed by `(organizationId, agentId)`. Agent ids are per-org-unique on
- * paper but bugs in upstream code (or a malicious sync from another tenant)
- * must never overwrite policy across orgs — that turns the verdict-cache
- * org scoping into theatre. The key here is the safety net.
+ * The revision is a content hash of the stored column rather than
+ * `agents.updated_at`: saves stamp `updated_at` with a millisecond JS clock, so
+ * two saves inside one millisecond would share a timestamp and a stale entry
+ * would survive. A content hash moves exactly when the policy does.
+ *
+ * Keyed by `(organizationId, agentId)` and read with an explicit
+ * `organization_id` predicate: agent ids are only unique per org, and the raw
+ * Node HTTP proxy carries no org context to fall back on.
  */
 export class PolicyStore {
-  private readonly policies = new Map<string, PreparedBundle>();
-
-  private static composeKey(organizationId: string, agentId: string): string {
-    return `${organizationId}|${agentId}`;
-  }
-
-  set(
-    organizationId: string,
-    agentId: string,
-    bundle: JudgePolicyBundle
-  ): void {
-    const prepared = prepareBundle(organizationId, agentId, bundle);
-    this.policies.set(PolicyStore.composeKey(organizationId, agentId), prepared);
-    logger.debug("Set egress policy bundle", {
-      organizationId,
-      agentId,
-      domains: prepared.judgedDomains.length,
-      judges: Object.keys(prepared.preparedJudges).length,
-    });
-  }
-
-  clear(organizationId: string, agentId: string): void {
-    this.policies.delete(PolicyStore.composeKey(organizationId, agentId));
-  }
+  private readonly cache = new Map<string, CachedPolicy>();
 
   /**
-   * Resolve a judge rule for a hostname under an `(org, agent)` pair.
-   * Rules use the same domain pattern format as allow/deny lists. Exact
-   * match is preferred; wildcard patterns (`.example.com`) match the root
-   * plus any subdomain.
+   * Every judge whose domain selector covers `hostname` (D6 accumulation:
+   * an exact rule and a covering wildcard both apply; nothing shadows another
+   * rule). Empty when no judged rule covers the host. Throws when the policy
+   * cannot be read, so the caller can fail closed.
    */
-  resolve(
+  async resolve(
     organizationId: string,
     agentId: string,
     hostname: string
-  ): ResolvedJudgeRule | undefined {
-    const prepared = this.policies.get(
-      PolicyStore.composeKey(organizationId, agentId)
-    );
-    if (!prepared || prepared.judgedDomains.length === 0) {
-      return undefined;
-    }
+  ): Promise<ResolvedJudgeRule[]> {
+    const rules = await this.load(organizationId, agentId);
+    const host = hostname.toLowerCase();
+    // One entry per covering guardrail, never collapsed: every judge is
+    // evaluated, so dropping one would drop its deny. Identical guardrails
+    // share a verdict-cache key, so the runner still asks the model once.
+    return rules
+      .filter((rule) => matchesDomainPattern(host, rule.domains))
+      .map((rule) => rule.resolved);
+  }
 
-    const matched = findMatchingRule(hostname, prepared.judgedDomains);
-    if (!matched) {
-      return undefined;
-    }
+  private async load(
+    organizationId: string,
+    agentId: string
+  ): Promise<PreparedRule[]> {
+    const key = `${organizationId}|${agentId}`;
+    const cached = this.cache.get(key);
+    const sql = getDb();
+    const rows = (await sql`
+      SELECT revision,
+             CASE WHEN revision IS DISTINCT FROM ${cached?.revision ?? null}::text
+                  THEN guardrails_inline END AS guardrails_inline
+      FROM (
+        SELECT md5(guardrails_inline::text) AS revision, guardrails_inline
+        FROM agents
+        WHERE organization_id = ${organizationId} AND id = ${agentId}
+      ) agent
+    `) as Array<{ revision: string | null; guardrails_inline: unknown }>;
 
-    const judgeName = matched.judge ?? "default";
-    const judge = prepared.preparedJudges[judgeName];
-    if (!judge) {
-      logger.warn(
-        "Judge rule matched but named policy not found — failing closed",
-        { organizationId, agentId, hostname, judgeName }
-      );
-      return undefined;
+    const row = rows[0];
+    if (!row?.revision) {
+      this.cache.delete(key);
+      return [];
     }
+    if (cached && cached.revision === row.revision) return cached.rules;
 
-    return {
-      judgeName,
-      policy: judge.policy,
-      policyHash: judge.policyHash,
-      judgeModel: judge.model,
-    };
+    const inline = Array.isArray(row.guardrails_inline)
+      ? (row.guardrails_inline as AgentInlineGuardrail[])
+      : [];
+    const rules = egressJudgeRules(inline).map((rule) => ({
+      domains: rule.domains,
+      resolved: {
+        judgeName: rule.judgeName,
+        policy: rule.policy,
+        policyHash: hashPolicy(organizationId, agentId, rule),
+        ...(rule.model ? { judgeModel: rule.model } : {}),
+      },
+    }));
+    this.cache.set(key, { revision: row.revision, rules });
+    logger.debug("Loaded egress judge policy", {
+      organizationId,
+      agentId,
+      judges: rules.length,
+    });
+    return rules;
   }
 }
 
 /**
- * Translate an agent's `egress`-stage inline guardrails into a
- * {@link JudgePolicyBundle}. Each enabled egress guardrail becomes a named
- * judge (`judges[g.name] = { policy: g.policy, model: g.model }`) and routes
- * every hostname in its `domains` selector through that judge. Returns
- * `undefined` when no egress guardrail declares any domain (common case — no
- * need to occupy a map slot).
+ * Translate an agent's inline guardrails into the egress judge rules the proxy
+ * evaluates: one rule per enabled `egress`-stage guardrail that has a policy and
+ * at least one domain. Rules are kept per guardrail and never merged by domain,
+ * because every matching judge runs (two guardrails on the same domain are two
+ * judges, both of which must allow).
  *
- * This is the sole production path into the policy store; it produces the same
- * bundle shape the legacy `network.judged`/`judges`/`egressConfig` path did
- * (the legacy builder that produced it has no callers left and is gone).
+ * The single builder for the runtime, the write-time shadow checks and the grant
+ * guards, so they cannot disagree about which domains are judged.
  */
-export function egressGuardrailsToPolicyBundle(
+export function egressJudgeRules(
   guardrails: AgentInlineGuardrail[]
-): JudgePolicyBundle | undefined {
-  // Normalize first, then dedupe by normalized domain. Equivalent rules
-  // (e.g. `*.slack.com` and `.slack.com`, or case variants) collapse to one;
-  // last declaration wins, matching the legacy path.
-  const dedupedByDomain = new Map<string, JudgedDomainRule>();
-  const judges: Record<string, string> = {};
-  const judgeModels: Record<string, string> = {};
+): EgressJudgeRule[] {
+  const rules: EgressJudgeRule[] = [];
   for (const g of guardrails) {
-    if (!g.enabled || g.stage !== "egress") continue;
+    if (!g?.enabled || g.stage !== "egress") continue;
     if (typeof g.policy !== "string" || g.policy.trim() === "") continue;
-    judges[g.name] = g.policy;
-    if (g.model) judgeModels[g.name] = g.model;
+    const domains = new Set<string>();
     for (const domain of g.domains ?? []) {
-      if (!domain) continue;
-      const normalized = normalizeDomainPattern(domain);
-      dedupedByDomain.set(normalized, { domain: normalized, judge: g.name });
+      if (typeof domain !== "string" || domain === "") continue;
+      domains.add(normalizeDomainPattern(domain));
     }
+    if (domains.size === 0) continue;
+    rules.push({
+      judgeName: g.name,
+      domains: [...domains],
+      policy: g.policy.trim(),
+      ...(g.model ? { model: g.model } : {}),
+    });
   }
-  const judgedDomains = Array.from(dedupedByDomain.values());
-  if (judgedDomains.length === 0) return undefined;
-  return {
-    judgedDomains,
-    judges,
-    ...(Object.keys(judgeModels).length > 0 ? { judgeModels } : {}),
-  };
+  return rules;
+}
+
+/** Every domain pattern at least one egress judge governs, deduplicated. */
+export function judgedEgressDomains(
+  guardrails: AgentInlineGuardrail[]
+): string[] {
+  return [
+    ...new Set(egressJudgeRules(guardrails).flatMap((rule) => rule.domains)),
+  ];
 }
 
 /**
@@ -214,12 +215,14 @@ interface SuppressedJudgedDomainOptions {
 }
 
 /**
- * Find judged domains that an allow list shadows.
+ * Find judged domains that an allow list shadows, one entry per (judge,
+ * domain) pair.
  *
- * Derives the judged set through {@link egressGuardrailsToPolicyBundle} — the
- * same builder the runtime uses — so write-time validation and runtime
- * enforcement cannot disagree about which domains are judged (the enabled /
- * stage / non-empty-policy filtering and the normalization both come along).
+ * Derives the judged set through {@link egressJudgeRules} — the same builder
+ * the runtime uses — so write-time validation and runtime enforcement cannot
+ * disagree about which domains are judged. Because every matching judge runs,
+ * an allow that covers a domain silences EVERY judge on it, and each one is
+ * reported (not just the last declaration).
  *
  * Reports PARTIAL shadowing too: an exact allow for `example.com` against a
  * judged `.example.com` leaves the root ungoverned while subdomains stay
@@ -231,8 +234,8 @@ export function findSuppressedJudgedDomains(
   allowedDomains: string[] | undefined,
   options: SuppressedJudgedDomainOptions = {}
 ): SuppressedJudgedDomain[] {
-  const bundle = egressGuardrailsToPolicyBundle(guardrails);
-  if (!bundle) return [];
+  const rules = egressJudgeRules(guardrails);
+  if (rules.length === 0) return [];
 
   const allowPatterns = (allowedDomains ?? [])
     .filter((d): d is string => typeof d === "string" && d.trim() !== "")
@@ -241,63 +244,41 @@ export function findSuppressedJudgedDomains(
 
   const wildcardCoversRoot = options.wildcardCoversRoot ?? false;
   const suppressed: SuppressedJudgedDomain[] = [];
-  for (const rule of bundle.judgedDomains) {
-    const covering = allowPatterns.find((allow) =>
-      patternReaches(rule.domain, allow, { wildcardCoversRoot })
-    );
-    if (covering) {
-      suppressed.push({
-        domain: rule.domain,
-        judge: rule.judge ?? "default",
-        grant: covering,
-      });
+  for (const rule of rules) {
+    for (const domain of rule.domains) {
+      const covering = allowPatterns.find((allow) =>
+        patternReaches(domain, allow, { wildcardCoversRoot })
+      );
+      if (covering) {
+        suppressed.push({ domain, judge: rule.judgeName, grant: covering });
+      }
     }
   }
   return suppressed;
 }
 
-function prepareBundle(
-  organizationId: string,
-  agentId: string,
-  bundle: JudgePolicyBundle
-): PreparedBundle {
-  const preparedJudges: Record<string, PreparedJudge> = {};
-  for (const [name, rawPolicy] of Object.entries(bundle.judges)) {
-    const composed = rawPolicy.trim();
-    const model = bundle.judgeModels?.[name];
-    preparedJudges[name] = {
-      policy: composed,
-      policyHash: hashPolicy(organizationId, agentId, name, composed),
-      ...(model ? { model } : {}),
-    };
-  }
-  return {
-    judgedDomains: bundle.judgedDomains,
-    preparedJudges,
-  };
-}
-
 /**
- * Exact pattern first, then the longest covering wildcard (`.api.example.com`
- * beats `.example.com`); a wildcard covers its apex. Same grammar as every
- * other egress matcher, via `@lobu/connector-sdk/egress-policy`.
+ * Verdict-cache and circuit-breaker key for one judge. Every field that can
+ * change the verdict is hashed as one JSON tuple, so no two distinct judges can
+ * share a key: a delimiter-joined string let a name/policy split that reads the
+ * same once joined ("owner check" + "Only…" vs "owner" + "check Only…") collide,
+ * and two judges sharing a key share one cached verdict.
  */
-function findMatchingRule(
-  hostname: string,
-  rules: JudgedDomainRule[]
-): JudgedDomainRule | undefined {
-  return findLongestMatchingPattern(hostname, rules, (rule) => rule.domain);
-}
-
 function hashPolicy(
   organizationId: string,
   agentId: string,
-  judgeName: string,
-  policy: string
+  rule: EgressJudgeRule
 ): string {
   return crypto
     .createHash("sha256")
-    .update(`${organizationId} ${agentId} ${judgeName} ${policy}`)
-    .digest("hex")
-    .slice(0, 16);
+    .update(
+      JSON.stringify([
+        organizationId,
+        agentId,
+        rule.judgeName,
+        rule.policy,
+        rule.model ?? null,
+      ])
+    )
+    .digest("hex");
 }

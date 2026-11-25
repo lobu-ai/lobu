@@ -12,7 +12,9 @@
  *     reused.
  *   - Finding 3: `PolicyStore` was keyed by `agentId` alone, so the last
  *     `set()` across orgs won. Cache scoping became theatre because the
- *     policy fed into the verdict was already wrong.
+ *     policy fed into the verdict was already wrong. (The store now reads
+ *     `agents.guardrails_inline` with an explicit org predicate; the
+ *     reproducers drive that read.)
  *   - Finding 6 — peek-before-consume — is covered by `slack-routes.test.ts`
  *     ("rejects when callback session org differs from install state"
  *     asserts the row is preserved for a legitimate retry).
@@ -30,6 +32,7 @@ import {
   generateWorkerTokenPair,
   verifyWorkerToken,
 } from "@lobu/core";
+import { getDb } from "../../db/client.js";
 import { GrantStore } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
 import {
@@ -49,55 +52,69 @@ import { withFreePortRetry } from "../../__tests__/setup/free-port.js";
 // ─── Finding 3: PolicyStore cross-tenant clobbering ──────────────────────────
 
 describe("[finding 3] PolicyStore is keyed by (orgId, agentId)", () => {
-  test("org A's policy survives org B's set under the same agent id", () => {
-    const store = new PolicyStore();
-    // Org A sets a policy for `shared-agent-id`.
-    store.set("org-a", "shared-agent-id", {
-      judgedDomains: [{ domain: "api.example.com" }],
-      judges: { default: "ORG A: deny by default" },
-    });
-    // Org B reuses the same agent id — under the old keying this overwrote
-    // org A's bundle. Now both must coexist.
-    store.set("org-b", "shared-agent-id", {
-      judgedDomains: [{ domain: "api.example.com" }],
-      judges: { default: "ORG B: allow reads" },
-    });
+  async function storePolicy(orgId: string, agentId: string, policy: string) {
+    await seedAgentRow(agentId, { organizationId: orgId });
+    const sql = getDb();
+    const guardrails = [
+      {
+        name: "default",
+        enabled: true,
+        stage: "egress",
+        policy,
+        domains: ["api.example.com"],
+      },
+    ];
+    await sql`
+      UPDATE agents SET guardrails_inline = ${sql.json(guardrails)}
+      WHERE organization_id = ${orgId} AND id = ${agentId}
+    `;
+  }
 
-    const aResolved = store.resolve("org-a", "shared-agent-id", "api.example.com");
-    const bResolved = store.resolve("org-b", "shared-agent-id", "api.example.com");
+  beforeAll(async () => {
+    await ensureDbForGatewayTests();
+  });
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+  });
+
+  test("two orgs reusing one agent id each read their own policy through one store", async () => {
+    await storePolicy("org-a", "shared-agent-id", "ORG A: deny by default");
+    await storePolicy("org-b", "shared-agent-id", "ORG B: allow reads");
+    const store = new PolicyStore();
+
+    const [aResolved] = await store.resolve("org-a", "shared-agent-id", "api.example.com");
+    const [bResolved] = await store.resolve("org-b", "shared-agent-id", "api.example.com");
 
     expect(aResolved?.policy).toBe("ORG A: deny by default");
     expect(bResolved?.policy).toBe("ORG B: allow reads");
     // policyHash diverges so the verdict cache cannot collide either.
-    expect(aResolved?.policyHash).not.toBe(bResolved?.policyHash);
+    expect(aResolved?.policyHash).not.toBe(bResolved?.policyHash as string);
   });
 
-  test("resolve refuses cross-org reads — no fall-through to a sibling tenant's bundle", () => {
+  test("resolve refuses cross-org reads — no fall-through to a sibling tenant's policy", async () => {
+    await storePolicy("org-a", "agent-1", "ORG A only");
+    await seedAgentRow("agent-1", { organizationId: "org-b" });
     const store = new PolicyStore();
-    store.set("org-a", "agent-1", {
-      judgedDomains: [{ domain: "api.example.com" }],
-      judges: { default: "ORG A only" },
-    });
-    // Org B has no bundle for `agent-1` — must return undefined, not
-    // org A's bundle.
-    expect(
-      store.resolve("org-b", "agent-1", "api.example.com")
-    ).toBeUndefined();
+    // Warm org A's entry first, so a cache keyed by agent alone would answer.
+    expect(await store.resolve("org-a", "agent-1", "api.example.com")).toHaveLength(1);
+    expect(await store.resolve("org-b", "agent-1", "api.example.com")).toEqual([]);
   });
 
-  test("clear(orgA, agentId) does not affect orgB's bundle for the same agent id", () => {
+  test("clearing org A's policy does not affect org B's for the same agent id", async () => {
+    await storePolicy("org-a", "shared", "A");
+    await storePolicy("org-b", "shared", "B");
     const store = new PolicyStore();
-    store.set("org-a", "shared", {
-      judgedDomains: [{ domain: "x.com" }],
-      judges: { default: "A" },
-    });
-    store.set("org-b", "shared", {
-      judgedDomains: [{ domain: "x.com" }],
-      judges: { default: "B" },
-    });
-    store.clear("org-a", "shared");
-    expect(store.resolve("org-a", "shared", "x.com")).toBeUndefined();
-    expect(store.resolve("org-b", "shared", "x.com")?.policy).toBe("B");
+    await store.resolve("org-a", "shared", "api.example.com");
+    await store.resolve("org-b", "shared", "api.example.com");
+
+    await getDb()`
+      UPDATE agents SET guardrails_inline = '[]'
+      WHERE organization_id = 'org-a' AND id = 'shared'
+    `;
+    expect(await store.resolve("org-a", "shared", "api.example.com")).toEqual([]);
+    const [b] = await store.resolve("org-b", "shared", "api.example.com");
+    expect(b?.policy).toBe("B");
   });
 });
 

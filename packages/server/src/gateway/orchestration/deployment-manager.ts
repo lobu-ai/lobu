@@ -1,15 +1,8 @@
-import {
-	createLogger,
-	type MessagePayload,
-	normalizeDomainPattern,
-} from "@lobu/core";
+import { type MessagePayload, normalizeDomainPattern } from "@lobu/core";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import type { GrantStore } from "../permissions/grant-store.js";
 import { patternReaches } from "@lobu/connector-sdk/egress-policy";
-import {
-  egressGuardrailsToPolicyBundle,
-  type PolicyStore,
-} from "../permissions/policy-store.js";
+import { judgedEgressDomains } from "../permissions/policy-store.js";
 import type { WritableSecretStore } from "../secrets/index.js";
 import type { CredentialLeaseRegistry } from "../agent-tooling/credential-lease.js";
 import { resolveAgentToolingDeclaration } from "../agent-tooling/resolver.js";
@@ -23,8 +16,6 @@ export {
   generateDeploymentName,
   type DeploymentIdentity,
 } from "./deployment-identity.js";
-
-const logger = createLogger("orchestrator");
 
 /**
  * Nix binary-cache hosts auto-allowed while an agent has a Nix environment
@@ -106,7 +97,6 @@ export class DeploymentManager {
    */
   protected secretStore?: WritableSecretStore;
   protected grantStore?: GrantStore;
-  protected policyStore?: PolicyStore;
   /**
    * Mints credential leases for connector-contributed agent tooling.
    * Unset (tests, or a gateway with no lease providers wired) means connections
@@ -289,13 +279,6 @@ export class DeploymentManager {
   }
 
   /**
-   * Inject policy store for syncing per-agent egress judge rules.
-   */
-  setPolicyStore(store: PolicyStore): void {
-    this.policyStore = store;
-  }
-
-  /**
    * Inject the credential-lease registry used to mint credentials for
    * connector-contributed agent tooling.
    */
@@ -320,60 +303,10 @@ export class DeploymentManager {
   }
 
   /**
-   * Sync per-agent egress judge policies into the policy store so the HTTP
-   * proxy can resolve them at request time. The source is the agent's
-   * `egress`-stage inline guardrails — each contributes a named judge (its
-   * `policy` + optional `model`) and routes its `domains` through it.
-   */
-  private syncEgressPolicy(
-    messageData: MessagePayload,
-    deploymentName?: string
-  ): string[] {
-    const agentId = messageData.agentId;
-    const organizationId = messageData.organizationId;
-    // PolicyStore is keyed by `(orgId, agentId)` to prevent cross-tenant
-    // policy clobbering — refuse to sync without an org id rather than
-    // collapsing into a shared bucket.
-    if (!this.policyStore || !agentId || !organizationId) {
-      if (!organizationId && agentId) {
-        logger.warn(
-          { agentId, deploymentName },
-          "Skipping egress policy sync — message has no organizationId"
-        );
-      }
-      return [];
-    }
-
-    const egressGuardrails = (messageData.guardrailsInline ?? []).filter(
-      (g) => g.stage === "egress" && g.enabled
-    );
-    const bundle = egressGuardrailsToPolicyBundle(egressGuardrails);
-    if (bundle) {
-      this.policyStore.set(organizationId, agentId, bundle);
-      if (deploymentName) {
-        logger.info(
-          `Synced egress judge policy for ${deploymentName}: ${bundle.judgedDomains.length} rule(s), ${Object.keys(bundle.judges).length} judge(s)`
-        );
-      } else {
-        logger.debug("Synced egress judge policy", {
-          organizationId,
-          agentId,
-          rules: bundle.judgedDomains.length,
-          judges: Object.keys(bundle.judges).length,
-        });
-      }
-      return bundle.judgedDomains.map((r) => r.domain);
-    }
-    this.policyStore.clear(organizationId, agentId);
-    return [];
-  }
-
-  /**
    * Sync per-agent network and Nix cache domain grants to the grant store.
    * Called on worker create and every message so config changes pick up without
-   * redeploying. Also refreshes the in-memory egress judge policy store,
-   * which is read by the shared HTTP proxy rather than by the worker
-   * process.
+   * redeploying. The egress judge policy itself is not synced anywhere: the
+   * HTTP proxy reads it from `agents.guardrails_inline` per request.
    *
    * Domains reconcile against Postgres UNCONDITIONALLY — the pod-local
    * cache is never trusted for them. Non-expiring domain rows are written
@@ -388,9 +321,9 @@ export class DeploymentManager {
     const agentId = messageData.agentId;
     if (!agentId) return;
 
-    const judgedDomains = this.syncEgressPolicy(messageData);
-
     if (!this.grantStore) return;
+
+    const judgedDomains = judgedEgressDomains(messageData.guardrailsInline ?? []);
 
     const orgId = messageData.organizationId;
 

@@ -20,8 +20,8 @@ import type { DbClient } from "../db/client";
 import { loadAllowedDomains } from "../gateway/config/network-allowlist";
 import { resolveSystemJudgeTarget } from "../gateway/inference/system-judge-target";
 import {
-	egressGuardrailsToPolicyBundle,
 	findSuppressedJudgedDomains,
+	judgedEgressDomains,
 } from "../gateway/permissions/policy-store";
 import {
 	type ConfigChangeEventParams,
@@ -430,11 +430,18 @@ export async function validateAgentSettingsUpdate(
 			effectiveGuardrails,
 			effectiveAllowed
 		);
-		if (shadowed[0]) {
-			const { domain, judge, grant } = shadowed[0];
+		// Every judge covering a domain runs, so an allow over that domain
+		// silences each of them: name every (judge, domain) pair it hides.
+		if (shadowed.length > 0) {
+			const pairs = shadowed
+				.map(
+					({ domain, judge, grant }) =>
+						`guardrail "${judge}" judges "${domain}" but allowedDomains grants "${grant}"`,
+				)
+				.join("; ");
 			return {
 				error: "guardrail_domain_shadowed_by_grant",
-				error_description: `Guardrail "${judge}" judges "${domain}", but this agent's networkConfig.allowedDomains grants "${grant}", which the proxy matches FIRST — the judge would never run. A judged domain must not be allow-listed: remove "${grant}" from allowedDomains (a judged domain is reachable through its judge, so it needs no grant), or drop "${domain}" from the guardrail.`,
+				error_description: `This agent's networkConfig.allowedDomains shadows egress judges, and the proxy matches an allow grant FIRST — these judges would never run: ${pairs}. A judged domain must not be allow-listed: remove the grant from allowedDomains (a judged domain is reachable through its judges, so it needs no grant), or drop the domain from the guardrail.`,
 			};
 		}
 
@@ -445,10 +452,7 @@ export async function validateAgentSettingsUpdate(
 		// nobody in this request can make valid. Only consult the allowlist
 		// when there is a judge to shadow: `loadAllowedDomains` logs on every
 		// call in isolation mode.
-		const judgedCount =
-			egressGuardrailsToPolicyBundle(effectiveGuardrails)?.judgedDomains
-				.length ?? 0;
-		if (judgedCount > 0) {
+		if (judgedEgressDomains(effectiveGuardrails).length > 0) {
 			const globalAllowed = loadAllowedDomains();
 			const unrestricted = isUnrestrictedMode(globalAllowed);
 			// Unrestricted mode allows every host, so it shadows every judged

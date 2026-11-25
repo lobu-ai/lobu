@@ -14,8 +14,9 @@ const logger = createLogger("proxy-manager");
 let proxyServer: Server | null = null;
 
 /**
- * Wire the grant + policy stores the deployment manager WRITES into the HTTP
- * egress proxy, which READS them per request. Without this the proxy's
+ * Wire the grant + policy stores into the HTTP egress proxy, which READS them
+ * per request (both are Postgres-backed: grants rows and
+ * `agents.guardrails_inline`). Without this the proxy's
  * `proxyGrantStore`/`proxyPolicyStore` stay null and `checkDomainAccess`
  * silently skips per-agent grants and the LLM egress judge, leaving only the
  * global `WORKER_ALLOWED_DOMAINS` allowlist in force. (This wiring was dropped

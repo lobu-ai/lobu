@@ -48,6 +48,12 @@ describe("VerdictCache", () => {
     expect(a).not.toBe(b);
   });
 
+  test("a field's content cannot bleed into its neighbour", () => {
+    const a = VerdictCache.key({ orgId: "org|h", policyHash: "x", hostname: "x.com" });
+    const b = VerdictCache.key({ orgId: "org", policyHash: "h|x", hostname: "x.com" });
+    expect(a).not.toBe(b);
+  });
+
   test("expires entries after the TTL", async () => {
     const cache = new VerdictCache(10, 100);
     const key = VerdictCache.key({ orgId: "org-1", policyHash: "h", hostname: "x.com" });

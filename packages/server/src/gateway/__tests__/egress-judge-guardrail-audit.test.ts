@@ -65,8 +65,8 @@ class DenyClient implements JudgeClient {
   }
 }
 
-function policyStoreReturning(rule: ResolvedJudgeRule): PolicyStore {
-  return { resolve: () => rule } as unknown as PolicyStore;
+function policyStoreReturning(...rules: ResolvedJudgeRule[]): PolicyStore {
+  return { resolve: async () => rules } as unknown as PolicyStore;
 }
 
 describe("egress judge deny → guardrail-trip audit", () => {
@@ -167,5 +167,79 @@ describe("egress judge deny → guardrail-trip audit", () => {
     expect(decision.allowed).toBe(true);
     await flushPendingGuardrailAudits();
     expect(insertEventCalls.length).toBe(0);
+  });
+
+  test("every covering judge runs; each DENY is audited and any deny blocks", async () => {
+    const rules: ResolvedJudgeRule[] = [
+      { judgeName: "owner-only", policy: "OWNER", policyHash: "h-owner" },
+      { judgeName: "read-only", policy: "READS", policyHash: "h-reads" },
+      { judgeName: "no-pii", policy: "NOPII", policyHash: "h-nopii" },
+    ];
+    setProxyPolicyStore(policyStoreReturning(...rules));
+    const asked: string[] = [];
+    setProxyEgressJudge(
+      new EgressJudge({
+        client: {
+          judge: async ({ userPrompt }) => {
+            const policy = ["OWNER", "READS", "NOPII"].find((p) =>
+              userPrompt.includes(p)
+            )!;
+            asked.push(policy);
+            return policy === "READS"
+              ? { verdict: "allow", reason: "a read" }
+              : { verdict: "deny", reason: `${policy} refused` };
+          },
+        },
+        resolveOrgDefaultModel: async () => "judge-test",
+      })
+    );
+
+    const decision = await __testOnly.checkDomainAccess(
+      config,
+      "api.github.com",
+      "agent-a",
+      "org-1"
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.source).toBe("judge");
+    expect(decision.judge?.verdict).toBe("deny");
+    expect(asked.sort()).toEqual(["NOPII", "OWNER", "READS"]);
+
+    await flushPendingGuardrailAudits();
+    const tripped = insertEventCalls
+      .map((e) => (e.metadata as Record<string, unknown>)?.guardrail)
+      .sort();
+    expect(tripped).toEqual(["no-pii", "owner-only"]);
+  });
+
+  test("a policy that cannot be read fails closed without asking a judge", async () => {
+    setProxyPolicyStore({
+      resolve: async () => {
+        throw new Error("connection refused");
+      },
+    } as unknown as PolicyStore);
+    let asked = 0;
+    setProxyEgressJudge(
+      new EgressJudge({
+        client: {
+          judge: async () => {
+            asked++;
+            return { verdict: "allow", reason: "ok" };
+          },
+        },
+        resolveOrgDefaultModel: async () => "judge-test",
+      })
+    );
+
+    const decision = await __testOnly.checkDomainAccess(
+      config,
+      "api.github.com",
+      "agent-a",
+      "org-1"
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(asked).toBe(0);
   });
 });

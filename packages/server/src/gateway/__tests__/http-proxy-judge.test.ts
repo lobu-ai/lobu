@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import type * as http from "node:http";
 import * as net from "node:net";
+import type { AgentInlineGuardrail } from "@lobu/core";
 import { generateWorkerTokenPair } from "@lobu/core";
+import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-stores.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import type { GrantStore } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
 import { EgressJudge } from "../proxy/egress-judge/judge.js";
@@ -16,57 +18,93 @@ import {
   startHttpProxy,
   stopHttpProxy,
 } from "../proxy/http-proxy.js";
-
-const TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");
+import {
+  ensureDbForGatewayTests,
+  resetTestDatabase,
+  seedAgentRow,
+} from "./helpers/db-setup.js";
 
 let proxyPort: number;
 let proxyServer: http.Server;
-const policyStore = new PolicyStore();
 
 /**
  * Swappable fake judge — tests replace `impl` between cases so they can
- * simulate allow/deny/timeout without restarting the proxy.
+ * simulate allow/deny/timeout without restarting the proxy. `impl` sees the
+ * composed prompt, which carries the guardrail's policy text, so a case can
+ * give two judges on one host different verdicts.
  */
 class FakeJudgeClient implements JudgeClient {
   calls = 0;
-  impl: () => Promise<JudgeVerdict> = async () => ({
+  impl: (args: {
+    model: string;
+    userPrompt: string;
+  }) => Promise<JudgeVerdict> = async () => ({
     verdict: "deny",
     reason: "default",
   });
-  async judge(): Promise<JudgeVerdict> {
+  async judge(args: {
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+  }): Promise<JudgeVerdict> {
     this.calls++;
-    return this.impl();
+    return this.impl(args);
   }
 }
 
 const fakeClient = new FakeJudgeClient();
 
+// `example.com` is used for the allow-path HTTP tests because its real server
+// closes the socket after responding — tests that use hosts with keep-alive
+// (api.github.com, etc.) hang the raw socket reader.
+const BASE_GUARDRAILS: AgentInlineGuardrail[] = [
+  {
+    name: "default",
+    enabled: true,
+    stage: "egress",
+    policy: "allow only reads from trusted sources",
+    domains: ["example.com"],
+  },
+  {
+    name: "strict",
+    enabled: true,
+    stage: "egress",
+    policy: "deny all requests — always",
+    domains: [".slack.com"],
+  },
+];
+
+/**
+ * Save the agent's guardrails through the real settings store — the same
+ * write the config route and `manage_agents` make — so the proxy's view of the
+ * policy is exactly what a save leaves in Postgres.
+ */
+async function saveGuardrails(
+  guardrailsInline: AgentInlineGuardrail[],
+  organizationId = "org-a"
+): Promise<void> {
+  await orgContext.run({ organizationId }, () =>
+    createPostgresAgentConfigStore().updateSettings("agent-a", {
+      guardrailsInline,
+    })
+  );
+}
+
 beforeAll(async () => {
-  process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+  await ensureDbForGatewayTests();
+  await resetTestDatabase();
   // Empty allowlist = deny-all globally so requests fall through to the
-  // per-agent policy store (judged-domain rules).
+  // per-agent judged-domain rules.
   process.env.WORKER_ALLOWED_DOMAINS = "";
 
   // Clear module-level state left behind by any sibling test file so
   // the global config gets re-read with the new env.
   __testOnly.reset();
 
-  // Seed the policy store with an agent that has two judged-domain rules.
-  // `example.com` is used for the allow-path HTTP tests because its real
-  // server closes the socket after responding — tests that use hosts with
-  // keep-alive (api.github.com, etc.) hang the raw socket reader.
-  policyStore.set("org-a", "agent-a", {
-    judgedDomains: [
-      { domain: "example.com" },
-      { domain: ".slack.com", judge: "strict" },
-    ],
-    judges: {
-      default: "allow only reads from trusted sources",
-      strict: "deny all requests — always",
-    },
-  });
+  await seedAgentRow("agent-a", { organizationId: "org-a" });
+  await saveGuardrails(BASE_GUARDRAILS);
 
-  setProxyPolicyStore(policyStore);
+  setProxyPolicyStore(new PolicyStore());
   setProxyEgressJudge(
     new EgressJudge({ client: fakeClient, resolveOrgDefaultModel: async () => "judge-test-model" })
   );
@@ -78,11 +116,10 @@ beforeAll(async () => {
     proxyPort = port;
     return server;
   });
-});
+}, 60_000);
 
 afterAll(async () => {
   await stopHttpProxy(proxyServer);
-  delete process.env.ENCRYPTION_KEY;
   delete process.env.WORKER_ALLOWED_DOMAINS;
   __testOnly.reset();
 });
@@ -262,6 +299,163 @@ describe("HTTP Proxy — egress judge integration", () => {
       expect(fakeClient.calls).toBe(0);
     } finally {
       setProxyGrantStore(null as unknown as GrantStore);
+    }
+  });
+
+  test("every judge covering the host runs, and a shorter wildcard's deny wins", async () => {
+    // An exact rule used to shadow every covering wildcard: only the longest
+    // match was asked, so the exact rule's ALLOW let traffic through that the
+    // broader rule's judge would have refused.
+    await saveGuardrails([
+      ...BASE_GUARDRAILS,
+      {
+        name: "broad",
+        enabled: true,
+        stage: "egress",
+        policy: "BROAD: refuse everything under acme",
+        domains: [".acme.test"],
+      },
+      {
+        name: "narrow",
+        enabled: true,
+        stage: "egress",
+        policy: "NARROW: the api host is fine",
+        domains: ["api.acme.test"],
+      },
+    ]);
+    try {
+      fakeClient.calls = 0;
+      fakeClient.impl = async ({ userPrompt }) =>
+        userPrompt.includes("BROAD:")
+          ? { verdict: "deny", reason: "broad-judge-refused" }
+          : { verdict: "allow", reason: "narrow-judge-allowed" };
+      const res = await rawProxyRequest(
+        "http://api.acme.test/accumulate",
+        auth()
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain("broad-judge-refused");
+      expect(fakeClient.calls).toBe(2);
+    } finally {
+      await saveGuardrails(BASE_GUARDRAILS);
+    }
+  });
+
+  // Two DISTINCT guardrails must stay two judges, however their fields line
+  // up. A cache key that joined name and policy with a space made
+  // ("owner check", "Only allow reads.") and ("owner", "check Only allow
+  // reads.") one judge, and a key without the model collapsed the same
+  // name+policy on two models; either collapse dropped a judge and its deny.
+  test.each([
+    {
+      label: "a name/policy split that reads the same once joined",
+      host: "split.collide.test",
+      guardrails: [
+        { name: "owner check", policy: "Only allow reads." },
+        { name: "owner", policy: "check Only allow reads." },
+      ],
+      denies: ({ userPrompt }: { model: string; userPrompt: string }) =>
+        !userPrompt.includes("check Only allow reads."),
+    },
+    {
+      label: "the same name and policy on two different models",
+      host: "model.collide.test",
+      guardrails: [
+        { name: "owner", policy: "Only allow reads.", model: "model-strict" },
+        { name: "owner", policy: "Only allow reads.", model: "model-lenient" },
+      ],
+      denies: ({ model }: { model: string; userPrompt: string }) =>
+        model === "model-strict",
+    },
+  ])("two distinct judges stay two judges: $label", async ({ host, guardrails, denies }) => {
+    await saveGuardrails([
+      ...BASE_GUARDRAILS,
+      ...guardrails.map((g) => ({
+        ...g,
+        enabled: true,
+        stage: "egress" as const,
+        domains: [host],
+      })),
+    ]);
+    try {
+      fakeClient.calls = 0;
+      fakeClient.impl = async (args) =>
+        denies(args)
+          ? { verdict: "deny", reason: "colliding-judge-refused" }
+          : { verdict: "allow", reason: "colliding-judge-allowed" };
+      const res = await rawProxyRequest(`http://${host}/collide`, auth());
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain("colliding-judge-refused");
+      expect(fakeClient.calls).toBe(2);
+    } finally {
+      await saveGuardrails(BASE_GUARDRAILS);
+    }
+  });
+
+  test("a policy saved after the proxy warmed up is enforced on the next request", async () => {
+    // The proxy's PolicyStore already loaded this agent above. A save made
+    // anywhere (another replica, the config route) must reach it without a
+    // dispatch, a deploy, or a restart.
+    fakeClient.calls = 0;
+    fakeClient.impl = async () => ({ verdict: "deny", reason: "late-judge" });
+    const before = await rawProxyRequest("http://late.example.org/a", auth());
+    expect(before.statusCode).toBe(403);
+    expect(fakeClient.calls).toBe(0);
+
+    await saveGuardrails([
+      ...BASE_GUARDRAILS,
+      {
+        name: "late",
+        enabled: true,
+        stage: "egress",
+        policy: "added after warm-up",
+        domains: ["late.example.org"],
+      },
+    ]);
+    try {
+      const after = await rawProxyRequest("http://late.example.org/b", auth());
+      expect(after.statusCode).toBe(403);
+      expect(after.body).toContain("late-judge");
+      expect(fakeClient.calls).toBe(1);
+    } finally {
+      await saveGuardrails(BASE_GUARDRAILS);
+    }
+
+    // ...and removing it is just as immediate: no judge, deny-all fallthrough.
+    fakeClient.calls = 0;
+    const removed = await rawProxyRequest("http://late.example.org/c", auth());
+    expect(removed.statusCode).toBe(403);
+    expect(fakeClient.calls).toBe(0);
+  });
+});
+
+describe("PolicyStore — Postgres is the source every replica reads", () => {
+  test("a fresh process sees a just-saved policy, scoped to its organization", async () => {
+    await saveGuardrails([
+      ...BASE_GUARDRAILS,
+      {
+        name: "fresh",
+        enabled: true,
+        stage: "egress",
+        policy: "fresh replica policy",
+        model: "openai/gpt-4o-mini",
+        domains: ["*.fresh.test"],
+      },
+    ]);
+    try {
+      // A second replica: a brand-new store that never saw a dispatch.
+      const replica = new PolicyStore();
+      const rules = await replica.resolve("org-a", "agent-a", "API.fresh.test");
+      expect(rules.map((r) => r.judgeName)).toEqual(["fresh"]);
+      expect(rules[0]?.policy).toBe("fresh replica policy");
+      expect(rules[0]?.judgeModel).toBe("openai/gpt-4o-mini");
+      // The same agent id in another org owns none of it.
+      await seedAgentRow("agent-a", { organizationId: "org-b" });
+      expect(await replica.resolve("org-b", "agent-a", "api.fresh.test")).toEqual(
+        []
+      );
+    } finally {
+      await saveGuardrails(BASE_GUARDRAILS);
     }
   });
 });
