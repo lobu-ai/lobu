@@ -278,6 +278,10 @@ describe("ClickHouse query HTTP boundary", () => {
     [500, "352", 400],
     [500, "386", 400],
     [500, "403", 400],
+    // A parameterized view selected without its arguments, and a view's own argument check.
+    [500, "51", 400],
+    [500, "395", 400],
+    [501, "48", 400],
     [401, "184", 401],
     [500, "1840", 500],
     [500, "47", 500],

@@ -181,7 +181,7 @@ const issue = defineEntityType({
   key: "issue",
   name: "Issue",
   description:
-    "A production error group keyed by its fingerprint: lifecycle, counters and triage. Live occurrences stay in ClickHouse (issue_trend, issue_events).",
+    "A production error group keyed by its fingerprint: lifecycle, counters and triage. Live occurrences stay in ClickHouse parameterized views: issue_trend(fingerprint = '<fingerprint>') and issue_events(fingerprint = '<fingerprint>', day_from = 'YYYY-MM-DD', day_to = 'YYYY-MM-DD').",
   properties: {
     fingerprint: Type.Unsafe({
       type: "string",
