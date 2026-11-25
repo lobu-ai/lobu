@@ -74,28 +74,6 @@ export interface DeclaredCredential {
   secretRef?: SecretRef;
 }
 
-export interface SessionContext {
-  // Core identifiers
-  platform: string; // Platform identifier (e.g., "slack", "discord", "teams")
-  channelId: string;
-  userId: string;
-  messageId: string; // Required - always needed for tracking
-
-  // Optional context
-  conversationId?: string;
-  teamId?: string; // Platform workspace/team identifier
-  userDisplayName?: string; // For logging/display purposes
-  workingDirectory?: string;
-  customInstructions?: string;
-  conversationHistory?: ConversationMessage[];
-}
-
-export interface ConversationMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-  timestamp: number;
-}
-
 // Agent-settings nested types (NetworkConfig, NixConfig,
 // SkillConfig, SkillsConfig, AgentInlineGuardrail, ThinkingLevel) now live in
 // ./contracts/agent-settings.ts as the single TypeBox-schema source (Static<typeof ...>). They are re-exported
