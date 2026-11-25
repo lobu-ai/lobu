@@ -1476,7 +1476,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
       );
     const savedNotes = (marker: string) =>
       getTestDb()`SELECT 1 FROM events WHERE organization_id = ${orgA.id} AND payload_text = ${marker}`;
-    judgeStub.mockRejectedValue(new Error('upstream 503 Service Unavailable (provider-down-error)'));
+    judgeStub.mockRejectedValue(new Error('judge-transport-sentinel-provider-unavailable'));
     try {
       await flushPendingGuardrailAudits();
       const tripsBefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
@@ -1485,7 +1485,10 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
       expect(refused.isError).toBe(true);
       expect(refused.content[0]!.text).toBe('Tool call blocked by policy.');
       expect(refused.structuredContent).toMatchObject({ error: { code: 'PERMISSION' } });
-      expect(JSON.stringify(refused)).not.toMatch(/provider-down|503|Judge call failed|denied/);
+      // Distinctive literals only: the response carries a random call_id.
+      expect(JSON.stringify(refused)).not.toMatch(
+        /judge-transport-sentinel|provider-down-policy-body|Judge call failed; denied/
+      );
       expect(await savedNotes('judge-down blocked note')).toHaveLength(0);
 
       // The judge did deny: it is audited as a trip of that guardrail.
