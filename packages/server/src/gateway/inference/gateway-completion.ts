@@ -11,9 +11,9 @@
  * these features can use. Gateway features resolve the org-owned provider row
  * independently of worker execution.
  *
- * API-key Chat Completions and Responses are supported. OAuth-backed rows
- * (no API key) and other wire protocols are deliberately unsupported here;
- * the calling feature fails open.
+ * API-key Chat Completions, Responses, and Anthropic Messages are supported.
+ * OAuth-backed rows (no API key) and other wire protocols are deliberately
+ * unsupported here; the calling feature fails open.
  */
 
 import { createLogger, getErrorMessage, retryWithBackoff } from "@lobu/core";
@@ -32,18 +32,40 @@ export interface GatewayCompletionTarget {
   apiKey: string;
   model: string;
   /** Internal transport choice; omitted targets retain Chat Completions. */
-  sdkCompat?: "openai" | "openai-responses";
+  sdkCompat?: GatewayCompletionProtocol;
 }
 
-export function isGatewayCompletionProtocol(value: unknown): value is "openai" | "openai-responses" {
-  return value === "openai" || value === "openai-responses";
+type GatewayCompletionProtocol = "openai" | "openai-responses" | "anthropic";
+
+export function isGatewayCompletionProtocol(value: unknown): value is GatewayCompletionProtocol {
+  return value === "openai" || value === "openai-responses" || value === "anthropic";
 }
+
+/**
+ * `max_tokens` sent to Anthropic when the caller sets no ceiling. The Messages
+ * API rejects a request without one, unlike the OpenAI protocols where
+ * omitting it keeps the provider default.
+ *
+ * Every caller wants a short strict-JSON reply, so this is a ceiling rather
+ * than a target, and it is billed only for what is generated. It still has to
+ * clear hidden thinking: current Claude models think by default and those
+ * tokens count against `max_tokens`, so a tight value would truncate the
+ * answer. 4096 is also the smallest output limit of any Claude model, so it
+ * never fails validation on an older model the way a larger default would.
+ */
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 4096;
+
+/** Anthropic API version header; the request and response shapes below are this version's. */
+const ANTHROPIC_VERSION = "2023-06-01";
 
 interface GatewayCompletionRequest {
   target: GatewayCompletionTarget;
   systemPrompt: string;
   userPrompt: string;
-  /** Chat Completions only; defaults to 0. Responses keeps the model default. */
+  /**
+   * Chat Completions only; defaults to 0. Responses and Anthropic Messages keep
+   * the model default.
+   */
   temperature?: number;
   timeoutMs: number;
   /**
@@ -161,7 +183,7 @@ export async function resolveCompletionTarget(
   if (providerModule && !isGatewayCompletionProtocol(sdkCompat)) {
     logger.warn(
       { slug, kind: config.kind, sdkCompat: providerModule.sdkCompat },
-      "provider does not use the OpenAI-compatible protocol; gateway completion skipped"
+      "provider does not use a supported gateway completion protocol; gateway completion skipped"
     );
     return null;
   }
@@ -194,7 +216,7 @@ export async function resolveCompletionTarget(
     baseUrl: baseUrl.replace(/\/+$/, ""),
     apiKey: config.apiKey,
     model,
-    ...(sdkCompat === "openai-responses" ? { sdkCompat } : {}),
+    ...(sdkCompat === "openai-responses" || sdkCompat === "anthropic" ? { sdkCompat } : {}),
   };
 }
 
@@ -277,6 +299,9 @@ async function callCompletionOnce(
   signal: AbortSignal
 ): Promise<string> {
   const { target } = request;
+  if (target.sdkCompat === "anthropic") {
+    return callAnthropicMessagesOnce(request, signal);
+  }
 
   const responses = target.sdkCompat === "openai-responses";
   // Enrichment callers set temperature, but reasoning models can reject it at
@@ -343,6 +368,71 @@ async function callCompletionOnce(
   }
 
   const content = choice?.message?.content;
+  if (!content) throw new Error("Gateway completion returned no text");
+  return content;
+}
+
+interface AnthropicMessagesResponse {
+  /**
+   * `"max_tokens"` means the ceiling stopped generation. `end_turn` and
+   * `stop_sequence` are the only complete replies; anything else (`refusal`,
+   * `pause_turn`, `tool_use`, `model_context_window_exceeded`) leaves text
+   * that is not the answer.
+   */
+  stop_reason?: string | null;
+  content?: Array<{ type?: string; text?: string } | null> | null;
+}
+
+/** One Anthropic Messages attempt; same contract as {@link callCompletionOnce}. */
+async function callAnthropicMessagesOnce(
+  request: GatewayCompletionRequest,
+  signal: AbortSignal
+): Promise<string> {
+  const { target } = request;
+  // No temperature: current Claude models reject sampling parameters with a
+  // 400, which would turn every call into a terminal failure. The Responses
+  // branch keeps the model default for the same reason.
+  const body = {
+    model: target.model,
+    system: request.systemPrompt,
+    messages: [{ role: "user", content: request.userPrompt }],
+    max_tokens: request.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+  };
+  // The upstream is the API root (`https://api.anthropic.com`), exactly as the
+  // run path forwards `/v1/messages` to it, so the version segment is ours.
+  const response = await fetch(`${target.baseUrl}/v1/messages`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": target.apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new GatewayCompletionHttpError(
+      response.status,
+      `Gateway completion failed: ${response.status} ${response.statusText}`
+    );
+  }
+
+  const data = (await response.json()) as AnthropicMessagesResponse;
+  // Checked before the text, for the same reason as Chat Completions: a
+  // truncation must read as the ceiling, not as a model that returned junk.
+  if (data.stop_reason === "max_tokens") {
+    throw new GatewayCompletionTruncatedError(body.max_tokens);
+  }
+  if (data.stop_reason !== "end_turn" && data.stop_reason !== "stop_sequence") {
+    throw new Error(
+      `Gateway Anthropic Messages request did not complete (stop_reason: ${data.stop_reason ?? "none"})`
+    );
+  }
+  const content = (data.content ?? [])
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block?.text)
+    .join("");
   if (!content) throw new Error("Gateway completion returned no text");
   return content;
 }

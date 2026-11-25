@@ -1,7 +1,8 @@
 /**
  * `resolveCompletionTarget` protocol gating, against REAL provider rows.
  *
- * These features support API-key Chat Completions and Responses transports.
+ * These features support API-key Chat Completions, Responses, and Anthropic
+ * Messages transports.
  * Unsupported protocols resolve to null so callers fail open without sending
  * a request the upstream cannot parse.
  *
@@ -10,17 +11,20 @@
  * pass even with the check deleted.
  */
 import { readFileSync } from 'node:fs';
+import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { resolve } from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   __resetEncryptionKeyCacheForTests,
   moduleRegistry,
   type ModuleInterface,
 } from '@lobu/core';
 import { createInferenceProvider } from '../../lobu/stores/provider-secrets';
-import { resolveCompletionTarget } from '../../gateway/inference/gateway-completion';
+import { gatewayCompletion, resolveCompletionTarget } from '../../gateway/inference/gateway-completion';
 import { ApiKeyProviderModule } from '../../gateway/auth/api-key-provider-module';
 import { ChatGPTOAuthModule } from '../../gateway/auth/chatgpt/chatgpt-oauth-module';
+import { ClaudeOAuthModule } from '../../gateway/auth/claude/oauth-module';
 import { getDb } from '../../db/client';
 import { cleanupTestDatabase } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
@@ -253,20 +257,85 @@ describe('resolveCompletionTarget protocol gating', () => {
     });
   });
 
-  it('does NOT resolve an explicitly non-OpenAI protocol', async () => {
-    const orgId = await newOrgWithProvider('anthropic', 'claude-sonnet-5');
-    register({
-      name: 'anthropic-api-key',
-      providerId: 'anthropic',
-      providerDisplayName: 'Anthropic',
-      sdkCompat: 'anthropic',
-      getUpstreamConfig: () => ({
-        slug: 'anthropic',
-        upstreamBaseUrl: 'https://api.anthropic.com',
-      }),
+  /**
+   * Claude rows go through the REAL Claude module, so the protocol and the
+   * registered upstream come from the same place the run path reads them. The
+   * upstream is a local fake reached through the module's own base-URL
+   * override, which lets the resolved target drive a real HTTP request.
+   */
+  describe('Anthropic Messages', () => {
+    let upstream: Server;
+    let upstreamUrl: string;
+    let received: Array<{ method?: string; url?: string; headers: IncomingHttpHeaders; body: string }>;
+    let priorBaseUrl: string | undefined;
+
+    beforeAll(async () => {
+      upstream = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          received.push({ method: req.method, url: req.url, headers: req.headers, body });
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'message',
+            role: 'assistant',
+            stop_reason: 'end_turn',
+            content: [{ type: 'text', text: '["rewritten"]' }],
+          }));
+        });
+      });
+      await new Promise<void>((done) => upstream.listen(0, '127.0.0.1', done));
+      upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
     });
 
-    expect(await resolveCompletionTarget(orgId)).toBeNull();
+    afterAll(async () => {
+      await new Promise<void>((done) => upstream.close(() => done()));
+    });
+
+    beforeEach(() => {
+      received = [];
+      priorBaseUrl = process.env.ANTHROPIC_BASE_URL;
+      process.env.ANTHROPIC_BASE_URL = upstreamUrl;
+      moduleRegistry.register(new ClaudeOAuthModule({} as never) as unknown as ModuleInterface);
+    });
+
+    afterEach(() => {
+      if (priorBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL;
+      else process.env.ANTHROPIC_BASE_URL = priorBaseUrl;
+    });
+
+    it('an API-key Claude row resolves to Messages and drives the request', async () => {
+      const orgId = await newOrgWithProvider('claude', 'claude-test-model');
+
+      const target = await resolveCompletionTarget(orgId);
+      expect(target).toEqual({
+        baseUrl: upstreamUrl,
+        apiKey: 'sk-resolver-test',
+        model: 'claude-test-model',
+        sdkCompat: 'anthropic',
+      });
+
+      const out = await gatewayCompletion({
+        target: target!,
+        systemPrompt: 'SYS',
+        userPrompt: 'USER',
+        temperature: 0,
+        timeoutMs: 5_000,
+      });
+      expect(out).toBe('["rewritten"]');
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ method: 'POST', url: '/v1/messages' });
+      expect(received[0]?.headers['x-api-key']).toBe('sk-resolver-test');
+      expect(received[0]?.headers['anthropic-version']).toBe('2023-06-01');
+      expect(received[0]?.headers.authorization).toBeUndefined();
+      const sent = JSON.parse(received[0]!.body);
+      expect(sent).toMatchObject({
+        model: 'claude-test-model',
+        system: 'SYS',
+        messages: [{ role: 'user', content: 'USER' }],
+      });
+      expect(sent.max_tokens).toBeGreaterThan(0);
+    });
   });
 
   /** The positive control: same shape, only sdkCompat differs. */

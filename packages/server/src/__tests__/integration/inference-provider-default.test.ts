@@ -541,8 +541,8 @@ describe('inference provider org default', () => {
       await signInWithModel(org.id, 'claude');
 
       // Even asked for BY NAME, an oauth:// ref joins to no vault secret, so the
-      // gateway transport declines rather than sending a keyless request.
-      // Claude also uses the non-OpenAI `anthropic` protocol.
+      // gateway transport declines rather than sending a subscription token
+      // through the API-key Messages transport.
       expect(
         await resolveCompletionTarget(org.id, 'claude/synthetic-model'),
       ).toBeNull();

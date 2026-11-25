@@ -344,15 +344,11 @@ describe("resolveSystemJudgeTarget", () => {
     }
   });
 
-  test("refuses an anthropic-protocol provider even when its system key IS set", async () => {
-    // The regression this guards: gatewayCompletion supports Chat Completions
-    // and Responses, not Anthropic's Messages protocol. A deployment that holds
-    // ANTHROPIC_API_KEY must not have `claude/...` accepted and then posted to
-    // an endpoint that cannot parse it.
+  test("resolves an Anthropic system key to the Messages transport", async () => {
     const prevRegistry = process.env[REGISTRY_ENV];
     const prevKey = process.env.ANTHROPIC_API_KEY;
     process.env[REGISTRY_ENV] = REGISTRY_PATH;
-    process.env.ANTHROPIC_API_KEY = "sk-ant-still-configured";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-deployment-owned";
     restore = () => {
       if (prevRegistry === undefined) delete process.env[REGISTRY_ENV];
       else process.env[REGISTRY_ENV] = prevRegistry;
@@ -361,10 +357,37 @@ describe("resolveSystemJudgeTarget", () => {
     };
 
     const result = await resolveSystemJudgeTarget("claude/claude-haiku-4-5-20251001");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.target).toEqual({
+        baseUrl: "https://api.anthropic.com",
+        apiKey: "sk-ant-deployment-owned",
+        model: "claude-haiku-4-5-20251001",
+        sdkCompat: "anthropic",
+      });
+    }
+  });
+
+  test("refuses the ChatGPT Codex protocol even when its system key IS set", async () => {
+    // gatewayCompletion has no Codex Responses transport. A deployment that
+    // holds OPENAI_API_KEY must not have `chatgpt/...` accepted and then
+    // posted to an endpoint that cannot parse it.
+    const prevRegistry = process.env[REGISTRY_ENV];
+    const prevKey = process.env.OPENAI_API_KEY;
+    process.env[REGISTRY_ENV] = REGISTRY_PATH;
+    process.env.OPENAI_API_KEY = "sk-still-configured";
+    restore = () => {
+      if (prevRegistry === undefined) delete process.env[REGISTRY_ENV];
+      else process.env[REGISTRY_ENV] = prevRegistry;
+      if (prevKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prevKey;
+    };
+
+    const result = await resolveSystemJudgeTarget("chatgpt/gpt-5.6-luna");
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("no-system-provider");
-      expect(result.detail).toContain("anthropic");
+      expect(result.detail).toContain("openai-codex");
     }
   });
 

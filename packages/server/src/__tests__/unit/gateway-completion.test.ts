@@ -475,3 +475,128 @@ describe("gatewayCompletion — truncated replies", () => {
     expect(out).toBe("no finish reason here");
   });
 });
+
+describe("gatewayCompletion — Anthropic Messages", () => {
+  const ANTHROPIC = {
+    baseUrl: "https://api.anthropic.example.test",
+    apiKey: "sk-ant-test",
+    model: "claude-test",
+    sdkCompat: "anthropic" as const,
+  };
+
+  test("posts a Messages request with x-api-key and the pinned API version", async () => {
+    const { calls } = stubFetch({
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "hello" }],
+    });
+
+    const out = await gatewayCompletion({
+      target: ANTHROPIC,
+      systemPrompt: "SYS",
+      userPrompt: "USER",
+      temperature: 0,
+      maxTokens: 256,
+      timeoutMs: 5_000,
+    });
+
+    expect(out).toBe("hello");
+    expect(calls).toHaveLength(1);
+    // The upstream base is the API root, as on the run path; the version
+    // segment belongs to the Messages path.
+    expect(calls[0]?.url).toBe("https://api.anthropic.example.test/v1/messages");
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("sk-ant-test");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(headers["content-type"]).toBe("application/json");
+    expect(headers).not.toHaveProperty("Authorization");
+
+    const sent = JSON.parse(String(calls[0]?.init.body));
+    expect(sent).toEqual({
+      model: "claude-test",
+      system: "SYS",
+      messages: [{ role: "user", content: "USER" }],
+      max_tokens: 256,
+    });
+  });
+
+  test("always sends max_tokens, which the Messages API requires", async () => {
+    const { calls } = stubFetch({
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "ok" }],
+    });
+    await gatewayCompletion({
+      target: ANTHROPIC,
+      systemPrompt: "s",
+      userPrompt: "u",
+      timeoutMs: 5_000,
+    });
+    const sent = JSON.parse(String(calls[0]?.init.body));
+    expect(Number.isInteger(sent.max_tokens)).toBe(true);
+    expect(sent.max_tokens).toBeGreaterThan(0);
+  });
+
+  test("joins text blocks and skips thinking blocks", async () => {
+    stubFetch({
+      stop_reason: "end_turn",
+      content: [
+        { type: "thinking", thinking: "", signature: "sig" },
+        { type: "text", text: "first " },
+        { type: "text", text: "second" },
+      ],
+    });
+    expect(await gatewayCompletion({
+      target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000,
+    })).toBe("first second");
+  });
+
+  test("stop_reason max_tokens is a truncation and is not retried", async () => {
+    const { calls } = stubFetch({
+      stop_reason: "max_tokens",
+      content: [{ type: "text", text: '{"verdict": "' }],
+    });
+    const err = await gatewayCompletion({
+      target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000, maxTokens: 64,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GatewayCompletionTruncatedError);
+    expect((err as GatewayCompletionTruncatedError).maxTokens).toBe(64);
+    expect(calls).toHaveLength(1);
+  });
+
+  test.each(["refusal", "model_context_window_exceeded", "pause_turn", "tool_use"])(
+    "stop_reason %s never returns partial text",
+    async (stopReason) => {
+      const { calls } = stubFetch({
+        stop_reason: stopReason,
+        content: [{ type: "text", text: "partial" }],
+      });
+      await expect(gatewayCompletion({
+        target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000,
+      })).rejects.toThrow("did not complete");
+      expect(calls).toHaveLength(1);
+    },
+  );
+
+  test("an empty reply fails without retrying", async () => {
+    const { calls } = stubFetch({ stop_reason: "end_turn", content: [] });
+    await expect(gatewayCompletion({
+      target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000,
+    })).rejects.toThrow("returned no text");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("retries the overloaded 529 like any other 5xx", async () => {
+    const { calls } = stubFetch({}, { status: 529 });
+    await expect(gatewayCompletion({
+      target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000,
+    })).rejects.toThrow(/529/);
+    expect(calls).toHaveLength(3);
+  });
+
+  test("does NOT retry a terminal 401", async () => {
+    const { calls } = stubFetch({}, { status: 401 });
+    await expect(gatewayCompletion({
+      target: ANTHROPIC, systemPrompt: "s", userPrompt: "u", timeoutMs: 5_000,
+    })).rejects.toThrow(/401/);
+    expect(calls).toHaveLength(1);
+  });
+});
