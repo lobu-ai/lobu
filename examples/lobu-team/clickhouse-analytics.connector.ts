@@ -217,6 +217,33 @@ function exceptionCode(response: Response): string | null {
 /** TOO_MANY_SIMULTANEOUS_QUERIES: the account's concurrent-query limit refused
  * the query at admission, before it ran, so repeating it is safe. */
 const SLOT_BUSY = "202";
+/** Exceptions that reject the submitted statement, not the source. ClickHouse
+ * answers HTTP 500 (501 for NOT_IMPLEMENTED) for every code it has no
+ * dedicated status for, so these would read as a source failure and be
+ * retried; they take the non-retryable caller-error path instead. A hint names
+ * the fix where ClickHouse's own text does not. */
+const CALLER_QUERY_CODES = new Map<string, string | null>([
+  ["158", null], // TOO_MANY_ROWS: read cap
+  ["307", null], // TOO_MANY_BYTES: read cap
+  ["42", null], // NUMBER_OF_ARGUMENTS_DOESNT_MATCH
+  ["43", null], // ILLEGAL_TYPE_OF_ARGUMENT
+  ["48", null], // NOT_IMPLEMENTED: unsupported query shape
+  [
+    "51", // EMPTY_LIST_OF_COLUMNS_QUERIED
+    "a parameterized view lists no columns until it is called with its arguments, e.g. SELECT * FROM db.view(name = 'value'); its {name:Type} placeholders are in system.tables.create_table_query",
+  ],
+  ["179", null], // MULTIPLE_EXPRESSIONS_FOR_ALIAS
+  [
+    "184", // ILLEGAL_AGGREGATION
+    "ClickHouse substitutes an alias wherever its name appears, so give an aggregate an alias that is not a column name, e.g. sum(n) AS total_n",
+  ],
+  ["207", null], // AMBIGUOUS_IDENTIFIER
+  ["215", null], // NOT_AN_AGGREGATE
+  ["352", null], // AMBIGUOUS_COLUMN_NAME
+  ["386", null], // NO_COMMON_TYPE
+  ["395", null], // FUNCTION_THROW_IF_VALUE_IS_NON_ZERO: a view's argument check
+  ["403", null], // INVALID_JOIN_ON_EXPRESSION
+]);
 const QUERY_TIMEOUT_MS = 20000;
 const SLOT_RETRY_BASE_MS = 250;
 const SLOT_RETRY_MAX_MS = 2000;
@@ -224,21 +251,22 @@ const SLOT_RETRY_MAX_MS = 2000;
 async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
     const code = exceptionCode(response);
-    const status =
-      // Read caps reject this query, so use the existing non-retryable caller-error path.
-      code === "307" || code === "158"
-        ? 400
-        : // A slot still busy after waiting is throttling, not a source failure.
-          code === SLOT_BUSY
-          ? 429
-          : response.status;
+    const callerError = code !== null && CALLER_QUERY_CODES.has(code);
+    const status = callerError
+      ? 400
+      : // A slot still busy after waiting is throttling, not a source failure.
+        code === SLOT_BUSY
+        ? 429
+        : response.status;
+    const hint = callerError ? CALLER_QUERY_CODES.get(code) : null;
     const exception = await clickHouseException(response);
     if (!response.bodyUsed) await response.body?.cancel();
     throw Object.assign(
       new Error(
-        exception
+        (exception
           ? `Analytics query failed: ${exception}`
-          : `Analytics query failed (HTTP ${response.status})`
+          : `Analytics query failed (HTTP ${response.status})`) +
+          (hint ? `. Hint: ${hint}` : "")
       ),
       { status }
     );
@@ -427,9 +455,9 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "2.0.2",
+    version: "2.0.3",
     description:
-      "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants.",
+      "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants. A parameterized view (its create_table_query has {name:Type} placeholders) lists no columns; call it with arguments, e.g. SELECT * FROM db.view(name = 'value'). An alias is visible everywhere in the query, so never alias an aggregate with the name of a column it reads.",
     authSchema: {
       methods: [
         {
