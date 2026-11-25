@@ -12,6 +12,7 @@ import {
   generateWorkerTokenWithExpiry,
 } from "@lobu/core";
 import { type Context, Hono } from "hono";
+import { basePath } from "hono/route";
 import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
 import {
@@ -461,9 +462,15 @@ export function createAgentApi(config: AgentApiConfig): Hono {
       // The embedded panel opens the SSE stream with EventSource (no
       // Authorization header), authenticating via a short-lived ?token= ticket.
       // Scope that query-token path to the SSE route only; other GETs under the
-      // agent API still require the normal cookie/header auth path.
-      allowSettingsQueryToken: (c) =>
-        /^\/api\/v1\/agents\/[^/]+\/events$/.test(c.req.path),
+      // agent API still require the normal cookie/header auth path. The path is
+      // matched relative to the router's mount (`/` standalone, `/lobu` when
+      // embedded), since c.req.path carries the mount prefix.
+      allowSettingsQueryToken: (c) => {
+        const mount = basePath(c);
+        const path =
+          mount === "/" ? c.req.path : c.req.path.slice(mount.length);
+        return /^\/api\/v1\/agents\/[^/]+\/events$/.test(path);
+      },
     })
   );
 
