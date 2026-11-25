@@ -141,7 +141,7 @@ describe("lobu daemon", () => {
 
   test("a poll refused below the server's version floor exits with the update steps", async () => {
     spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse({ latest: "19.2.0" })
+      jsonResponse({ version: "19.2.0" })
     );
     spyOn(daemonModule, "startDaemonCommand").mockRejectedValue(
       new WorkerUpgradeRequiredError(
@@ -167,7 +167,7 @@ describe("lobu daemon", () => {
 
   test("a running daemon prints one line when a newer CLI is published", async () => {
     const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse({ latest: "24.3.0" })
+      jsonResponse({ version: "24.3.0" })
     );
     const lines: string[] = [];
     spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
@@ -188,7 +188,7 @@ describe("lobu daemon", () => {
     });
 
     expect(fetchSpy.mock.calls[0]?.[0]).toBe(
-      "https://registry.npmjs.org/-/package/@lobu/cli/dist-tags"
+      "https://registry.npmjs.org/@lobu/cli/latest"
     );
     const printed = lines.filter((line) => line.includes("Lobu CLI 24.3.0"));
     expect(printed).toHaveLength(1);
