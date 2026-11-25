@@ -126,10 +126,11 @@ export function explainConnectorPolicy(
 }
 
 /**
- * The explanation returned to the requester: an agent, app or Automation gets
- * each rule's note but not its conditions, which only approvers see.
+ * A policy result or explanation as returned to the requester, in execute,
+ * confirm and discovery: an agent, app or Automation gets each rule's note but
+ * not its conditions, which only approvers see.
  */
-export function requesterPolicyExplanation(explanation: ConnectorPolicyExplanation): ConnectorPolicyExplanation {
+export function requesterPolicyExplanation<T extends { rules: ConnectorPolicyRuleRef[] }>(explanation: T): T {
 	return { ...explanation, rules: explanation.rules.map(({ when: _when, ...rule }) => rule) };
 }
 

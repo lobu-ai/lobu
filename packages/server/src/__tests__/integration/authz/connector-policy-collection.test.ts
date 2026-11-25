@@ -822,6 +822,13 @@ describe("connected app caller identity", () => {
       `/api/${org.slug}/write-permissions/explain?connection_id=${connectionId}&operation_key=needs_approval&app_key=web%3Aexample.com`)).json()) as { effect: string }).effect;
     // Without an input, a conditional Ask counts as holding.
     expect(await explain()).toBe("approval");
+    // Discovery reports that strict side with the rule note, never the condition.
+    const listed = await (await request("POST", `/api/${org.slug}/manage_operations`, { action: "list_available", connection_id: connectionId }, named.token)).json() as
+      { operations: Array<{ operation_key: string; policy: { effect: string; rules: unknown[] }; execution_targets: Array<{ policy: { rules: unknown[] } }> }> };
+    const discovered = listed.operations.find((operation) => operation.operation_key === "needs_approval");
+    expect(discovered?.policy, JSON.stringify(listed)).toMatchObject({ effect: "approval", rules: [{ kind: "guardrail", note: "Ask before mailing outside" }] });
+    expect(discovered?.execution_targets[0]?.policy.rules).toEqual(discovered?.policy.rules);
+    expect(JSON.stringify(listed)).not.toContain("acme.example");
 
     const held = await execute(named.token, { to: "someone@outside.example" });
     expect(held.body.status, JSON.stringify(held.body)).toBe("pending_approval");

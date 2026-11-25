@@ -17,7 +17,7 @@ import { compileConnectionRowVisibility } from "../../../../authz/connection-vis
 import { resolveActingPrincipal, listEntityApprovalPolicies } from "../../../../authz/entity-policy";
 import { authzScopeFromToolContext } from "../../../../authz/scope";
 import { getDb } from "../../../../db/client";
-import { evaluateConnectorPolicy, type ConnectorPolicyResult, type UnknownConditionSide } from "../../../../authz/connector-policy";
+import { evaluateConnectorPolicy, type ConnectorPolicyResult, requesterPolicyExplanation, type UnknownConditionSide } from "../../../../authz/connector-policy";
 import { listOperations } from "../../../../operations/connector-operations";
 import { getMissingKnownOAuthScopes } from "../../../../operations/oauth-scope-readiness";
 import type { AvailableOperation, OperationDescriptor } from "../../../../operations/types";
@@ -482,7 +482,7 @@ function buildAvailableOperation(args: {
 		if (operation.operation_key === BROWSER_VERIFY_OPERATION && browserVerificationReady) {
 			publicTarget.status = "ready"; publicTarget.executable = true; publicTarget.reason = "The paired browser can verify this account.";
 		}
-		publicTarget.policy = args.policyFor(operation, target.connection_id);
+		publicTarget.policy = requesterPolicyExplanation(args.policyFor(operation, target.connection_id));
 		if (publicTarget.policy.effect === "deny" && blocked(target.connection_id)) {
 			return { ...publicTarget, status: "blocked", executable: false, reason: "Organization policy blocks this operation." };
 		}
@@ -567,7 +567,7 @@ function buildAvailableOperation(args: {
 			: [];
 	return {
 		...(publicOperation as AvailableOperation),
-		policy: readyTarget?.policy ?? remediationTarget?.policy ?? args.policyFor(operation, null),
+		policy: readyTarget?.policy ?? remediationTarget?.policy ?? requesterPolicyExplanation(args.policyFor(operation, null)),
 		...(includeInputSchema ? {} : { input_schema: undefined }),
 		executable,
 		readiness,
