@@ -53,14 +53,39 @@ export interface WhatsAppWebMessageRow {
 }
 
 /**
- * WhatsApp marks bold and strike with a single `*` / `~`. These are serializer
- * node handlers, so code spans and escaped text are never rewritten.
+ * Prefixes the GFM parser adds to a written URL or email to form its link
+ * target: none for `<url>`, `http://` for a `www.` literal, `mailto:` for an
+ * email. A link whose target is its own text plus one of these is an autolink.
+ */
+const AUTOLINK_TARGET_PREFIXES = ["", "http://", "mailto:"];
+
+/** A link or image as WhatsApp text: the bare URL, or `label (url)`. */
+function linkText(label: string, url: string): string {
+  if (!label) return url;
+  if (AUTOLINK_TARGET_PREFIXES.some((prefix) => prefix + label === url)) return label;
+  return `${label} (${url})`;
+}
+
+/**
+ * WhatsApp text is not CommonMark: its only markup is `*bold*`, `_italic_`,
+ * `~strike~` and backtick code, and it has no escape mechanism. These
+ * serializer node handlers therefore emit text verbatim (no backslash escapes
+ * or character references), hard breaks as plain newlines, and links/images
+ * as `label (url)` — the form the plain-text connector chats use — or the bare
+ * URL for an autolink. Code spans and blocks keep the default handlers.
  */
 const WHATSAPP_INLINE_HANDLERS: Partial<Handlers> = {
+  text: (node) => node.value,
+  break: () => "\n",
   strong: (node, _parent, state, info) =>
     `*${state.containerPhrasing(node, { ...info, before: "*", after: "*" })}*`,
+  emphasis: (node, _parent, state, info) =>
+    `_${state.containerPhrasing(node, { ...info, before: "_", after: "_" })}_`,
   delete: (node, _parent, state, info) =>
     `~${state.containerPhrasing(node, { ...info, before: "~", after: "~" })}~`,
+  link: (node, _parent, state, info) =>
+    linkText(state.containerPhrasing(node, { ...info, before: "", after: "" }), node.url),
+  image: (node) => linkText(node.alt ?? "", node.url),
 };
 
 class WhatsAppWebFormatConverter extends BaseFormatConverter {
@@ -77,7 +102,6 @@ class WhatsAppWebFormatConverter extends BaseFormatConverter {
       return node;
     });
     return toMarkdown(whatsappAst, {
-      emphasis: "_",
       bullet: "-",
       extensions: [gfmToMarkdown()],
       handlers: WHATSAPP_INLINE_HANDLERS,

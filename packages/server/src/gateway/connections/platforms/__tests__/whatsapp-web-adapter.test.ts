@@ -96,6 +96,28 @@ describe("WhatsApp Web adapter outbound", () => {
     expect(calls[0]?.input.text).toBe("*bold* _italic_ ~gone~ `**literal**`");
   });
 
+  test("text and links are sent as WhatsApp text, never Markdown escapes or link syntax", async () => {
+    const { adapter, calls } = harness();
+    await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, {
+      markdown: [
+        "no field_one/field_two [yet] *here*s 1 < 2",
+        "Open: <https://app.example.test/some_space>",
+        "Read [the docs](https://docs.example.test/a_b) or www.example.test or ops@example.test",
+        "Keep `snake_case` and ![chart](https://img.example.test/c.png)",
+        "first line  \nsecond line",
+      ].join("\n\n"),
+    });
+    expect(calls[0]?.input.text).toBe(
+      [
+        "no field_one/field_two [yet] _here_s 1 < 2",
+        "Open: https://app.example.test/some_space",
+        "Read the docs (https://docs.example.test/a_b) or www.example.test or ops@example.test",
+        "Keep `snake_case` and chart (https://img.example.test/c.png)",
+        "first line\nsecond line",
+      ].join("\n\n"),
+    );
+  });
+
   test("headings, rules and tables render as WhatsApp text", async () => {
     const { adapter, calls } = harness();
     await adapter.postMessage(`whatsapp.web:101:${DM_JID}`, {
