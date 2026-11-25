@@ -108,6 +108,22 @@ jobs:
           grep -q 'name: WORKER_SELECTOR' /tmp/lobu-worker-disabled-upgrade.yaml
           test "$(grep -c -- '- lobu-worker' /tmp/lobu-worker-disabled-upgrade.yaml)" -eq 2
 
+      - name: Zero-unavailable upgrade cannot scale deployments
+        run: |
+          for max_unavailable in 0 0%; do
+            helm template lobu charts/lobu --namespace lobu --is-upgrade \
+              --set migrations.enabled=true \
+              --set app.strategy.type=RollingUpdate \
+              --set app.strategy.rollingUpdate.maxUnavailable="$max_unavailable" \
+              >/tmp/lobu-online-upgrade.yaml
+            sed -n '/^# Source: lobu\/templates\/migration-job.yaml$/,/^---$/p' /tmp/lobu-online-upgrade.yaml \
+              | grep 'automountServiceAccountToken: false' >/dev/null
+            if grep -Eq 'resources: \["deployments/scale"\]|name: install-kubectl' /tmp/lobu-online-upgrade.yaml; then
+              echo "zero-unavailable migration jobs must not have the ability to scale deployments" >&2
+              exit 1
+            fi
+          done
+
       - name: Availability hardening stays wired
         # Both of these are silent when dropped: replicas would simply schedule
         # onto one node again, and a short full outage would go back to firing

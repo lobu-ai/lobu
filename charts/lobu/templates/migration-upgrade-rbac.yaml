@@ -1,4 +1,4 @@
-{{- if and .Release.IsUpgrade .Values.migrations.enabled }}
+{{- if and .Release.IsUpgrade .Values.migrations.enabled (eq (include "lobu.migrationsAllowQuiesce" .) "true") }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

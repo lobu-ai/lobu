@@ -1,4 +1,6 @@
 {{- if .Values.migrations.enabled }}
+{{- $allowQuiesce := eq (include "lobu.migrationsAllowQuiesce" .) "true" }}
+{{- $quiescingUpgrade := and .Release.IsUpgrade $allowQuiesce }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,7 +25,7 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      {{- if .Release.IsUpgrade }}
+      {{- if $quiescingUpgrade }}
       serviceAccountName: {{ include "lobu.fullname" . }}-migration-quiesce
       initContainers:
         - name: install-kubectl
@@ -36,6 +38,8 @@ spec:
           volumeMounts:
             - name: migration-tools
               mountPath: /migration-tools
+      {{- else if .Release.IsUpgrade }}
+      automountServiceAccountToken: false
       {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -83,6 +87,7 @@ spec:
               {{- end }}
               {{- if .Release.IsUpgrade }}
               set -- /app/start.sh migrate
+              export MIGRATION_ALLOW_QUIESCE={{ $allowQuiesce }}
 {{ .Files.Get "files/migrate-upgrade.sh" | nindent 14 }}
               {{- else }}
               exec /app/start.sh migrate
@@ -97,12 +102,14 @@ spec:
               value: {{ .Values.releaseGates.databasePreflight.timeoutSeconds | quote }}
             {{- end }}
             {{- if .Release.IsUpgrade }}
-            - name: KUBECTL_BIN
-              value: /migration-tools/kubectl
             - name: MIGRATIONS_DIR
               value: /app/db/migrations
             - name: MIGRATION_PENDING_CHECK
               value: "node /app/scripts/migrate-up.mjs --check-pending"
+            {{- end }}
+            {{- if $quiescingUpgrade }}
+            - name: KUBECTL_BIN
+              value: /migration-tools/kubectl
             - name: NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: APP_DEPLOYMENT
@@ -143,13 +150,13 @@ spec:
             - secretRef:
                 name: {{ .Values.secretName }}
           {{- end }}
-          {{- if .Release.IsUpgrade }}
+          {{- if $quiescingUpgrade }}
           volumeMounts:
             - name: migration-tools
               mountPath: /migration-tools
               readOnly: true
           {{- end }}
-      {{- if .Release.IsUpgrade }}
+      {{- if $quiescingUpgrade }}
       volumes:
         - name: migration-tools
           emptyDir: {}

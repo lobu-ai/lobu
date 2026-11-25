@@ -120,3 +120,14 @@ whether the volume is shared.
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+The migration hook must honor an explicit zero-unavailable app rollout.
+Both integer zero and zero percent are supported by Kubernetes.
+*/}}
+{{- define "lobu.migrationsAllowQuiesce" -}}
+{{- $strategy := .Values.app.strategy | default dict -}}
+{{- $rolling := $strategy.rollingUpdate | default dict -}}
+{{- $unavailable := get $rolling "maxUnavailable" | toString -}}
+{{- not (and (eq $strategy.type "RollingUpdate") (or (eq $unavailable "0") (eq $unavailable "0%"))) -}}
+{{- end -}}

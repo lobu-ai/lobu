@@ -2,11 +2,6 @@
 set -eu
 
 kubectl_bin=${KUBECTL_BIN:-/migration-tools/kubectl}
-namespace=${NAMESPACE:?NAMESPACE is required}
-app_deployment=${APP_DEPLOYMENT:?APP_DEPLOYMENT is required}
-app_selector=${APP_SELECTOR:?APP_SELECTOR is required}
-worker_deployment=${WORKER_DEPLOYMENT:-}
-worker_selector=${WORKER_SELECTOR:-}
 timeout=${QUIESCE_TIMEOUT:-300s}
 pending_check=${MIGRATION_PENDING_CHECK:-}
 quiescence_started=0
@@ -119,11 +114,21 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-trap restore_on_failure EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 if migrations_pending; then
+  if [ "${MIGRATION_ALLOW_QUIESCE:-true}" != true ]; then
+    echo 'ERROR: pending migrations require quiescence, which would violate the zero-unavailable rollout. Ship a compatible migration sequence or schedule a maintenance rollout.' >&2
+    exit 1
+  fi
+  namespace=${NAMESPACE:?NAMESPACE is required}
+  app_deployment=${APP_DEPLOYMENT:?APP_DEPLOYMENT is required}
+  app_selector=${APP_SELECTOR:?APP_SELECTOR is required}
+  worker_deployment=${WORKER_DEPLOYMENT:-}
+  worker_selector=${WORKER_SELECTOR:-}
+
+  trap restore_on_failure EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
   app_replicas=$(deployment_replicas "$app_deployment")
   if [ -n "$worker_deployment" ]; then
     worker_replicas=$(deployment_replicas "$worker_deployment")

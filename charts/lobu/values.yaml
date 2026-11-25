@@ -401,7 +401,9 @@ migrations:
   # validates any declared prerequisites (docs/MIGRATIONS.md); if nothing is
   # pending, or every pending migration is marked -- lobu:no-quiesce (backward
   # compatible), the deployments keep serving and Helm rolls without downtime.
-  # When an incompatible migration is pending, the upgrade records the current
+  # An explicit RollingUpdate with maxUnavailable: 0 (or 0%) refuses an
+  # incompatible migration before changing the database or stopping a pod.
+  # For other strategies, the upgrade records the current
   # replica counts, scales both deployments to zero, and waits for their pods
   # to terminate before migrating. A check that fails or cannot answer aborts
   # the upgrade before anything is scaled. A failed migration restores those
