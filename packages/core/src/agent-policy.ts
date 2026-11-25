@@ -163,16 +163,3 @@ export function renderAlwaysOnToolPolicyRulesFor(
   }
   return ["## Built-In Tool Policies", ...rules.map(renderRule)].join("\n\n");
 }
-
-export function buildUnconfiguredAgentNotice(settingsUrl?: string): string {
-  const settingsHint = settingsUrl
-    ? `\n\n[Open Agent Settings](${settingsUrl})`
-    : "";
-  return `## Agent Configuration Notice
-
-Your identity, instructions, and user context (IDENTITY.md, SOUL.md, USER.md) are not configured yet.
-
-To configure your soul, ask your admin to update the agent instructions in the admin control plane.${settingsHint}
-
-Until configured, behave as a helpful, concise AI assistant.`;
-}

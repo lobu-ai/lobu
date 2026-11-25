@@ -279,12 +279,11 @@ async function saveContentImpl(
   if (!semanticType) throw new ToolUserError('semantic_type is required');
 
   // `guidance` is the built-in org-wide context kind: current guidance events
-  // are injected into EVERY agent's system prompt (workspace instructions +
-  // worker session context), which makes authorship a prompt-injection
-  // surface. Fail closed: only org owners/admins may author it — system
-  // contexts (automation reactions, memberRole=null) and plain members are
-  // rejected. This is the single choke point for both the MCP tool and the
-  // SDK delegate (`client.knowledge.save`).
+  // are injected into EVERY agent's system prompt (workspace instructions),
+  // which makes authorship a prompt-injection surface. Fail closed: only org
+  // owners/admins may author it — system contexts (automation reactions,
+  // memberRole=null) and plain members are rejected. This is the single choke
+  // point for both the MCP tool and the SDK delegate (`client.knowledge.save`).
   const isOrgGuidance = semanticType === GUIDANCE_SEMANTIC_TYPE;
   if (isOrgGuidance && ctx.sourceContext?.chatAccess) {
     throw new ToolUserError('Workspace guidance must be authored outside a chat conversation.', 422, 'VALIDATION');

@@ -69,29 +69,10 @@ afterEach(async () => {
   else process.env.ENCRYPTION_KEY = previousEncryptionKey;
 });
 
-/** Construct a WorkerGateway with stub deps — the refresh route only touches
- *  the DB (liveness gate + revoked-token store) and the token codec, none of
- *  the session-context / MCP collaborators. */
+/** Construct a WorkerGateway — the refresh route only touches the DB
+ *  (liveness gate + revoked-token store) and the token codec. */
 function makeGateway(): WorkerGateway {
-  return new WorkerGateway(
-    queue as any,
-    "https://gateway.example.com",
-    { getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
-    {
-      getSessionContext: async () => ({
-        agentLayers: {
-          identityMd: "",
-          soulMd: "",
-          userMd: "",
-          unconfiguredNotice: "",
-        },
-        platformInstructions: "",
-        networkInstructions: "",
-        skillsInstructions: "",
-        mcpStatus: [],
-      }),
-    } as any
-  );
+  return new WorkerGateway(queue as any);
 }
 
 async function postRefresh(token: string) {

@@ -84,7 +84,7 @@ describe('native capture over HTTP and Postgres', () => {
     __setChatInstanceManagerForTests({ postToConversation: delivered, reactToMessage: delivered, editMessage: delivered, deleteMessage: delivered });
     registerGatewayRuntimeProvider({ id: 'capture-fixture-runtime', credentialFields: [], exec: runtimeExec });
     const app = new Hono();
-    workerGateway = new WorkerGateway({ send: queueReply } as never, 'http://fixture.invalid', {} as never, {} as never);
+    workerGateway = new WorkerGateway({ send: queueReply } as never);
     app.route('/worker', workerGateway.getApp());
     app.route('/lobu', createInteractionRoutes({ postLinkButton: delivered } as never));
     app.route('/lobu', createImageRoutes({ generate: generated } as never));

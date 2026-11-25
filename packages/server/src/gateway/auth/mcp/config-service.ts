@@ -1,7 +1,5 @@
-import { createLogger, verifyWorkerToken } from "@lobu/core";
+import { createLogger } from "@lobu/core";
 import { getLobuMemoryUpstreamOrigin } from "../../config/index.js";
-import { chatTurnAccessOf } from "../../orchestration/chat-turn-actor.js";
-import { getRevokedTokenStore } from "../revoked-token-store.js";
 
 const logger = createLogger("mcp-config-service");
 export const LOBU_MEMORY_MCP_ID = "lobu-memory";
@@ -15,10 +13,6 @@ interface HttpMcpServerConfig {
    * request with the direct-auth header so Lobu promotes it to admin scope.
    */
   internal: true;
-}
-
-interface WorkerMcpConfig {
-  mcpServers: Record<string, any>;
 }
 
 interface McpStatus {
@@ -51,74 +45,6 @@ export class McpConfigService {
   constructor(options: McpConfigServiceOptions = {}) {
     this.lobuMemory = options.lobuMemory;
     logger.debug("McpConfigService initialized");
-  }
-
-  /**
-   * Return MCP config tailored for a worker request. Raw agent/global MCP
-   * servers are intentionally unsupported; the only worker MCP is the
-   * gateway-derived system `lobu-memory` server. External MCP capabilities must
-   * be installed as connectors and executed through connector operations.
-   */
-  async getWorkerConfig(options: {
-    baseUrl: string;
-    workerToken: string;
-    deploymentName?: string;
-  }): Promise<WorkerMcpConfig> {
-    const { baseUrl, workerToken } = options;
-    const workerConfig: WorkerMcpConfig = { mcpServers: {} };
-
-    const tokenData = verifyWorkerToken(workerToken);
-    if (!tokenData) {
-      logger.warn("Failed to verify worker token");
-      return workerConfig;
-    }
-
-    if (
-      tokenData.jti &&
-      (await getRevokedTokenStore().isRevoked(tokenData.jti))
-    ) {
-      logger.warn("Rejected revoked worker token while building MCP config");
-      return workerConfig;
-    }
-
-    // A reply-only chat turn has no workspace tools; the MCP lane would refuse
-    // it anyway (workspace/multi-tenant.ts), so it is offered no server.
-    if (chatTurnAccessOf(tokenData) === "reply_only") return workerConfig;
-
-    const { userId, agentId } = tokenData;
-    const effectiveAgentId = agentId || userId;
-    logger.info(`Building MCP config for user ${userId}`);
-
-    const lobuMemory = await this.deriveLobuMemoryServer(
-      effectiveAgentId,
-      tokenData.organizationId
-    );
-    if (lobuMemory) {
-      workerConfig.mcpServers[LOBU_MEMORY_MCP_ID] = {
-        ...lobuMemory,
-        originalUrl: lobuMemory.url,
-        url: baseUrl,
-        type: "sse",
-        headers: mergeHeaders(undefined, workerToken, LOBU_MEMORY_MCP_ID),
-        perAgent: true,
-      };
-    }
-
-    logger.info(
-      `Returning worker config with ${Object.keys(workerConfig.mcpServers).length} MCPs for user ${userId}:`,
-      {
-        mcpIds: Object.keys(workerConfig.mcpServers),
-        configs: Object.entries(workerConfig.mcpServers).map(([id, cfg]) => ({
-          id,
-          type: cfg.type,
-          hasUrl: !!cfg.url,
-          hasCommand: !!cfg.command,
-          perAgent: cfg.perAgent || false,
-        })),
-      }
-    );
-
-    return workerConfig;
   }
 
   /** Get status of system MCPs for a specific agent (org-scoped). */
@@ -211,26 +137,4 @@ function buildLobuMemoryScopedMcpUrl(baseUrl: string, orgSlug: string): string {
   url.hash = "";
   url.search = "";
   return url.toString().replace(/\/+$/, "");
-}
-
-function mergeHeaders(
-  existingHeaders: unknown,
-  workerToken: string,
-  mcpId: string
-): Record<string, string> {
-  const normalized: Record<string, string> = {};
-
-  if (existingHeaders && typeof existingHeaders === "object") {
-    for (const [key, value] of Object.entries(existingHeaders as any)) {
-      if (typeof value === "string") {
-        normalized[key] = value;
-      } else if (value != null) {
-        normalized[key] = String(value);
-      }
-    }
-  }
-
-  normalized.Authorization = `Bearer ${workerToken}`;
-  normalized["X-Mcp-Id"] = mcpId;
-  return normalized;
 }

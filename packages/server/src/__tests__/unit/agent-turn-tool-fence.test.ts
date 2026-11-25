@@ -56,7 +56,7 @@ describe('agent turn tool attempt fence', () => {
   test('allows a refreshed token for the current attempt', async () => {
     const credential = token();
     rows = [{ status: 'running', credential }];
-    const gateway = new WorkerGateway({} as never, 'https://gateway.test', {} as never, {} as never);
+    const gateway = new WorkerGateway({} as never);
     const response = await gateway.getApp().request('/token/refresh', {
       method: 'POST', headers: { authorization: `Bearer ${credential}` },
     });

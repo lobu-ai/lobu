@@ -9,7 +9,7 @@ const logger = createLogger("instruction-provider");
  *
  * Subclasses implement `buildInstructions(context)` with their domain logic.
  * The base wraps every call in a try/catch + structured logging, so unexpected
- * errors yield an empty string instead of crashing session-context assembly.
+ * errors yield an empty string instead of crashing prompt assembly.
  *
  * Lives in `@lobu/core` (not server) so worker providers can extend it too —
  * before this lived in server-only and the worker reimplemented the same
