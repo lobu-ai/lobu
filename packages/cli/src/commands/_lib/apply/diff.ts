@@ -2451,7 +2451,8 @@ function diffUndeclaredGuardrail(
     id: remote.name,
     remote,
   };
-  const record = applied?.find((r) => r.id === remote.id);
+  // Only a row an apply created is owned; an adopted one is left alone.
+  const record = applied?.find((r) => r.id === remote.id && r.created);
   if (!record) return { row: drift, blocking: [] };
   if (!prune) {
     return {

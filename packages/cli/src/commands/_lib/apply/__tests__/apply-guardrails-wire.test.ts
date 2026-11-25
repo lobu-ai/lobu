@@ -368,7 +368,7 @@ describe("apply workspace guardrails over the wire", () => {
     await runApply(mkProject("[]"), kept.fetchStub);
     expect(guardrailWrites(kept.calls)).toEqual([]);
     expect(store.latestManifest).toMatchObject({
-      guardrails: [{ id: "gr_no-refunds" }],
+      guardrails: [{ id: "gr_no-refunds", created: true }],
     });
 
     // Under prune the owned row is archived at its revision; the app's is not.
@@ -384,6 +384,30 @@ describe("apply workspace guardrails over the wire", () => {
     ]);
     expect(store.guardrails.map((g) => g.name)).toEqual(["app-made"]);
     expect(store.latestManifest).toMatchObject({ guardrails: [] });
+  });
+
+  test("never archives an app-made guardrail it adopted by name, even after updating it", async () => {
+    const store: Store = { guardrails: [structuredClone(appGuardrail)] };
+    // Declared as it stands (a noop), then changed by this config (an update).
+    await runApply(
+      mkProject(`[defineGuardrail({ name: "app-made", builtin: "pii-scan" })]`),
+      makeFetch(store).fetchStub
+    );
+    const updated = makeFetch(store);
+    await runApply(
+      mkProject(
+        `[defineGuardrail({ name: "app-made", builtin: "pii-scan", enabled: false })]`
+      ),
+      updated.fetchStub
+    );
+    expect(guardrailWrites(updated.calls).map((call) => call.method)).toEqual([
+      "PUT",
+    ]);
+
+    const pruned = makeFetch(store);
+    await runApply(mkProject("[]", { prune: true }), pruned.fetchStub);
+    expect(guardrailWrites(pruned.calls)).toEqual([]);
+    expect(store.guardrails.map((g) => g.name)).toEqual(["app-made"]);
   });
 
   test("blocks archiving a guardrail edited in the app since this config created it", async () => {
@@ -440,7 +464,7 @@ describe("apply workspace guardrails over the wire", () => {
     expect(guardrailWrites(rollback.calls)).toEqual([]);
     expect(store.guardrails).toMatchObject([{ config: { policy: "v2" } }]);
     expect(store.latestManifest).toMatchObject({
-      guardrails: [{ id: "gr_no-refunds" }],
+      guardrails: [{ id: "gr_no-refunds", created: true }],
     });
 
     const [guardrail] = store.guardrails;

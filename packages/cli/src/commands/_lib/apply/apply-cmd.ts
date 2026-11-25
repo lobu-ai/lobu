@@ -1825,14 +1825,16 @@ async function applyProject(
    */
   const recordableGuardrails = (
     snapshot: RemoteSnapshot,
-    archivedIds: ReadonlySet<string> = new Set()
+    archivedIds: ReadonlySet<string> = new Set(),
+    createdNames: ReadonlySet<string> = new Set()
   ): RecordedGuardrail[] | undefined => {
     if (state.guardrails === undefined || snapshot.guardrails === undefined)
       return libraryRecord.guardrails;
     return recordGuardrails(
       state.guardrails,
       snapshot.guardrails.filter((row) => !archivedIds.has(row.id)),
-      libraryRecord.guardrails
+      libraryRecord.guardrails,
+      createdNames
     );
   };
   /**
@@ -2105,7 +2107,16 @@ async function applyProject(
         );
         baselineRecordForRecording = recordableBaseline(postRemote);
         skillsForRecording = recordableSkills(postRemote);
-        guardrailsForRecording = recordableGuardrails(postRemote);
+        // Only rows this run created become prune-owned; adopted ones never.
+        guardrailsForRecording = recordableGuardrails(
+          postRemote,
+          new Set(),
+          new Set(
+            plan.rows.flatMap((row) =>
+              row.kind === "guardrail" && row.verb === "create" ? [row.id] : []
+            )
+          )
+        );
         if (!opts.only) {
           pins = {
             ...connectorVersionPins(state, postRemote.connectorDefinitions),

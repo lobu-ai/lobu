@@ -253,24 +253,35 @@ export function loadLibraryRecord(
 
 /**
  * The guardrails record a run leaves: each declared guardrail under the id it
- * has in the library, plus the rows this config created and no longer
- * declares but has not archived (only prune archives them, so they stay
- * owned, with the record of how this config left them).
+ * has in the library, plus the rows an apply created that this config no
+ * longer declares and has not archived (only prune archives them, so they
+ * stay owned, with the record of how this config left them). A row is
+ * `created` when this run created it (`createdNames`) or an earlier record
+ * of the same id says so; a row adopted by name never becomes created.
  */
 export function recordGuardrails(
   desired: DesiredGuardrail[],
   library: WorkspaceGuardrail[],
-  previous: RecordedGuardrail[] | undefined
+  previous: RecordedGuardrail[] | undefined,
+  createdNames: ReadonlySet<string> = new Set()
 ): RecordedGuardrail[] {
   const byName = new Map(library.map((row) => [row.name, row]));
+  const createdIds = new Set(
+    (previous ?? []).filter((record) => record.created).map((r) => r.id)
+  );
   const declared = desired.flatMap((guardrail) => {
     const row = byName.get(guardrail.name);
-    return row ? [recordGuardrail(row.id, guardrail)] : [];
+    if (!row) return [];
+    const created = createdIds.has(row.id) || createdNames.has(guardrail.name);
+    return [recordGuardrail(row.id, guardrail, created)];
   });
   const declaredNames = new Set(desired.map((guardrail) => guardrail.name));
   const libraryIds = new Set(library.map((row) => row.id));
   const kept = (previous ?? []).filter(
-    (record) => !declaredNames.has(record.name) && libraryIds.has(record.id)
+    (record) =>
+      record.created &&
+      !declaredNames.has(record.name) &&
+      libraryIds.has(record.id)
   );
   return [...declared, ...kept];
 }

@@ -362,8 +362,14 @@ export interface DesiredGuardrail {
  * policy is kept only as its digest: enough to tell whether the library moved.
  */
 export interface RecordedGuardrail {
-  /** The library row this config applied; prune archives only these ids. */
+  /** The library row this config applied. */
   id: string;
+  /**
+   * True only when an apply of this config created the row. A row it adopted
+   * by name (made in the app, then declared) is compared against this record
+   * but never archived: prune owns only what apply created.
+   */
+  created: boolean;
   name: string;
   /** The config, with a judge's `policy` replaced by `policy_sha256`. */
   config: Record<string, unknown>;
@@ -385,10 +391,12 @@ export function recordGuardrailConfig(
 
 export function recordGuardrail(
   id: string,
-  guardrail: DesiredGuardrail
+  guardrail: DesiredGuardrail,
+  created: boolean
 ): RecordedGuardrail {
   return {
     id,
+    created,
     name: guardrail.name,
     config: recordGuardrailConfig(guardrail.config),
     applies_to: guardrail.applies_to,
