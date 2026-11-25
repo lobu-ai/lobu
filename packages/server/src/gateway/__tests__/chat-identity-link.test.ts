@@ -22,6 +22,7 @@ import {
 } from "bun:test";
 import { verifyWorkerToken } from "@lobu/core";
 import { Chat, type StateAdapter } from "chat";
+import { planAutomationActivationsForRuntimeConnection } from "../../automations/activation.js";
 import { createTestAutomationSubscription } from "../../__tests__/setup/automation-subscriptions.js";
 import { loginProviderForChatPlatform } from "../../auth/chat-login-identities.js";
 import {
@@ -56,7 +57,10 @@ import { __resetPublicOriginCachesForTests } from "../../utils/public-origin.js"
 import { resetRateLimiterForTests } from "../../utils/rate-limiter.js";
 import { __setChatInstanceManagerForTests } from "../../lobu/gateway.js";
 import { ChatInstanceManager } from "../connections/chat-instance-manager.js";
+import { chatMessageSignal } from "../connections/chat-route.js";
 import { gchatPlatform } from "../connections/platforms/gchat.js";
+import { resolveExactChatThread } from "../connections/platforms/shared.js";
+import { WhatsAppWebAdapter } from "../connections/platforms/whatsapp-web-adapter.js";
 import { resolveClaimingUserSlackIdentities } from "../connections/slack-claim-identities.js";
 import { createConnectedGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { PlatformConnection } from "../connections/types.js";
@@ -905,9 +909,7 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
     // The DM the link was offered in hears that it worked.
     await waitFor(() => expect(created).toHaveLength(2));
     expect(created[1]?.parent).toBe(DM_SPACE);
-    expect(created[1]?.requestBody?.text).toBe(
-      "You're connected. Messages you send me here now act as you in Acme Synthetic.",
-    );
+    expect(created[1]?.requestBody?.text).toContain("Acme Synthetic");
 
     expect(await deliver(directMessage("dm-2", "now what's on my plate?"))).toBe(200);
     await waitFor(async () => {
@@ -961,4 +963,116 @@ describe("Google Chat DM -> chat identity link -> member turn", () => {
       clock.mockRestore();
     }
   });
+});
+
+test("a member of a workspace linked to a foreign WhatsApp group receives its account link privately", async () => {
+  await resetTestDatabase();
+  await seedOrgs();
+  resetRateLimiterForTests();
+  const owner = await createTestUser({});
+  const member = await createTestUser({});
+  await addUserToOrganization(owner.id, ORG_A, "admin");
+  await addUserToOrganization(owner.id, ORG_B, "admin");
+  await addUserToOrganization(member.id, ORG_A, "member");
+  const sender = "15550001111@lid";
+  const otherSender = "15550002222@lid";
+  const group = "120363000000000001@g.us";
+  const [row] = await getDb()<{ id: number }[]>`
+    INSERT INTO connections (organization_id, connector_key, slug, status, visibility)
+    VALUES (${ORG_B}, 'whatsapp.web', 'synthetic-wa-chat', 'active', 'private')
+    RETURNING id
+  `;
+  const id = String(row!.id);
+  await createTestAutomationSubscription({
+    organizationId: ORG_A, agentId: AGENT_ID, connectionId: Number(id),
+    platform: "whatsapp.web", channelId: group, configuredBy: owner.id,
+  });
+
+  const sent: Array<{ chat_jid: unknown; text: unknown }> = [];
+  const adapter = new WhatsAppWebAdapter({
+    connectionId: id,
+    userName: "lobu",
+    newIdempotencyKey: () => crypto.randomUUID(),
+    execute: async ({ input }) => {
+      if (input.chat_jid === otherSender) {
+        return { status: "failed", error: "Synthetic direct message delivery error" };
+      }
+      sent.push({ chat_jid: input.chat_jid, text: input.text });
+      return { status: "completed", output: { sent: true, message_id: `bot-${sent.length}` } };
+    },
+  });
+  const state = await createConnectedGatewayStateAdapter();
+  const chat = new Chat({ userName: "lobu", adapters: { "whatsapp.web": adapter }, state, logger: "silent" });
+  const connection: PlatformConnection = {
+    id, platform: "whatsapp.web", organizationId: ORG_B, status: "active",
+    config: { platform: "whatsapp.web" }, settings: { allowGroups: true },
+    createdAt: 1, updatedAt: 1,
+  };
+  const bridge = await startAssembledChatBridge(chat, state, connection);
+  const instance = bridge.manager.getInstance(id)!;
+  const manager = Object.assign(Object.setPrototypeOf(bridge.manager, ChatInstanceManager.prototype), {
+    ensureConnectionRunning: async () => true,
+    instances: new Map([[id, instance]]),
+  });
+  __setChatInstanceManagerForTests(manager);
+  async function deliver(messageId: string, senderId = sender) {
+    const message = adapter.parseMessage({
+      id: messageId, chat_jid: group, sender_jid: senderId, text: "ERP status?", mentions_me: true,
+    });
+    const thread = await resolveExactChatThread(chat, connection.platform, message.threadId);
+    const plan = await planAutomationActivationsForRuntimeConnection({
+      connectionOrganizationId: ORG_B, runtimeConnectionId: id,
+      signal: chatMessageSignal({
+        platform: connection.platform, connectionId: id, channelId: group,
+        conversationId: message.threadId, userId: senderId, messageId,
+        text: message.text, isMention: true, occurredAt: new Date().toISOString(),
+      }),
+    });
+    expect(plan.replyTargets.map((target) => target.organizationId)).toEqual([ORG_A]);
+    await instance.messageBridge!.handleAdmittedSourceMessage(thread, message, plan);
+  }
+  async function newestTurn() {
+    const [run] = await getDb()`SELECT id, action_input FROM runs WHERE run_type = 'chat_message' ORDER BY id DESC LIMIT 1`;
+    return verifyWorkerToken(await mintTurnToken(run.action_input, Number(run.id)));
+  }
+
+  try {
+    await deliver("group-unlinked");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]?.chat_jid).toBe(sender);
+    const match = String(sent[0]?.text).match(/https:\/\/gateway\.example\.test\/connect\/chat-identity\?token=([^\s]+)/);
+    expect(match).not.toBeNull();
+    const token = decodeURIComponent(match![1]!);
+    expect(await newestTurn()).toMatchObject({ chatAccess: "reply_only", organizationId: ORG_A });
+    expect(await claimCount()).toBe(1);
+
+    await deliver("group-unlinked-again");
+    expect(sent).toHaveLength(1);
+    expect(await claimCount()).toBe(1);
+
+    const page = await routesAs(member).request(pageUrl(token));
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("Acme Synthetic");
+    const outsider = await createTestUser({});
+    await addUserToOrganization(outsider.id, ORG_B, "member");
+    expect((await submit(outsider, token)).status).toBe(403);
+    expect((await submit(member, token)).status).toBe(200);
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]?.chat_jid).toBe(sender);
+    expect(await resolveChatSenderMember("whatsapp.web", undefined, sender, ORG_B)).toBeNull();
+
+    await deliver("group-linked");
+    expect(await newestTurn()).toMatchObject({
+      chatAccess: "org_shared", actorUserId: member.id, organizationId: ORG_A,
+    });
+    expect(sent).toHaveLength(2);
+
+    await deliver("private-send-failed", otherSender);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]?.chat_jid).toBe(group);
+    expect(String(sent[2]?.text)).not.toContain("/connect/chat-identity");
+  } finally {
+    __setChatInstanceManagerForTests(undefined);
+    await bridge.stop();
+  }
 });

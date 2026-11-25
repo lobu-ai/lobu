@@ -332,7 +332,7 @@ async function confirmLinkInChat(claim: ChatIdentityLinkClaim, org: Organization
     channelKey: `${claim.platform}:${target.channelId}`,
     channelId: target.channelId,
     threadId: target.threadId,
-    content: `You're connected. Messages you send me here now act as you in ${org.name}.`,
+    content: `Your chat account is linked to ${org.name}. Try your message again in the chat where you started.`,
   });
 }
 
