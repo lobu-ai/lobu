@@ -647,6 +647,13 @@ async function createEntityWithIdentities(
     identities: ExtractedLink['identities'];
     traits: Map<string, unknown>;
     creatorUserId: string;
+    /**
+     * Resolve `entityType` only among the org's OWN types, skipping the public
+     * catalog fallback. For platform-minted rows that a same-org reader must
+     * find again (a chat sender contact is adopted by a chat-identity link only
+     * when its type is the org's own).
+     */
+    ownTypesOnly?: boolean;
   }
 ): Promise<{
   entityId: number;
@@ -662,7 +669,8 @@ async function createEntityWithIdentities(
 
   // Resolve entity_type slug → entity_types(id). Same schema search path as
   // createEntity: try the entity's own org first, then any visibility='public'
-  // catalog. First match wins. See createEntity for the slug-poisoning caveat.
+  // catalog (unless `ownTypesOnly`). First match wins. See createEntity for the
+  // slug-poisoning caveat.
   let typeRow = await sql<{ id: number; backing_sql: string | null }>`
     SELECT et.id, et.backing_sql
     FROM entity_types et
@@ -671,7 +679,7 @@ async function createEntityWithIdentities(
       AND et.deleted_at IS NULL
       AND (
         et.organization_id = ${params.orgId}
-        OR o.visibility = 'public'
+        OR (${!params.ownTypesOnly}::boolean AND o.visibility = 'public')
       )
     ORDER BY (et.organization_id = ${params.orgId}) DESC, et.id ASC
     LIMIT 1
@@ -1380,7 +1388,8 @@ interface SenderIdentityParams {
  *      globally unique to one entity; no `$member`-before-`person` ordering.
  *      Never mint a `$member` here (membership provisioning owns that, so
  *      attribution and ACL converge on the SAME entity).
- *   2. else mint `mintEntityType`, gated on a well-formed identity + a real org
+ *   2. else mint `mintEntityType` — the org's OWN type of that slug, never a
+ *      public catalog's — gated on a well-formed identity + a real org
  *      member to attribute the create to. Callers drop bots and malformed ids
  *      BEFORE calling (an empty `identities` list → null).
  */
@@ -1432,6 +1441,12 @@ async function resolveSenderIdentityInTransaction(
     identities: params.identities,
     traits: new Map(),
     creatorUserId,
+    // A sender's contact lives in the org that captured the message, which for
+    // a cross-org chat link is not the connection's org. A public org's type of
+    // the same slug would govern it from outside and hide it from the chat
+    // identity link that later adopts it; an org without its own type gets no
+    // contact (the message is still captured, unattributed).
+    ownTypesOnly: true,
   });
   return created?.entityId ?? null;
 }
