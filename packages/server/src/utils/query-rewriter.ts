@@ -20,7 +20,7 @@
  * shared/in-memory state, so it is trivially correct under N>1 app replicas —
  * each request rewrites independently, nothing to fan out across pods.
  *
- * Credentials come from an org-owned OpenAI-compatible provider row via the
+ * Credentials come from an org-owned API-key provider row via the
  * shared gateway completion client. An unsupported or missing provider (or any
  * failure) yields [] and the caller falls back to the raw query alone.
  */

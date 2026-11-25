@@ -96,7 +96,7 @@ async function assertJudgeModelRunnable(
 	const resolved = await resolveSystemJudgeTarget(model);
 	if (!resolved.ok) {
 		throw new ToolUserError(
-			`Guardrail "${next.name}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible protocol.`,
+			`Guardrail "${next.name}" ${ownModel ? `names judge model "${model}"` : `has no model, so it uses this organization's default model "${model}"`}, which this deployment cannot run: ${resolved.detail}. Use a "<provider>/<model>" ref whose provider has a system key and speaks the OpenAI-compatible or Anthropic Messages protocol.`,
 			422,
 		);
 	}

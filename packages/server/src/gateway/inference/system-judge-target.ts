@@ -127,7 +127,7 @@ export async function resolveSystemJudgeTarget(
     return {
       ok: false,
       reason: "no-system-provider",
-      detail: `provider "${parts.slug}" speaks "${config.sdkCompat ?? "unknown"}", not the OpenAI-compatible protocol`,
+      detail: `provider "${parts.slug}" speaks "${config.sdkCompat ?? "unknown"}", not a supported gateway completion protocol`,
     };
   }
 
@@ -151,7 +151,9 @@ export async function resolveSystemJudgeTarget(
       baseUrl: baseUrl.replace(/\/+$/, ""),
       apiKey,
       model: parts.model,
-      ...(config.sdkCompat === "openai-responses" ? { sdkCompat: config.sdkCompat } : {}),
+      ...(config.sdkCompat === "openai-responses" || config.sdkCompat === "anthropic"
+        ? { sdkCompat: config.sdkCompat }
+        : {}),
     },
   };
 }
