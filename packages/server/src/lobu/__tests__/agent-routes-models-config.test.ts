@@ -102,10 +102,10 @@ describe("agent PATCH/GET /config — models surface", () => {
       }) as typeof fetch);
     await client.getAgentSettings(AGENT, { agentId: AGENT, name: "Old list snapshot" });
     await client.patchAgentMetadata(AGENT, { name: "Apply renamed" });
-    await client.patchAgentSettings(AGENT, { soulMd: "Apply persona", skillsConfig: { skills: [] } });
+    await client.patchAgentSettings(AGENT, { soulMd: "Apply persona" });
     const after = await sdk.get(AGENT);
     expect(after.agent.name).toBe("Apply renamed");
-    expect(after.settings).toMatchObject({ soulMd: "Apply persona", skillsConfig: { skills: [] } });
+    expect(after.settings).toMatchObject({ soulMd: "Apply persona" });
     expect(after.revision).not.toBe(before.revision);
     const stale = await app.request(`/${AGENT}/config`, {
       method: "PATCH", headers: { "content-type": "application/json", "If-Match": `"${before.revision}"` },
@@ -134,21 +134,19 @@ describe("agent PATCH/GET /config — models surface", () => {
       directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
     };
     const sdk = buildAgentsNamespace(ctx, {});
-    const skillsConfig = { skills: [{ repo: "example/skills", name: "triage", enabled: true, content: "Inspect the queue." }] };
-    await sdk.update({ agent_id: AGENT, identity_md: "Triage identity", settings: { skillsConfig, showToolCalls: true } });
+    await sdk.update({ agent_id: AGENT, identity_md: "Triage identity", settings: { showToolCalls: true } });
     const get = await app.request(`/${AGENT}/config`);
     expect(get.status).toBe(200);
-    expect(await get.json()).toMatchObject({ skillsConfig, identityMd: "Triage identity", showToolCalls: true });
+    expect(await get.json()).toMatchObject({ identityMd: "Triage identity", showToolCalls: true });
     const patch = await app.request(`/${AGENT}/config`, {
       method: "PATCH", headers: { "content-type": "application/json" },
       body: JSON.stringify({ soulMd: "REST persona" }),
     });
     expect(patch.status).toBe(200);
-    expect((await sdk.get(AGENT)).settings).toMatchObject({ skillsConfig, soulMd: "REST persona" });
+    expect((await sdk.get(AGENT)).settings).toMatchObject({ identityMd: "Triage identity", soulMd: "REST persona" });
     for (const settings of [
       { networkConfig: { allowedDomains: ["invalid host"] } },
       { guardrailsInline: [{ name: "missing-policy", enabled: true, stage: "input" }] },
-      { skillsConfig: { skills: "bad" } },
       { models: ["unknown-provider/model"] },
     ]) {
       const before = await sdk.get(AGENT);

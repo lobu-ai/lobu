@@ -220,6 +220,45 @@ export async function createTestAgent(options: {
  * `config.{settings,chatMetadata}`; `metadata.teamId` lifts into the first-class
  * `external_tenant_id` column. Legacy status maps stopped/* → paused.
  */
+/**
+ * Insert a workspace library skill and its subjects. P3a ships no library
+ * writer, so tests seed the library directly. `appliesTo` defaults to every
+ * principal; pass agent ids to scope it.
+ */
+export async function createTestWorkspaceSkill(options: {
+  organizationId: string;
+  name: string;
+  content?: string;
+  description?: string;
+  enabled?: boolean;
+  sortOrder?: number;
+  appliesTo?: Array<{ kind: 'agent' | 'app'; id: string | null }> | 'everyone';
+}): Promise<{ id: string; name: string; content: string }> {
+  const sql = getTestDb();
+  const id = `skill-${randomBytes(8).toString('hex')}`;
+  const content = options.content ?? `Follow the ${options.name} procedure.`;
+  await sql`
+    INSERT INTO workspace_skills (id, organization_id, name, description, content, enabled, sort_order)
+    VALUES (${id}, ${options.organizationId}, ${options.name}, ${options.description ?? `The ${options.name} skill`},
+            ${content}, ${options.enabled ?? true}, ${options.sortOrder ?? 0})
+  `;
+  const subjects = options.appliesTo ?? 'everyone';
+  if (subjects === 'everyone') {
+    await sql`
+      INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
+      VALUES (${id}, ${options.organizationId}, NULL, NULL)
+    `;
+  } else {
+    for (const subject of subjects) {
+      await sql`
+        INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
+        VALUES (${id}, ${options.organizationId}, ${subject.kind}, ${subject.id})
+      `;
+    }
+  }
+  return { id, name: options.name, content };
+}
+
 export async function insertChatConnectionRow(opts: {
   id: string;
   organizationId: string;

@@ -93,6 +93,12 @@
       "import": "./dist/contracts/tools/manage-catalog.js",
       "require": "./dist/contracts/tools/manage-catalog.js"
     },
+    "./contracts/tools/manage-skills": {
+      "types": "./dist/contracts/tools/manage-skills.d.ts",
+      "bun": "./src/contracts/tools/manage-skills.ts",
+      "import": "./dist/contracts/tools/manage-skills.js",
+      "require": "./dist/contracts/tools/manage-skills.js"
+    },
     "./contracts/tools/manage-classifiers": {
       "types": "./dist/contracts/tools/manage-classifiers.d.ts",
       "bun": "./src/contracts/tools/manage-classifiers.ts",

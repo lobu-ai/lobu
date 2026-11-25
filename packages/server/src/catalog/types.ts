@@ -14,7 +14,7 @@
  *   |-------------|-------------------------------------------------------|-------------|
  *   | connectors  | `connector_definitions` (+ versions) per org          | yes         |
  *   | automations   | Automation inventory rows                               | yes (rows)  |
- *   | skills      | agent `skillsConfig` in settings                      | no          |
+ *   | skills      | workspace skill library rows that apply to the agent  | no          |
  *   | providers   | agent `models` slug prefixes + module registry metadata | no        |
  *   | guardrails  | agent `guardrails` enable list + gateway registry     | no          |
  *

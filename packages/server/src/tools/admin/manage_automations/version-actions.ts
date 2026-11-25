@@ -5,7 +5,10 @@
 
 import { assertAutomationModuleConfiguration } from '../../../automations/preparation';
 import { inspectAutomationScriptExports } from '../../../automations/reaction-executor';
+import type { AutomationSkillSnapshot } from '../../../automations/skill-snapshots';
+import { skillConfigReadAllowed } from '../../../authz/skill-config-access';
 import { getDb, parsePgNumberArray } from '../../../db/client';
+import { flagPinnedSkillCopies } from '../../../skills/workspace-skills';
 import { assertAutomationScriptExecutor } from '../../../automations/script-config';
 import { ToolUserError } from '../../../utils/errors';
 import { insertToolConfigChange } from '../helpers/config-audit';
@@ -27,7 +30,7 @@ import {
   assertOutputsShape,
   assertAutomationVersionConfigValid,
   assertAutomationSourcesResolve,
-  assertAutomationSkillsResolve,
+  resolveAutomationSkillNames,
   assertPromptSkillTokensPinned,
   parseJsonInput,
   normalizeStoredJsonField,
@@ -131,17 +134,17 @@ export async function handleCreateVersion(
   );
   const sources = args.sources !== undefined ? args.sources : storedSources;
   // Pinned skills follow the same passed-vs-omitted intent split as sources: an
-  // explicit array replaces (`[]` clears), omission inherits the previous
-  // version's snapshots so a prompt- or metadata-only bump keeps them. Inherited
-  // snapshots are carried VERBATIM and never re-read from the agent's library —
-  // a bump that only renames the Automation must not quietly upgrade its skill
-  // text to whatever the library holds today. Taking a newer body is an explicit
-  // act: the caller sends the new snapshots.
+  // explicit name list replaces (`[]` clears) and is resolved against the
+  // library below; omission inherits the previous version's frozen copies so a
+  // prompt- or metadata-only bump keeps them. Inherited copies are carried
+  // VERBATIM and never re-read from the library: a bump that only renames the
+  // Automation must not quietly upgrade its skill text to whatever the library
+  // holds today. Taking a newer body is an explicit act: the caller names the
+  // skills again.
   const storedSkills = normalizeStoredJsonField(
     prev.skills,
-    [] as Array<{ name: string; content: string }>
+    [] as AutomationSkillSnapshot[]
   );
-  const skills = args.skills !== undefined ? args.skills : storedSkills;
   // Shape-check ONLY the caller-supplied value (string inputs pass the wire
   // union unparsed); the inherited stored config may predate the contract.
   const callerOutputs = parseJsonInput<Record<string, unknown>>(
@@ -198,24 +201,24 @@ export async function handleCreateVersion(
       sources,
       parsePgNumberArray(automationRows[0].entity_ids),
     );
-    // Only check a CALLER-SUPPLIED skill set, for the same reason outputs
-    // is gated above: inherited snapshots were already valid when pinned, and a
-    // name-only bump must not start failing because a skill was since renamed or
-    // disabled in the library. The stored text still runs either way.
-    const versionAgentId = automationRows[0].managed_agent_id as string | null;
-    if (args.skills !== undefined && skills.length > 0) {
-      if (!versionAgentId) {
-        throw new ToolUserError(
-          'This Automation has no owning agent, so pinned skills cannot be resolved.',
-          422
-        );
-      }
-      await assertAutomationSkillsResolve(sql, versionOrganizationId, versionAgentId, skills);
+  }
+  // Only a CALLER-SUPPLIED name list resolves, for the same reason outputs is
+  // gated above: inherited copies were valid when pinned, and a name-only bump
+  // must not start failing because a skill was since renamed or archived in
+  // the library. The stored text still runs either way.
+  let skills = storedSkills;
+  if (args.skills !== undefined) {
+    if (args.skills.length > 0 && !versionOrganizationId) {
+      throw new ToolUserError(
+        'This Automation has no organization, so pinned skills cannot be resolved.',
+        422
+      );
     }
-  } else if (args.skills !== undefined && skills.length > 0) {
-    throw new ToolUserError(
-      'This Automation has no organization, so pinned skills cannot be resolved.',
-      422
+    skills = await resolveAutomationSkillNames(
+      sql,
+      versionOrganizationId ?? '',
+      args.skills,
+      () => skillConfigReadAllowed(ctx)
     );
   }
 
@@ -604,7 +607,7 @@ export async function handleGetVersionDetails(
   // Version rows live on the group root while sources live on the assignment.
   // Resolve both so assignment ids behave consistently with get_versions.
   const automationRows = await sql`
-    SELECT id, automation_group_id, sources
+    SELECT id, automation_group_id, sources, organization_id
     FROM automations WHERE id = ${args.automation_id}
   `;
   if (automationRows.length === 0) {
@@ -663,10 +666,11 @@ export async function handleGetVersionDetails(
     name: v.name as string | undefined,
     description: v.description as string | undefined,
     prompt: v.prompt as string,
-    skills: normalizeStoredJsonField(
-      v.skills,
-      [] as Array<{ name: string; content: string }>
-    ),
+    skills: (
+      await flagPinnedSkillCopies(sql, automationRows[0].organization_id as string, [
+        normalizeStoredJsonField(v.skills, [] as AutomationSkillSnapshot[]),
+      ])
+    )[0],
     sources:
       versionSources.length > 0
         ? versionSources

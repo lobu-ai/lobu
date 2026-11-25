@@ -28,7 +28,11 @@
 import { type Static, Type } from "@sinclair/typebox";
 import type { ToolErrorCode } from "../../connector-query-errors";
 import { SUGGESTION_LIMITS } from "../../suggestions";
-import { SKILL_DIRECTORY_NAME_MAX_CHARS } from "../../agent-tooling";
+import {
+  RUN_SKILLS_MAX,
+  SKILL_CONTENT_MAX_CHARS,
+  SKILL_DIRECTORY_NAME_MAX_CHARS,
+} from "../../agent-tooling";
 import { ConnectorOperationRequestSchema } from "../tools/manage-operations";
 
 export const CONNECTOR_HTTP_AUTH_CAPABILITY = "http_auth";
@@ -422,14 +426,6 @@ const MAX_TURN_IMAGE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
  */
 const MAX_TURN_FILE_BASE64_CHARS = Math.ceil((5 * 1024 * 1024) / 3) * 4;
 
-/**
- * Character ceiling for one skill body.
- *
- * A skill is authored prose, not data, and every enabled skill is seeded on
- * EVERY turn, so the count and per-body caps together bound their total.
- */
-const MAX_TURN_SKILL_CHARS = 64_000;
-
 export const AgentTurnPollPayloadSchema = Type.Object({
   turn: Type.Object({
     agent_id: Type.String({ minLength: 1 }),
@@ -524,9 +520,9 @@ export const AgentTurnPollPayloadSchema = Type.Object({
             minLength: 1,
             maxLength: SKILL_DIRECTORY_NAME_MAX_CHARS,
           }),
-          content: Type.String({ maxLength: MAX_TURN_SKILL_CHARS }),
+          content: Type.String({ maxLength: SKILL_CONTENT_MAX_CHARS }),
         }),
-        { maxItems: 64 }
+        { maxItems: RUN_SKILLS_MAX }
       )
     ),
     system_prompt: Type.String(),

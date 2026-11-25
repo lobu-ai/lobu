@@ -199,11 +199,16 @@ export interface RemoteAutomation {
   description?: string | null;
   prompt?: string | null;
   /**
-   * Pinned skill snapshots on the current version. NULL/absent on Automations
-   * created before the column existed, which the diff treats as "no skills" —
-   * so the first re-apply of a config that references skills pins them.
+   * Frozen skill copies on the current version, flagged against the workspace
+   * library. NULL/absent on Automations created before the column existed,
+   * which the diff treats as "no skills".
    */
-  skills?: Array<{ name: string; content: string }> | null;
+  skills?: Array<{
+    name: string;
+    content: string;
+    missing?: boolean;
+    outdated?: boolean;
+  }> | null;
   outputs?: Record<string, unknown> | null;
   reactions_guidance?: string | null;
   // NB: reaction_script is not included in Automation lists — push always (idempotent).

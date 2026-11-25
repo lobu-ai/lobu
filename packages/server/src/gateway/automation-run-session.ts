@@ -67,9 +67,10 @@ interface AutomationRunScope {
 
 /**
  * The pinned instructions and completion requirement of an Automation run. The
- * org, agent, Automation, and run correlations all come from signed worker-token
- * claims; keep every one in the query so a malformed token can never read
- * another tenant's snapshots.
+ * org, Automation, and run correlations come from signed worker-token claims;
+ * keep every one in the query so a malformed token can never read another
+ * tenant's snapshots. Pinned skills are workspace library copies, not the
+ * runner agent's, so the runner agent is not part of the lookup.
  *
  * Missing or malformed durable state fails closed. Returning an empty list for
  * a missing row would let a skills-only Automation execute without instructions.
@@ -79,7 +80,7 @@ export async function resolveAutomationRunContext(
 	db: DbClient = getDb(),
 ): Promise<{ skills: AutomationSkillSnapshot[]; requiresWindowCompletion: boolean }> {
 	const intent = parseAutomationRunConversationId(args.conversationId);
-	if (!intent || !args.organizationId || !args.agentId) {
+	if (!intent || !args.organizationId) {
 		throw new Error("Automation run token is missing its pinned-skill scope");
 	}
 
@@ -89,7 +90,6 @@ export async function resolveAutomationRunContext(
 		JOIN automations automation
 		  ON automation.id = automation_run.automation_id
 		 AND automation.organization_id = automation_run.organization_id
-		 AND automation.managed_agent_id = ${args.agentId}
 		JOIN automation_versions version
 		  ON version.id = COALESCE(
 		       NULLIF(automation_run.approved_input->>'version_id', '')::bigint,

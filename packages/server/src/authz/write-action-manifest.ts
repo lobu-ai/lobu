@@ -108,6 +108,22 @@ export const WRITE_ACTION_MANIFEST: Readonly<
 			delete: "deny",
 		},
 	},
+	skill_config: {
+		// The workspace skill library (manage_skills). `read` = list/get. Archive
+		// is `delete`; changing a skill's `applies_to` is `update`. No target
+		// scope: a rule covers every skill in the workspace. With no matching rule
+		// every action is Auto. Unlike agent_config, delete is Auto too: deleting
+		// a skill archives it (a soft delete that keeps the row), so it is not
+		// destructive the way deleting an agent is.
+		actions: ["read", "create", "update", "delete"],
+		effects: ["auto", "approval", "deny"],
+		defaultEffect: {
+			read: "auto",
+			create: "auto",
+			update: "auto",
+			delete: "auto",
+		},
+	},
 	connector_action: {
 		// All operations use org policy; an action no rule matches runs Auto.
 		// `log` and `check` are legal only on guardrails (validatePolicyKindAndNote).

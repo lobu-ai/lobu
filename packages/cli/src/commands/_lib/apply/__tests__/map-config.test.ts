@@ -45,7 +45,6 @@ describe("mapProjectToDesiredState", () => {
       showToolCalls: false,
       starters: [],
       identityMd: "",
-      skillsConfig: { skills: [] },
     };
     const state = mapProjectToDesiredState(
       defineConfig({ agents: [defineAgent({ id: "support", settings })] })
@@ -53,7 +52,8 @@ describe("mapProjectToDesiredState", () => {
     expect(state.agents[0]?.settings).toEqual(settings);
     for (const agent of [
       { id: "support", settings: { models: [] }, providers: [] },
-      { id: "support", settings: { skillsConfig: {} }, skills: [] },
+      // Skills live in the workspace library, not agent settings.
+      { id: "support", settings: { skillsConfig: { skills: [] } } },
       { id: "support", settings: { showToolCalls: "false" } },
       { id: "support", settings: { updatedAt: 123 } },
       { id: "support", settings: { unknownSetting: true } },
@@ -72,9 +72,6 @@ describe("mapProjectToDesiredState", () => {
         { identityMd: "canonical" },
         { identityMd: "file" }
       )
-    ).toThrow();
-    expect(() =>
-      mergeAgentDirArtifacts({ skillsConfig: { skills: [] } }, {}, [])
     ).toThrow();
   });
 
@@ -1486,7 +1483,13 @@ describe("mapProjectToDesiredState", () => {
         })
       );
     expect(map(["a", "b", "a"])).toThrow(/duplicate skill/i);
-    expect(map(["a", "b", "c", "d", "e", "f"])).toThrow(/maximum is 5/i);
+    expect(map(Array.from({ length: 17 }, (_, i) => `skill-${i}`))).toThrow(
+      /maximum is 16/i
+    );
+    // Library names are kebab-case; the old directory grammar no longer passes.
+    for (const name of ["Deploy Helper", "rubric.v2", "a--b", "x".repeat(65)]) {
+      expect(map([name])).toThrow(/library skill names/i);
+    }
   });
 
   test("rejects credentials on an interactive auth profile", () => {
@@ -1841,42 +1844,21 @@ describe("mapProjectToDesiredState", () => {
 });
 
 describe("mergeAgentDirArtifacts", () => {
-  test("sets prompt markdown and skillsConfig", () => {
+  test("sets prompt markdown", () => {
     const settings: Partial<AgentSettings> = {};
-    mergeAgentDirArtifacts(
-      settings,
-      { soulMd: "soul", identityMd: "id", userMd: "user" },
-      [{ repo: "local/s", name: "s", content: "body", enabled: true }]
-    );
-    expect(settings.soulMd).toBe("soul");
-    expect(settings.identityMd).toBe("id");
-    expect(settings.userMd).toBe("user");
-    expect(settings.skillsConfig?.skills).toHaveLength(1);
-    expect(settings.skillsConfig?.skills[0]?.name).toBe("s");
+    mergeAgentDirArtifacts(settings, {
+      soulMd: "soul",
+      identityMd: "id",
+      userMd: "user",
+    });
+    expect(settings).toEqual({
+      soulMd: "soul",
+      identityMd: "id",
+      userMd: "user",
+    });
   });
 
-  test("preserves agent network and nix when merging skills", () => {
-    const settings: Partial<AgentSettings> = {
-      networkConfig: {
-        allowedDomains: ["agent.com"],
-        deniedDomains: ["blocked.com"],
-      },
-      nixConfig: { packages: ["ffmpeg"] },
-    };
-    mergeAgentDirArtifacts(settings, {}, [
-      {
-        repo: "local/s",
-        name: "s",
-        content: "b",
-        enabled: true,
-      },
-    ]);
-    expect(settings.networkConfig?.allowedDomains).toEqual(["agent.com"]);
-    expect(settings.networkConfig?.deniedDomains).toEqual(["blocked.com"]);
-    expect(settings.nixConfig?.packages).toEqual(["ffmpeg"]);
-  });
-
-  test("no markdown / no skills leaves settings untouched", () => {
+  test("no markdown leaves settings untouched", () => {
     const settings: Partial<AgentSettings> = {};
     mergeAgentDirArtifacts(settings, {});
     expect(settings).toEqual({});

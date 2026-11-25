@@ -191,8 +191,10 @@ Omit `executionConfig` to preserve remote execution settings. Supply an object
 to replace the whole execution config, or `null` to clear it. Do not combine it
 with the `model` helper. Legacy executor data is read-only compatibility state;
 new definitions use the module lifecycle.
-Agent-level skills remain in the agent's `settings.skillsConfig`; an Automation's
-`skills` continue to be versioned snapshots owned by that Automation.
+Skills live in the workspace skill library. An Automation's `skills` name
+library skills; saving a version freezes each named skill's current body into
+that version, and reads flag a frozen copy `missing` or `outdated` once the
+library changes.
 
 The agent defines identity and permissions; the device defines placement. They
 are independent, and triggers never override either:

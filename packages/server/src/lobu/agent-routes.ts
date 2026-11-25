@@ -1462,7 +1462,11 @@ routes.patch("/:agentId/config", async (c) => {
 			}
 			return c.json(
 				validationError,
-				validationError.error === "models_validation_failed" ? 503 : 400
+				validationError.error === "models_validation_failed"
+					? 503
+					: validationError.error === "setting_moved"
+						? 422
+						: 400
 			);
 		}
 

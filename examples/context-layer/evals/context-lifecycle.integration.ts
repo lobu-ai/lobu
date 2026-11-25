@@ -16,7 +16,10 @@ import {
   cleanupTestDatabase,
   getTestDb,
 } from "../../../packages/server/src/__tests__/setup/test-db";
-import { createTestAgent } from "../../../packages/server/src/__tests__/setup/test-fixtures";
+import {
+  createTestAgent,
+  createTestWorkspaceSkill,
+} from "../../../packages/server/src/__tests__/setup/test-fixtures";
 import { TestWorkspace } from "../../../packages/server/src/__tests__/setup/test-mcp-client";
 import type { MetricSnapshot } from "../context-summary.reaction";
 import config from "../lobu.config";
@@ -68,18 +71,19 @@ async function setup() {
   const skills = (analyst.skills ?? [])
     .filter((skill) => definition.skills?.includes(skill.name!))
     .map((skill) => ({ name: skill.name!, content: skill.content! }));
-  await sql`UPDATE agents SET skills_config = ${sql.json({
-    skills: skills.map((skill) => ({
-      ...skill,
-      repo: "inline",
-      enabled: true,
-    })),
-  })} WHERE id = ${agent.agentId}`;
+  for (const skill of skills) {
+    await createTestWorkspaceSkill({
+      organizationId: workspace.org.id,
+      name: skill.name,
+      content: skill.content,
+      appliesTo: [{ kind: "agent", id: agent.agentId }],
+    });
+  }
   const created = (await workspace.owner.automations.create({
     slug: definition.slug,
     name: definition.name,
     prompt: definition.prompt,
-    skills,
+    skills: skills.map((skill) => skill.name),
     managed_agent_id: agent.agentId,
     triggers: definition.triggers,
     sources: Object.entries(definition.sources ?? {}).map(([name, value]) => ({

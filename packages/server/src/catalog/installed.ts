@@ -1,5 +1,6 @@
 import type { GuardrailStage } from "@lobu/core";
 import { assertAgentConfigReadAllowed } from "../authz/agent-config-access";
+import { assertSkillConfigReadAllowed } from "../authz/skill-config-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
 import { getDb } from "../db/client";
 import { resolveAutomationEventCatalog } from "../automations/connector-derived";
@@ -8,6 +9,7 @@ import { getModelProviderModules } from "../gateway/modules/module-system";
 import type { Env } from "../index";
 import { getLobuCoreServices } from "../lobu/gateway";
 import { orgContext } from "../lobu/stores/org-context";
+import { librarySkillsApplyingTo } from "../skills/workspace-skills";
 import { createPostgresAgentConfigStore } from "../lobu/stores/postgres-stores";
 import {
 	EMPTY_SUMMARY,
@@ -224,14 +226,23 @@ export async function listAgentInstalled(
 	if (!settings) return result;
 
 	if (wanted.has("skills")) {
-		const skills = settings.skillsConfig?.skills ?? [];
+		// The workspace library skills that apply to this agent, enabled or not.
+		// A skill installed from the catalog keeps the catalog id as its
+		// provenance, so it is keyed by that and merges with its catalog entry.
+		await assertSkillConfigReadAllowed(ctx);
+		const skills = await librarySkillsApplyingTo(
+			getDb(),
+			ctx.organizationId,
+			{ kind: "agent", id: agentId, ownerAgentId: null },
+			{ enabledOnly: false },
+		);
 		const installedItems = skills.map((skill) => ({
-			id: skill.repo,
+			id: skill.provenance ?? skill.id,
 			name: skill.name,
 			detail: {
+				skill_id: skill.id,
 				enabled: skill.enabled,
 				description: skill.description,
-				system: skill.system,
 			},
 		}));
 		result.skills = {

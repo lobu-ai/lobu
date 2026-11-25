@@ -10,10 +10,7 @@ import {
 } from "@lobu/core/contracts/tools/manage-agents";
 import { stableStringify } from "@lobu/core/contracts/tools/view-content-hash";
 import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
-import {
-	AgentSettingsStoredSchema,
-	SkillsConfigSchema,
-} from "@lobu/core/contracts/agent-settings";
+import { AgentSettingsStoredSchema } from "@lobu/core/contracts/agent-settings";
 import { Value } from "@sinclair/typebox/value";
 import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
 import type { DbClient } from "../db/client";
@@ -202,32 +199,22 @@ export function validateNetworkConfig(updates: unknown): string | null {
 }
 
 /**
- * Write-boundary validation for `skillsConfig`, the sibling of
- * {@link validateGuardrailsInline}.
- *
- * The settings patch is spread through untouched, so without this a
- * malformed payload persists and is then read back as a trusted `SkillConfig`.
- * Two concrete failures: a non-array `skills` throws at the first `.filter()`
- * downstream, and a non-boolean `enabled` diverges from the runtime, which
- * gates on truthiness (`s.enabled && …`) — so `"yes"` would enable a skill that
- * no write-time check ever saw as enabled.
- *
- * Checked against `SkillsConfigSchema` in core rather than a hand-rolled shape,
- * so the write boundary cannot drift from the type the readers rely on. The
- * schema is the only definition of a skill entry; it no longer carries
- * guardrails (those are operator-owned and live on `guardrailsInline`), so this
- * validates the current contract without reintroducing skill-declared ones.
- *
- * `Type.Object` admits unknown keys by design: rows written before a field was
- * dropped still round-trip through the editor's `_original` spread, and
- * rejecting them would fail a payload the server simply ignores.
+ * Settings keys that moved out of agent settings, with where they live now.
+ * A patch carrying one is refused with a 422 (`setting_moved`) rather than
+ * dropped, so a caller still writing the old shape learns the new home.
  */
-export function validateSkillsConfig(value: unknown): string | null {
-	if (value === undefined) return null;
-	if (Value.Check(SkillsConfigSchema, value)) return null;
-	const first = Value.Errors(SkillsConfigSchema, value).First();
-	if (!first) return "skillsConfig is invalid";
-	return `skillsConfig${first.path}: ${first.message}`;
+const MOVED_SETTINGS: Record<string, string> = {
+	skillsConfig:
+		"skillsConfig was removed from agent settings: skills live in the workspace skill library. Read them with manage_skills.",
+};
+
+/** The 422 message for the first moved key in `updates`, or null. */
+export function movedSettingError(updates: unknown): string | null {
+	if (updates === null || typeof updates !== "object") return null;
+	for (const [key, message] of Object.entries(MOVED_SETTINGS)) {
+		if (Object.hasOwn(updates, key)) return message;
+	}
+	return null;
 }
 
 /**
@@ -240,14 +227,10 @@ export function validateSkillsConfig(value: unknown): string | null {
  * schema, so this cannot drift from the type the readers rely on. Unknown keys
  * (`authProfiles` and the legacy model fields, which the PATCH route handles
  * itself) and `null` (an explicit clear) keep their existing handling. `models`
- * is skipped here, as are `guardrailsInline` and `skillsConfig`: each has a
- * stricter validator of its own with its own error code.
+ * is skipped here, as is `guardrailsInline`: each has a stricter validator of
+ * its own with its own error code.
  */
-const OWN_VALIDATED_SETTINGS_KEYS = new Set([
-	"models",
-	"guardrailsInline",
-	"skillsConfig",
-]);
+const OWN_VALIDATED_SETTINGS_KEYS = new Set(["models", "guardrailsInline"]);
 
 export function validateSettingsPatch(updates: unknown): string | null {
 	if (updates === null || typeof updates !== "object" || Array.isArray(updates)) {
@@ -297,6 +280,9 @@ export async function validateAgentSettingsUpdate(
 	| (AgentSettingsValidationError & { modelError: ModelValidationError })
 	| null
 > {
+	const moved = movedSettingError(updates);
+	if (moved) return { error: "setting_moved", error_description: moved };
+
 	// Type-check every known settings field before anything is persisted, so a
 	// wrongly-typed value is refused atomically instead of reported as success.
 	const settingsPatchError = validateSettingsPatch(updates);
@@ -322,18 +308,6 @@ export async function validateAgentSettingsUpdate(
 		return {
 			error: "invalid_network_config",
 			error_description: networkConfigError,
-		};
-	}
-
-	// Structural check on skillsConfig — the store persists the patch verbatim,
-	// and the runtime reads it back as a trusted SkillConfig.
-	const skillsConfigError = validateSkillsConfig(
-		(updates as { skillsConfig?: unknown }).skillsConfig
-	);
-	if (skillsConfigError) {
-		return {
-			error: "invalid_skills_config",
-			error_description: skillsConfigError,
 		};
 	}
 

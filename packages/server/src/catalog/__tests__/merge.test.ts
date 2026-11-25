@@ -88,12 +88,12 @@ describe("catalog/merge", () => {
 				{
 					id: "bundled/lobu-operator",
 					name: "Operator",
-					detail: { hidden: true, instructions: "secret" },
+					detail: { hidden: true, content: "secret" },
 				},
 				{
 					id: "bundled/writer",
 					name: "Writer",
-					detail: { instructions: "write" },
+					detail: { content: "write" },
 				},
 			],
 		);

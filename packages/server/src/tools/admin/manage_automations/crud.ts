@@ -4,6 +4,7 @@
  */
 
 import { assertAutomationModuleConfiguration, automationModuleHasAnalysis } from '../../../automations/preparation';
+import { skillConfigReadAllowed } from '../../../authz/skill-config-access';
 import { getDb, parsePgTextArray } from '../../../db/client';
 import {
   assertAutomationConfigVersion,
@@ -40,7 +41,7 @@ import {
   assertOutputsShape,
   assertAutomationVersionConfigValid,
   assertAutomationSourcesResolve,
-  assertAutomationSkillsResolve,
+  resolveAutomationSkillNames,
   assertPromptSkillTokensPinned,
   normalizeStoredJsonField,
   parseJsonInput,
@@ -283,7 +284,12 @@ export async function handleCreate(
         args.delivery_target
       )
     : null;
-  const skills = args.skills ?? [];
+  const skills = await resolveAutomationSkillNames(
+    sql,
+    organizationId,
+    args.skills ?? [],
+    () => skillConfigReadAllowed(ctx)
+  );
   await assertAutomationScriptExecutor({
     executionConfig: args.execution_config,
     ...executorDefaults,
@@ -299,17 +305,6 @@ export async function handleCreate(
     automationScriptExecutor(args.execution_config)?.source
   );
   assertPromptSkillTokensPinned(args.prompt, skills);
-  // Skill snapshots belong to the agent's library regardless of placement.
-  const defaultExecutor = resolveAutomationExecutor(executorDefaults);
-  if (skills.length > 0) {
-    if (!defaultExecutor.agentId) {
-      throw new ToolUserError(
-        'skills require managed_agent_id to resolve the owning agent’s library.',
-        422
-      );
-    }
-    await assertAutomationSkillsResolve(sql, organizationId, defaultExecutor.agentId, skills);
-  }
 
   // Check slug uniqueness within org
   const existingSlug = await sql`

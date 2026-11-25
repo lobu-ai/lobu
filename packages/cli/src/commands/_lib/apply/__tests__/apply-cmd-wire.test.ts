@@ -299,6 +299,77 @@ export default defineConfig({
     expect(writes).toEqual([]);
   });
 
+  test("re-saves an Automation whose frozen skill copy the library flags outdated or missing", async () => {
+    const dir =
+      mkProject(`import { defineConfig, defineAgent, defineAutomation } from "@lobu/cli/config";
+export default defineConfig({
+  agents: [defineAgent({ id: "triage", name: "Triage" })],
+  automations: [defineAutomation({ slug: "digest", agent: "triage", name: "Digest", prompt: "Summarize arrivals", skills: ["rubric", "style"] })],
+});`);
+    const { fetchStub } = makeFetch();
+    const writes: Record<string, unknown>[] = [];
+    // The server's list flags each frozen copy against the library; a re-save
+    // re-freezes the current bodies and clears the flags.
+    let flags = [
+      { outdated: true, missing: false },
+      { outdated: false, missing: false },
+    ];
+    const fetchAutomation = (async (url, init) => {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      if (String(url).includes("/automations?")) {
+        return Response.json({
+          automations: [
+            {
+              automation_id: "71",
+              slug: "digest",
+              name: "Digest",
+              managed_agent_id: "triage",
+              prompt: "Summarize arrivals",
+              skills: ["rubric", "style"].map((name, i) => ({
+                name,
+                content: "frozen",
+                ...flags[i],
+              })),
+            },
+          ],
+        });
+      }
+      if (String(url).includes("/manage_automations")) {
+        writes.push(body);
+        flags = flags.map(() => ({ outdated: false, missing: false }));
+        return Response.json({
+          action: body.action,
+          automation_id: "71",
+          version: 2,
+          status: "active",
+        });
+      }
+      return fetchStub(url, init);
+    }) as typeof fetch;
+    await runApply(dir, fetchAutomation);
+    expect(writes).toEqual([
+      expect.objectContaining({
+        action: "create_version",
+        skills: ["rubric", "style"],
+      }),
+    ]);
+    writes.length = 0;
+    await runApply(dir, fetchAutomation);
+    expect(writes).toEqual([]);
+
+    flags = [
+      { outdated: false, missing: false },
+      { outdated: false, missing: true },
+    ];
+    await runApply(dir, fetchAutomation);
+    expect(writes).toEqual([
+      expect.objectContaining({
+        action: "create_version",
+        skills: ["rubric", "style"],
+      }),
+    ]);
+  });
+
   test("authored connector updates carry the catalog version through the shared source-update action", async () => {
     const dir =
       mkProject(`import { defineConfig, connectorFromFile } from "@lobu/cli/config";
@@ -355,7 +426,7 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
     );
   });
 
-  test("a persona edit leaves undeclared skills and model fallbacks unmanaged", async () => {
+  test("a persona edit leaves undeclared model fallbacks unmanaged", async () => {
     const dir = mkProject(configWithFeed(`{ feed: "threads" }`));
     writeFileSync(join(dir, "agents", "triage", "SOUL.md"), "Updated persona");
     const { fetchStub, calls } = makeFetch();
@@ -372,16 +443,6 @@ export default defineConfig({ agents: [], connectors: [connectorFromFile("./fixt
             settings: {
               soulMd: "Old persona",
               models: ["synthetic/primary", "synthetic/fallback"],
-              skillsConfig: {
-                skills: [
-                  {
-                    repo: "example/skills",
-                    name: "triage",
-                    enabled: true,
-                    content: "Existing skill",
-                  },
-                ],
-              },
             },
           });
         }
@@ -408,16 +469,6 @@ export default defineConfig({ agents: [defineAgent({
     }
     const remote: Record<string, unknown> = {
       models: ["synthetic/primary", "synthetic/fallback"],
-      skillsConfig: {
-        skills: [
-          {
-            repo: "inline/triage",
-            name: "triage",
-            enabled: true,
-            content: "Old skill",
-          },
-        ],
-      },
       networkConfig: {
         allowedDomains: ["example.com"],
         deniedDomains: ["blocked.example.com"],
@@ -451,7 +502,6 @@ export default defineConfig({ agents: [defineAgent({
     expect(writes.map((write) => write.body)).toEqual([
       {
         models: [],
-        skillsConfig: { skills: [] },
         networkConfig: { allowedDomains: [], deniedDomains: [] },
         guardrails: [],
         nixConfig: { packages: [] },

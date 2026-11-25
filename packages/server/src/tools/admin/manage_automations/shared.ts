@@ -2,7 +2,12 @@
  * Shared types, utilities, and helpers used across manage_automations sub-handlers.
  */
 
-import { validateAutomationSkillSnapshots } from "../../../automations/skill-snapshots";
+import { isLibrarySkillName } from '@lobu/core/agent-tooling';
+import {
+  type AutomationSkillSnapshot,
+  validateAutomationSkillSnapshots,
+} from "../../../automations/skill-snapshots";
+import { type PinnableSkill, librarySkillsByName } from '../../../skills/workspace-skills';
 import type { DbClient } from '../../../db/client';
 import { getDb } from '../../../db/client';
 import { ToolUserError } from '../../../utils/errors';
@@ -226,62 +231,74 @@ export function assertAutomationVersionConfigValid(parsed: {
 }
 
 /**
- * Resolve every pinned skill name against the owning agent's library at save
- * time, and reject the write if any is missing or disabled.
+ * Resolve the skill names an Automation version pins against the workspace
+ * skill library and freeze them as `{ name, content, skill_id, revision }`, in
+ * the caller's order. Disabled skills resolve too: naming one is the opt-in.
  *
- * Fail closed rather than dropping the unknown entry: an Automation that silently
+ * Fail closed rather than dropping an unknown name: an Automation that silently
  * loses one of its skills still runs, unattended, with part of its instructions
- * gone — the failure surfaces as quietly wrong output hours later, on a run
- * nobody is watching. A 422 at save is the only point where the author is
- * present to see it.
- *
- * The name is validated but the CALLER's `content` is what gets stored: the
- * snapshot is the author's, taken at save time, and re-reading the body here
- * would silently upgrade a pin the author never agreed to. This checks that the
- * reference is real, not that the text still matches.
+ * gone. A 422 at save is the only point where the author is present to see it.
+ * The caller must be allowed to read the library (`skill_config` read), since
+ * the frozen bodies are then readable through the Automation.
  */
-export async function assertAutomationSkillsResolve(
+export async function resolveAutomationSkillNames(
   sql: DbClient,
   organizationId: string,
-  agentId: string,
-  skills: Array<{ name: string; content: string }>
-): Promise<void> {
-  if (skills.length === 0) return;
-  const snapshotError = validateAutomationSkillSnapshots(skills);
-  if (snapshotError) throw new ToolUserError(snapshotError, 422);
-
-  const rows = await sql`
-    SELECT skills_config
-    FROM agents
-    WHERE id = ${agentId}
-      AND organization_id = ${organizationId}
-    LIMIT 1
-  `;
-  if (rows.length === 0) {
-    throw new ToolUserError(
-      `Agent ${agentId} was not found in this organization, so its skills cannot be resolved.`,
-      422
-    );
+  names: readonly string[],
+  readAllowed: () => Promise<boolean>
+): Promise<AutomationSkillSnapshot[]> {
+  if (names.length === 0) return [];
+  const duplicates = names.filter((name, index) => names.indexOf(name) !== index);
+  if (duplicates.length > 0) {
+    throw new ToolUserError(`skills names "${duplicates[0]}" more than once.`, 422);
   }
-
-  const library = Array.isArray(rows[0]?.skills_config?.skills)
-    ? (rows[0].skills_config.skills as Array<Record<string, unknown>>)
-    : [];
-  const enabled = new Set(
-    library
-      .filter((entry) => entry.enabled !== false && typeof entry.name === 'string')
-      .map((entry) => entry.name as string)
-  );
-
-  const unknown = skills.map((skill) => skill.name).filter((name) => !enabled.has(name));
+  if (!(await readAllowed())) {
+    throw new ToolUserError('Policy denies reading workspace skills for this principal, so it cannot pin them.', 403);
+  }
+  const library = await librarySkillsByName(sql, organizationId, names.filter(isLibrarySkillName));
+  const unknown = names.filter((name) => !library.has(name));
   if (unknown.length > 0) {
-    throw new ToolUserError(
-      `Skill${unknown.length > 1 ? 's' : ''} ${unknown.map((n) => `"${n}"`).join(', ')} ` +
-        `${unknown.length > 1 ? 'are' : 'is'} not enabled in agent ${agentId}'s skill library. ` +
-        `Enable ${unknown.length > 1 ? 'them' : 'it'} on the agent, or remove ${unknown.length > 1 ? 'them' : 'it'} from this Automation.`,
-      422
-    );
+    throw new ToolUserError(await unknownSkillNamesMessage(sql, organizationId, unknown), 422);
   }
+  const snapshots = names.map((name) => {
+    const skill = library.get(name) as PinnableSkill;
+    return { name, content: skill.content, skill_id: skill.id, revision: skill.revision };
+  });
+  const snapshotError = validateAutomationSkillSnapshots(snapshots);
+  if (snapshotError) throw new ToolUserError(snapshotError, 422);
+  return snapshots;
+}
+
+/**
+ * The 422 for names the library does not hold. Agent skills moved into the
+ * library under normalized names (lowercase, runs of other characters become
+ * one hyphen, `-2`… suffixes on collisions), so a pre-library name gets the
+ * library names it most likely became.
+ */
+async function unknownSkillNamesMessage(
+  sql: DbClient,
+  organizationId: string,
+  unknown: readonly string[]
+): Promise<string> {
+  const lines: string[] = [];
+  for (const name of unknown) {
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const candidates = base
+      ? await sql<{ name: string }>`
+          SELECT name FROM workspace_skills
+          WHERE organization_id = ${organizationId}
+            AND archived_at IS NULL
+            AND (name = ${base} OR name LIKE ${`${base}-%`})
+          ORDER BY name COLLATE "C"
+          LIMIT 5
+        `
+      : [];
+    const hint = candidates.length > 0
+      ? ` Did you mean ${candidates.map((row) => `"${row.name}"`).join(' or ')}?`
+      : '';
+    lines.push(`No workspace skill named "${name}".${hint}`);
+  }
+  return `${lines.join(' ')} List the library with manage_skills list.`;
 }
 
 /**
@@ -294,8 +311,8 @@ export async function assertAutomationSkillsResolve(
  * sends both halves; a CLI or MCP caller writing the token by hand can send the
  * prompt alone, and that is the case this catches.
  *
- * Names only — the pinned BODY still comes from the caller, never from a
- * save-time read of the live library.
+ * Names only: the bodies were frozen from the library by
+ * {@link resolveAutomationSkillNames} (or inherited from the previous version).
  */
 export function assertPromptSkillTokensPinned(
   prompt: string | null | undefined,

@@ -104,32 +104,19 @@ PROJ="$RUN_DIR/proj"; mkdir -p "$PROJ"
 ( cd "$PROJ" && $LOBU init . -y --here --provider gemini >/dev/null 2>&1 )
 rm -rf "$PROJ/package.json" "$PROJ/node_modules" "$PROJ/bun.lock"
 cat > "$PROJ/lobu.config.ts" <<'TS'
-import { connectorFromFile, defineAgent, defineAutomation, defineConfig, defineConnection, defineEntityType, defineRelationshipType, defineSkill, reactionFromFile, secret } from "@lobu/cli/config";
+import { connectorFromFile, defineAgent, defineAutomation, defineConfig, defineConnection, defineEntityType, defineRelationshipType, reactionFromFile, secret } from "@lobu/cli/config";
 import type PulseConnector from "./connectors/pulse.connector.ts";
 import type digestReaction from "./reactions/digest.reaction.ts";
 
-// The Automation's instructions live in the agent's skill library; `lobu apply`
-// compiles the referenced bodies into the Automation version's frozen prompt.
-const digestSkill = defineSkill({ name: "digest", content: "summarize" });
-
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
-  skills: [digestSkill],
   settings: { verboseLogging: false, showToolCalls: false, guardrailsInline: [], nixConfig: { packages: [] } },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
-// The skill body carries a token the turn has to READ off the seeded file to
-// report, so a pass proves the file reached the isolate's filesystem rather
-// than that the prompt merely mentioned a skill.
+// Its skill lives in the workspace skill library, which `lobu apply` cannot
+// write yet; step 4a seeds it once the gateway is up.
 const isolateAgent = defineAgent({
   id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
-  settings: {
-    skillsConfig: { skills: [{
-      repo: "inline/isolate-smoke-skill", name: "isolate-smoke-skill", enabled: true,
-      content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
-      thinkingLevel: "low", system: false,
-    }] },
-  },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a
@@ -166,7 +153,7 @@ const pulseConn = defineConnection({
 // (the agentic LLM turn never produces the complete_window tool-call against a
 // fixed-reply mock) and asserts the reaction's side effect.
 const digest = defineAutomation({
-  slug: "digest", agent, name: "Digest", skills: ["digest"],
+  slug: "digest", agent, name: "Digest", prompt: "summarize",
   // No inline extraction schema — the reaction OWNS the contract via its exported
   // `input`, which set_reaction_script extracts and surfaces to the worker.
   reaction: reactionFromFile<typeof digestReaction>("./reactions/digest.reaction.ts"),
@@ -407,6 +394,39 @@ assert.match(agent.revision, /^[a-f0-9]{64}$/);
 assert.equal(agent.settings.showToolCalls, false);
 JS
 echo "✓ MCP agents.get exposes canonical settings and revision"
+
+# 4a) Seed the isolate agent's skill into the workspace skill library. The
+#     library has no write path yet (`lobu apply` and manage_skills only read
+#     it), so the gate inserts the row the way a backfilled workspace holds it.
+#     The skill body carries a token the turn has to READ off the seeded file to
+#     report, so a pass proves the chat producer delivered the library skill to
+#     the isolate's filesystem rather than that the prompt merely mentioned it.
+if [ -n "${DATABASE_URL:-}" ]; then
+  SEED_DB_URL="$DATABASE_URL"
+else
+  PG_PORT="$(sed -n 4p "$PROJ/.lobu/pgdata/postmaster.pid" 2>/dev/null)"
+  [ -n "$PG_PORT" ] || fail "could not read the embedded Postgres port from postmaster.pid"
+  SEED_DB_URL="postgresql://postgres:postgres@127.0.0.1:$PG_PORT/postgres?sslmode=disable"
+fi
+node - "$WT/packages/server/package.json" "$SEED_DB_URL" "$ORG" <<'JS' || fail "could not seed the isolate agent's library skill"
+const postgres = require("node:module").createRequire(process.argv[2])("postgres");
+const sql = postgres(process.argv[3], { max: 1 });
+(async () => {
+  const [org] = await sql`SELECT id FROM organization WHERE slug = ${process.argv[4]}`;
+  if (!org) throw new Error(`no organization with slug ${process.argv[4]}`);
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO workspace_skills (id, organization_id, name, description, content)
+      VALUES ('skill_sdk_e2e_isolate', ${org.id}, 'isolate-smoke-skill', 'Isolate smoke skill',
+              ${"# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n"})`;
+    await tx`
+      INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
+      VALUES ('skill_sdk_e2e_isolate', ${org.id}, 'agent', 'isolate-smoke')`;
+  });
+  await sql.end();
+})().catch(async (err) => { console.error(err); await sql.end(); process.exit(1); });
+JS
+echo "✓ seeded the isolate agent's library skill"
 
 # 4b) Client SDK consumption — drive @lobu/client (the CONSUMPTION SDK) against
 #     the live gateway: create a session, send a message, stream the reply back.

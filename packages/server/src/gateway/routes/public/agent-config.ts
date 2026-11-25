@@ -5,7 +5,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { AgentConfigStore, ModelOption, SkillConfig } from "@lobu/core";
+import type { AgentConfigStore, ModelOption } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import { orgContext, tryGetOrgId } from "../../../lobu/stores/org-context.js";
 import { defineRoute, type RouteSpec } from "../shared/define-route.js";
@@ -286,7 +286,6 @@ async function buildResolvedConfigResponse(
 		// agent → org default); the rest are alternates. Empty/absent ⇒ inherit
 		// the org default + allow all org providers.
 		models: settings?.models ?? [],
-		skills: sanitized.skillsConfig?.skills || [],
 		tools: {
 			nixPackages: sanitized.nixConfig?.packages || [],
 			permissions: grants,
@@ -447,26 +446,7 @@ function sanitizeSettingsForResponse(
 ): AgentSettings | Record<string, never> {
 	if (!settings) return {};
 
-	const sanitized = redactSensitiveFields(settings) as AgentSettings;
-
-	if (sanitized.skillsConfig?.skills) {
-		sanitized.skillsConfig = {
-			skills: sanitized.skillsConfig.skills.map((skill) => {
-				const legacySkill = skill as SkillConfig & {
-					integrations?: unknown;
-				};
-				const {
-					integrations: _integrations,
-					modelPreference: _modelPreference,
-					thinkingLevel: _thinkingLevel,
-					...rest
-				} = legacySkill;
-				return rest;
-			}),
-		};
-	}
-
-	return sanitized;
+	return redactSensitiveFields(settings) as AgentSettings;
 }
 
 function redactSensitiveFields(value: unknown): unknown {

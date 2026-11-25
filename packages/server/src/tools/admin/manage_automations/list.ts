@@ -8,6 +8,7 @@ import {
 	type ListAutomationsResult,
 } from "@lobu/core/contracts/tools/manage-automations";
 import { getDb } from "../../../db/client";
+import { flagPinnedSkillCopies } from "../../../skills/workspace-skills";
 import type { Env } from "../../../index";
 import { ToolUserError } from "../../../utils/errors";
 import logger from "../../../utils/logger";
@@ -212,6 +213,23 @@ export async function handleList(
 	for (const orgId of uniqueOrgIds) {
 		const slug = await getOrganizationSlug(orgId);
 		if (slug) orgSlugMap.set(orgId, slug);
+	}
+
+	// Flag each frozen skill copy against the library, one read per workspace.
+	if (args.include_details) {
+		const byOrg = new Map<string, any[]>();
+		for (const automation of result as any[]) {
+			if (!Array.isArray(automation.skills) || automation.skills.length === 0) continue;
+			const rows = byOrg.get(automation.organization_id) ?? [];
+			rows.push(automation);
+			byOrg.set(automation.organization_id, rows);
+		}
+		for (const [orgId, rows] of byOrg) {
+			const flagged = await flagPinnedSkillCopies(sql, orgId, rows.map((row) => row.skills));
+			rows.forEach((row, index) => {
+				row.skills = flagged[index];
+			});
+		}
 	}
 
 	const automationsWithPendingCount = (result as any[]).map((automation) => {

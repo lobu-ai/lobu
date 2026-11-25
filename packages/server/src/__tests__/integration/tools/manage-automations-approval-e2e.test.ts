@@ -29,6 +29,7 @@ import {
 	createTestOrganization,
 	createTestUser,
 	addUserToOrganization,
+	createTestWorkspaceSkill,
 } from "../../setup/test-fixtures";
 
 const TEST_ENV: Env = {
@@ -64,6 +65,7 @@ describe("manage_automations — builder gate e2e", () => {
 	let agentCtx: AuthContext;
 	let agentId: string;
 	let otherAgentId: string;
+	let runbook: { id: string; name: string; content: string };
 
 	const baseCtx = (
 		orgIdValue: string,
@@ -117,21 +119,11 @@ describe("manage_automations — builder gate e2e", () => {
 			ownerUserId: owner.id,
 		});
 		otherAgentId = other.agentId;
-		const sql = getTestDb();
-		await sql`
-			UPDATE agents
-			SET skills_config = ${sql.json({
-				skills: [
-					{
-						repo: "file/approval-runbook",
-						name: "approval-runbook",
-						enabled: true,
-						content: "Run the approved workflow.",
-					},
-				],
-			})}
-			WHERE id = ${agentId} AND organization_id = ${orgId}
-		`;
+		runbook = await createTestWorkspaceSkill({
+			organizationId: org.id,
+			name: "approval-runbook",
+			content: "Run the approved workflow.",
+		});
 
 		// Same owner identity, but acting as an agent — principal the
 		// agent_config write-gate holds for approval.
@@ -257,12 +249,7 @@ describe("manage_automations — builder gate e2e", () => {
 				slug: "agent-proposed-skills-only",
 				name: "Agent Proposed Skills Only",
 				managed_agent_id: agentId,
-				skills: [
-					{
-						name: "approval-runbook",
-						content: "Run the approved workflow.",
-					},
-				],
+				skills: ["approval-runbook"],
 			},
 			TEST_ENV,
 			agentCtx
@@ -271,6 +258,91 @@ describe("manage_automations — builder gate e2e", () => {
 		expect(res.status).toBe("pending_approval");
 		expect(res.proposal?.args?.slug).toBe("agent-proposed-skills-only");
 		expect(await automationExists(orgId, "agent-proposed-skills-only")).toBe(false);
+
+		const approved = (await executeTool(
+			"manage_operations",
+			{ action: "approve", run_id: res.run_id },
+			TEST_ENV,
+			ownerCtx
+		)) as { approved?: true; message?: string };
+		expect(approved.message).not.toMatch(/failed/i);
+		const [version] = await getTestDb()`
+			SELECT version.skills FROM automations automation
+			JOIN automation_versions version ON version.id = automation.current_version_id
+			WHERE automation.organization_id = ${orgId} AND automation.slug = 'agent-proposed-skills-only'
+		`;
+		expect(version?.skills).toEqual([
+			{ name: "approval-runbook", content: runbook.content, skill_id: runbook.id, revision: 1 },
+		]);
+	});
+
+	const proposeSkillsOnly = async (slug: string) => {
+		const res = (await executeTool(
+			"manage_automations",
+			{ action: "create", slug, name: slug, managed_agent_id: agentId, skills: ["approval-runbook"] },
+			TEST_ENV,
+			agentCtx
+		)) as PendingApproval;
+		expect(res.status).toBe("pending_approval");
+		return res.run_id;
+	};
+
+	const approveAndReadFailure = async (runId: number) => {
+		const approved = (await executeTool(
+			"manage_operations",
+			{ action: "approve", run_id: runId },
+			TEST_ENV,
+			ownerCtx
+		)) as { approved?: true; message?: string };
+		expect(approved.message).toMatch(/failed/i);
+		const [run] = await getTestDb()`
+			SELECT status, error_message FROM runs WHERE id = ${runId} AND organization_id = ${orgId}
+		`;
+		expect(run?.status).toBe("failed");
+		return String(run?.error_message ?? "");
+	};
+
+	it("does not apply a skill pin whose library skill changed after it was proposed", async () => {
+		const runId = await proposeSkillsOnly("skill-changed-after-proposal");
+		const sql = getTestDb();
+		await sql`UPDATE workspace_skills SET content = 'Run the revised workflow.', revision = revision + 1 WHERE id = ${runbook.id}`;
+		try {
+			expect(await approveAndReadFailure(runId)).toMatch(/changed in the workspace library after this change was proposed/);
+			expect(await automationExists(orgId, "skill-changed-after-proposal")).toBe(false);
+		} finally {
+			await sql`UPDATE workspace_skills SET content = ${runbook.content}, revision = 1 WHERE id = ${runbook.id}`;
+		}
+	});
+
+	it("fails a pending proposal that still carries skill objects, asking for a re-proposal", async () => {
+		const runId = await proposeSkillsOnly("old-shape-skill-proposal");
+		const sql = getTestDb();
+		await sql`
+			UPDATE runs
+			SET action_input = jsonb_set(action_input, '{args,skills}', ${sql.json([{ name: "approval-runbook", content: "Run the approved workflow." }])})
+			WHERE id = ${runId} AND organization_id = ${orgId}
+		`;
+		expect(await approveAndReadFailure(runId)).toMatch(/Re-propose it, passing skills as library skill names/);
+		expect(await automationExists(orgId, "old-shape-skill-proposal")).toBe(false);
+	});
+
+	it("refuses to pin skills for a principal the skill_config read policy denies", async () => {
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "skill_config",
+			principalKind: "agent",
+			principalId: otherAgentId,
+			effects: { read: "deny" },
+		});
+		const otherAgentCtx = { ...agentCtx, agentId: otherAgentId, requestedAgentId: otherAgentId };
+		await expect(
+			executeTool(
+				"manage_automations",
+				{ action: "create", slug: "denied-skill-pin", managed_agent_id: otherAgentId, skills: ["approval-runbook"] },
+				TEST_ENV,
+				otherAgentCtx
+			)
+		).rejects.toMatchObject({ httpStatus: 403 });
+		expect(await automationExists(orgId, "denied-skill-pin")).toBe(false);
 	});
 
 	it("includes the existing delivery target in an update approval snapshot", async () => {

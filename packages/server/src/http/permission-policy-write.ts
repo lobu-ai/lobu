@@ -158,7 +158,7 @@ export function parsePolicy(input: Record<string, unknown>, deleting: boolean): 
 			: input.resource_class;
 	if (!isWriteResourceClass(resourceClass))
 		throw new Error(
-			"resource_class must be entity, agent_config, connector_action, or entity_schema.",
+			"resource_class must be entity, agent_config, connector_action, entity_schema, or skill_config.",
 		);
 	const policy: EntityApprovalPolicyInput = {
 		resourceClass,

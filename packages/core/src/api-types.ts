@@ -33,8 +33,6 @@ export interface Skill {
   system?: boolean;
   content?: string;
   permissions?: string[];
-  modelPreference?: string;
-  thinkingLevel?: string;
 }
 
 export interface McpConfig {

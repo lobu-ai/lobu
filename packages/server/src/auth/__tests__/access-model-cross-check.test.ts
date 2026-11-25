@@ -53,6 +53,7 @@ const TIERED_NAMESPACES = [
 	["automations", "manage_automations", "../../tools/admin/manage_automations", "manageAutomations"],
 	["classifiers", "manage_classifiers", "../../tools/admin/manage_classifiers", "manageClassifiers"],
 	["views", "manage_views", "../../tools/admin/manage_views", "manageViews"],
+	["skills", "manage_skills", "../../tools/admin/manage_skills", "manageSkills"],
 	["catalog", "manage_catalog", "../../tools/admin/manage_catalog", "manageCatalog"],
 	["agents", "manage_agents", "../../tools/admin/manage_agents", "manageAgents"],
 	["schedules", "manage_schedules", "../../tools/admin/manage_schedules", "manageSchedules"],
@@ -188,11 +189,15 @@ function declaredRuntimeTier(
 		(action === "list" || action === "get");
 	// Duplicate identity relationships are authenticated reads, as documented
 	// beside manage_entity in tool-access.ts, never PUBLIC_READ_ACTIONS.
+	// Skill bodies are workspace instructions: members read them, anonymous
+	// visitors of a public org never do.
+	const authenticatedSkillsRead = tool === "manage_skills" &&
+		(action === "list" || action === "get");
 	const authenticatedDuplicateDiscoveryRead = tool === "manage_entity" &&
 		action === "discover_duplicates";
 	const authenticatedProvidersRead = tool === "manage_inference_providers" && action === "list";
 	const isExplicitlyDeclared = authenticatedProvidersRead || authenticatedConversationRead ||
-		authenticatedViewsRead || authenticatedDuplicateDiscoveryRead ||
+		authenticatedViewsRead || authenticatedSkillsRead || authenticatedDuplicateDiscoveryRead ||
 		OWNER_ADMIN_ACTIONS[tool]?.has(action) ||
 		MEMBER_WRITE_ACTIONS[tool]?.has(action) ||
 		PUBLIC_READ_ACTIONS[tool]?.has(action);
@@ -218,6 +223,13 @@ describe("access-model cross-check", () => {
 		expect(isPublicReadable("manage_views", { action: "list" })).toBe(true);
 		expect(getRequiredAccessLevel("manage_views", { action: "get" }, false)).toBe("read");
 		expect(isPublicReadable("manage_views", { action: "get" })).toBe(false);
+	});
+
+	it("keeps skill library reads authenticated while reporting read tier", () => {
+		for (const action of ["list", "get"]) {
+			expect(getRequiredAccessLevel("manage_skills", { action }, false)).toBe("read");
+			expect(isPublicReadable("manage_skills", { action })).toBe(false);
+		}
 	});
 
 	it("keeps duplicate discovery authenticated while reporting read tier", () => {

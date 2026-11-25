@@ -50,6 +50,7 @@ const ADMIN_TOOL_SDK_NAMESPACE: Record<
 	get_automation: "automations",
 	read_knowledge: "knowledge",
 	manage_classifiers: "classifiers",
+	manage_skills: "skills",
 	manage_views: "views",
 };
 

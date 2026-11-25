@@ -770,9 +770,7 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
       slug: "skills-digest",
       agent: "triage",
       prompt: "",
-      skillSnapshots: [
-        { name: "digest-runbook", content: "Produce the scheduled digest." },
-      ],
+      skills: ["digest-runbook"],
       triggers: [{ kind: "schedule" as const, cron: "0 9 * * *" }],
     };
     const state = stateWith({
@@ -836,7 +834,7 @@ describe("executePlan — atomic Automation triggers+prompt update", () => {
     expect(createAutomationVersion).toHaveBeenCalledTimes(1);
     expect(createAutomationVersion.mock.calls[0]?.[0]).toMatchObject({
       automation_id: "43",
-      skills: desired.skillSnapshots,
+      skills: ["digest-runbook"],
       triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
     });
   });

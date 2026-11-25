@@ -64,7 +64,8 @@ import type { ToolContext } from '../registry';
 import { withValidatedArgs } from '../validate-args';
 import { getOrgUrlContext } from '../view-urls';
 import { defineFlatActionTool, flatAction } from './action-tool';
-import { requireAutomationAccess } from './manage_automations/shared';
+import { skillConfigReadAllowed, skillConfigReadAllowedFor } from '../../authz/skill-config-access';
+import { requireAutomationAccess, resolveAutomationSkillNames } from './manage_automations/shared';
 import {
   handleCreate,
   handleUpdate,
@@ -711,6 +712,22 @@ async function queueAutomationWriteForApproval(
   if (args.action !== 'create' && args.action !== 'create_from_version') {
     proposal.base = await readAutomationConfigVersions(args, ctx.organizationId);
   }
+  // Freeze what the named skills are now, so apply can refuse bodies the
+  // approver never saw. Resolving here also 422s an unknown name before a card
+  // exists.
+  if (args.skills && args.skills.length > 0) {
+    const frozen = await resolveAutomationSkillNames(
+      getDb(),
+      ctx.organizationId,
+      args.skills,
+      () => skillConfigReadAllowed(ctx)
+    );
+    proposal.skillPins = frozen.map((skill) => ({
+      name: skill.name,
+      skill_id: skill.skill_id as string,
+      revision: skill.revision as number,
+    }));
+  }
   const writeAction = automationWriteAction(args.action)!;
 
   // create attributes ownership via created_by — fail at request time rather
@@ -945,6 +962,7 @@ export async function applyManageAutomationsProposal(
     if (args.action !== 'create' && args.action !== 'create_from_version') {
       await assertAutomationConfigVersionsUnchanged(args, applyCtx.organizationId, proposal.base);
     }
+    await assertProposalSkillsCurrent(proposal, applyCtx.organizationId);
     // The approval path already established the human's authority. Dispatch
     // directly so this server-side continuation does not re-enter routeAction's
     // fresh-call mcp:admin gate; resolve_approval intentionally requires only
@@ -970,6 +988,62 @@ export async function applyManageAutomationsProposal(
         );
     }
   });
+}
+
+/**
+ * Re-freeze a proposal's named skills at apply and compare them with what was
+ * frozen at queue time. The original requester (not the approver) must still
+ * be allowed to read the library, and every name must still resolve to the
+ * same skill at the same revision; otherwise the approver would apply bodies
+ * they never reviewed. A proposal queued before skills became library names
+ * holds `{ name, content }` objects and cannot be applied.
+ */
+async function assertProposalSkillsCurrent(
+  proposal: ManageAutomationsProposal,
+  organizationId: string
+): Promise<void> {
+  const names: unknown = proposal.args.skills;
+  if (names === undefined || names === null) return;
+  if (!Array.isArray(names) || names.some((name) => typeof name !== 'string')) {
+    throw new ToolUserError(
+      'This change was proposed before Automation skills became workspace library names, so it cannot be applied. Re-propose it, passing skills as library skill names (manage_skills list).',
+      422
+    );
+  }
+  if (names.length === 0) return;
+  // The persisted requester, read the way the apply-time write gate reads it:
+  // the acting Automation folds its owner; otherwise the acting agent. Humans
+  // (both null) keep their org read access.
+  const requester =
+    proposal.actingAutomationId != null
+      ? await resolveActingPrincipal(getDb(), {
+          organizationId,
+          agentId: proposal.actingAgentId,
+          sessionAutomationId: Number(proposal.actingAutomationId),
+        })
+      : proposal.actingAgentId != null
+        ? {
+            kind: 'agent' as const,
+            id: proposal.actingAgentId,
+            ownerAgentId: proposal.actingAgentId,
+            ownerResolved: true,
+          }
+        : null;
+  const fresh = await resolveAutomationSkillNames(getDb(), organizationId, names, async () =>
+    requester === null ? true : skillConfigReadAllowedFor(organizationId, requester)
+  );
+  const pins = proposal.skillPins ?? [];
+  const changed = fresh.filter((skill, index) => {
+    const pin = pins[index];
+    return !pin || pin.name !== skill.name || pin.skill_id !== skill.skill_id || pin.revision !== skill.revision;
+  });
+  if (changed.length > 0 || pins.length !== fresh.length) {
+    const named = (changed.length > 0 ? changed : fresh).map((skill) => `"${skill.name}"`).join(', ');
+    throw new ToolUserError(
+      `Skill ${named} changed in the workspace library after this change was proposed, so it was not applied. Re-propose it to review the current skill bodies.`,
+      409
+    );
+  }
 }
 
 /**

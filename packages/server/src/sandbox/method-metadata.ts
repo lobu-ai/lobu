@@ -414,9 +414,9 @@ export default async (_ctx, client) => {
 	},
 	"agents.update": {
 		summary:
-			"Patch agent fields and settings. An agent principal is held for approval only when a policy rule asks. Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Pass expected_revision from agents.get to reject stale writes with 409 before applying or queuing approval. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Requires admin tier + agent_config update.",
+			"Patch agent fields and settings. An agent principal is held for approval only when a policy rule asks. Omitted settings are unchanged; supplied settings objects/arrays replace that setting. Pass expected_revision from agents.get to reject stale writes with 409 before applying or queuing approval. Write identity via identity_md; updatedAt is read-only. Use settings.models for the full ordered model list, or default_model to change its first entry while preserving fallbacks (empty string clears the list). Do not send both. Skills are not agent settings: read them with client.skills. Requires admin tier + agent_config update.",
 		access: "admin",
-		example: "await client.agents.update({ agent_id: 'researcher', settings: { skillsConfig: { skills: [{ repo: 'example/skills', name: 'triage', enabled: true, content: 'Read the queue.' }] } } });",
+		example: "await client.agents.update({ agent_id: 'researcher', default_model: 'anthropic/claude-sonnet-4-5' });",
 	},
 	"agents.delete": {
 		summary:
@@ -770,7 +770,7 @@ export default async (_ctx, client) => {
 	},
 	"catalog.listInstalled": {
 		summary:
-			"List installed resources. `kinds` values are plural: org kinds 'connectors'/'automations', agent kinds 'skills'/'providers'/'guardrails' (agent kinds need `agent_id`). Pass `include_catalog: true` to merge global catalog entries with installed/installable flags. Each connector entry carries identity + capability flags. For an INSTALLED connector's full auth/feeds/actions/options schema, query it directly with `query_sql` → `SELECT auth_schema, feeds_schema, actions_schema, options_schema FROM connector_definitions WHERE key = '<connector>' AND status = 'active'` instead of pulling every connector's schemas through this list; for an AVAILABLE (not-yet-installed) connector, its schema is on the `list_catalog` entry's `detail`.",
+			"List installed resources. `kinds` values are plural: org kinds 'connectors'/'automations', agent kinds 'skills'/'providers'/'guardrails' (agent kinds need `agent_id`; 'skills' lists the workspace library skills that apply to that agent, see client.skills). Pass `include_catalog: true` to merge global catalog entries with installed/installable flags. Each connector entry carries identity + capability flags. For an INSTALLED connector's full auth/feeds/actions/options schema, query it directly with `query_sql` → `SELECT auth_schema, feeds_schema, actions_schema, options_schema FROM connector_definitions WHERE key = '<connector>' AND status = 'active'` instead of pulling every connector's schemas through this list; for an AVAILABLE (not-yet-installed) connector, its schema is on the `list_catalog` entry's `detail`.",
 		access: "read",
 		signature:
 			"catalog.listInstalled(input?: { kinds?: string[]; agent_id?: string; include_catalog?: boolean }): Promise<unknown>",
@@ -1193,6 +1193,26 @@ export default async (_ctx, client) => {
 	},
 
 	// views
+	// skills
+	"skills.manage": {
+		summary: "Raw manage_skills action wrapper. Prefer named methods.",
+		access: "write",
+	},
+	"skills.list": {
+		summary:
+			"List the workspace skill library, ordered by (sort_order, name). Archived skills only with include_archived.",
+		access: "read",
+		signature:
+			"skills.list(input?: { include_archived?: boolean; cursor?: string; limit?: number }): Promise<{ items: WorkspaceSkill[]; next_cursor: string | null }>",
+		example: "await client.skills.list({ limit: 20 });",
+	},
+	"skills.get": {
+		summary: "Get one skill by id, or an unarchived skill by name. Pass exactly one.",
+		access: "read",
+		signature: "skills.get(input: { id?: string; name?: string }): Promise<{ skill: WorkspaceSkill }>",
+		example: "await client.skills.get({ name: 'release-notes' });",
+	},
+
 	"views.manage": {
 		summary: "Raw manage_views action wrapper. Prefer named methods.",
 		access: "admin",
