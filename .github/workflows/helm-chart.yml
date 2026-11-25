@@ -116,7 +116,8 @@ jobs:
               --set app.strategy.type=RollingUpdate \
               --set app.strategy.rollingUpdate.maxUnavailable="$max_unavailable" \
               >/tmp/lobu-online-upgrade.yaml
-            grep -q 'automountServiceAccountToken: false' /tmp/lobu-online-upgrade.yaml
+            sed -n '/^# Source: lobu\/templates\/migration-job.yaml$/,/^---$/p' /tmp/lobu-online-upgrade.yaml \
+              | grep 'automountServiceAccountToken: false' >/dev/null
             if grep -Eq 'resources: \["deployments/scale"\]|name: install-kubectl' /tmp/lobu-online-upgrade.yaml; then
               echo "zero-unavailable migration jobs must not have the ability to scale deployments" >&2
               exit 1
