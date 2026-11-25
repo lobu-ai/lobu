@@ -167,7 +167,9 @@ export function getResponseStrategy(
   platform: string
 ): PlatformResponseStrategy {
   if (platform === "slack") return slackStrategy;
-  if (getPlatformDescriptor(platform)?.connectorTransport) {
+  const descriptor = getPlatformDescriptor(platform);
+  if (descriptor?.responseStrategy) return descriptor.responseStrategy;
+  if (descriptor?.connectorTransport) {
     return connectorChatResponseStrategy(platform);
   }
   return defaultStrategy;
