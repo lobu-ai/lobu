@@ -504,7 +504,8 @@ describe("caller action allowlists", () => {
       AND organization_id = ${org.id} AND semantic_type = 'operation' AND superseded_by IS NULL`;
     expect(ledger?.metadata).toMatchObject({ policy: { effect: "log" } });
     // The token's own list refuses an unlisted write and says so, with a link
-    // for the owner to the Policies page narrowed to this connection and app;
+    // for the owner to the Policies page narrowed to this app (a connection
+    // filter would hide the list, which is not a connector rule);
     // a workspace rule still refuses a listed one.
     const caller = { kind: "app", id: `pat:${pat.id}`, label: "Test PAT" };
     const outside = await (await execute("outside")).json();
@@ -514,9 +515,7 @@ describe("caller action allowlists", () => {
     });
     const allowlistUrl = new URL(outside.fix.url);
     expect(allowlistUrl.pathname).toBe(`/${org.slug}/settings/policies`);
-    expect(Object.fromEntries(allowlistUrl.searchParams)).toEqual({
-      connection: String(connection_id), app: caller.id,
-    });
+    expect(Object.fromEntries(allowlistUrl.searchParams)).toEqual({ app: caller.id });
     expect(outside.error).toBe(
       `'outside' isn't on this caller's allowed actions list. To change this app's allowed actions in ${org.slug}, open ${outside.fix.url}`,
     );

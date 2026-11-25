@@ -7,6 +7,7 @@
  *
  * Driven over a real OAuth MCP session and the real HTTP routes.
  */
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OAuthProvider } from '../../../auth/oauth/provider';
 import { hashToken } from '../../../auth/oauth/utils';
@@ -60,6 +61,8 @@ async function callTool(token: string, name: string, args: Record<string, unknow
   const result = response.result as any;
   return {
     result,
+    // A JSON-RPC error (for example a dropped session) is not a tool result.
+    rpcError: (response as any).error as { message: string } | undefined,
     text: (result?.content ?? []).map((c: any) => c.text ?? '').join('\n') as string,
     fix: result?.structuredContent?.error?.fix as
       | { action: string; url?: string; who: string; workspace: string | null }
@@ -84,6 +87,12 @@ describe('login upgrade links', () => {
     expect(denied.fix?.url).toContain(`/${other.slug}/agents/connected/${client.client_id}?grant=1`);
     expect(denied.text).toContain(denied.fix?.url);
 
+    // query_sdk reaching the same workspace carries the same structured fix.
+    const sdkDenied = await callTool(token, 'query_sdk', {
+      script: `export default async (ctx, client) => (await client.org('${other.slug}')).organizations.current();`,
+    });
+    expect(sdkDenied.result?.structuredContent).toMatchObject({ success: false, error: { fix: denied.fix } });
+
     const granted = await post(`/api/me/logins/${client.client_id}/grant`, {
       cookie,
       body: { workspace: other.slug },
@@ -92,8 +101,11 @@ describe('login upgrade links', () => {
     expect(granted.status).toBe(200);
     expect(await granted.json()).toMatchObject({ workspace: other.slug, level: 'write', updated_tokens: 2 });
 
+    // The same MCP session carries on with the wider grant.
     const allowed = await searchIn(token, other.slug);
+    expect(allowed.rpcError).toBeUndefined();
     expect(allowed.result?.isError).toBeFalsy();
+    expect(allowed.result?.structuredContent).toBeDefined();
 
     const view = await get(`/api/me/logins/${client.client_id}`, { cookie, env: MULTI });
     expect(view.status).toBe(200);
@@ -128,6 +140,80 @@ describe('login upgrade links', () => {
     expect(refused.status).toBe(409);
     expect(await refused.json()).toMatchObject({ error: 'single_workspace_login' });
   });
+
+  it.each([null, ''])('never lowers a login whose stored scope %j is the default grant', async (scope) => {
+    const { sql, home, client, cookie } = await seedLogin();
+    await sql`UPDATE oauth_tokens SET scope = ${scope} WHERE client_id = ${client.client_id}`;
+    const raised = await post(`/api/me/logins/${client.client_id}/grant`, {
+      cookie,
+      body: { workspace: home.slug, level: 'read' },
+    });
+    expect(raised.status).toBe(200);
+    expect(await raised.json()).toMatchObject({ level: 'write' });
+    const rows = await sql`SELECT scope FROM oauth_tokens WHERE client_id = ${client.client_id}`;
+    expect(rows.map((row) => row.scope)).toEqual([scope, scope]);
+  });
+
+  it.each(['refresh', 'refresh_with_requested_scope', 'authorization_code'])('keeps a scope upgrade when %s issuance has already read the old grant', async (kind) => {
+    const { sql, home, client, owner, cookie } = await seedLogin();
+    const provider = new OAuthProvider(sql, 'https://lobu.test', true);
+    const verifier = 'synthetic-login-upgrade-code-verifier';
+    const redirectUri = 'https://app.example.com/callback';
+    const code = kind === 'authorization_code' ? await provider.createAuthorizationCode({
+      client_id: client.client_id,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      scope: 'mcp:read mcp:write',
+    }, owner.id, null, [home.id]) : undefined;
+
+    const waitForIssuers = async (count: number) => {
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const [row] = await sql`
+          SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%SELECT id FROM oauth_clients%FOR UPDATE%'
+        `;
+        if (row.count >= count) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`Timed out waiting for ${count} token issuers`);
+    };
+    let upgrade: ReturnType<typeof post> | undefined;
+    let issuance: ReturnType<typeof provider.refreshAccessToken> | undefined;
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT id FROM oauth_clients WHERE id = ${client.client_id} FOR UPDATE`;
+        upgrade = post(`/api/me/logins/${client.client_id}/grant`, {
+          cookie, body: { workspace: home.slug, level: 'admin' }, env: MULTI,
+        });
+        await waitForIssuers(1);
+        issuance = kind !== 'authorization_code' ? provider.refreshAccessToken({
+          grant_type: 'refresh_token', client_id: client.client_id,
+          client_secret: client.client_secret, refresh_token: 'upgrade-refresh-token',
+          ...(kind === 'refresh_with_requested_scope' ? { scope: 'mcp:read mcp:write mcp:admin' } : {}),
+        }) : provider.exchangeAuthorizationCode({
+          grant_type: 'authorization_code', client_id: client.client_id,
+          client_secret: client.client_secret, code, code_verifier: verifier, redirect_uri: redirectUri,
+        });
+        await waitForIssuers(2);
+      });
+      expect((await upgrade!).status).toBe(200);
+      const issued = await issuance!;
+      expect(issued).not.toHaveProperty('error');
+      expect(issued).toMatchObject({ scope: 'mcp:read mcp:write mcp:admin' });
+      const live = await sql`
+        SELECT scope FROM oauth_tokens WHERE client_id = ${client.client_id} AND revoked_at IS NULL
+      `;
+      expect(live.length).toBeGreaterThan(2);
+      for (const row of live) expect(row.scope).toBe('mcp:read mcp:write mcp:admin');
+    } finally {
+      await Promise.allSettled([upgrade, issuance]);
+    }
+  });
+
 
   it('only lets the login owner widen it, from their own web session, within their role', async () => {
     const { home, other, stranger, client, token, cookie } = await seedLogin();
@@ -196,7 +282,17 @@ describe('login upgrade links', () => {
     expect(await raised.json()).toMatchObject({ level: 'admin' });
 
     const after = await installConnector(home.slug);
+    expect(after.rpcError).toBeUndefined();
     expect(after.fix).toBeUndefined();
     expect(after.text).not.toContain('needs admin access');
+
+    // The rotation re-reads the raised scope rather than the one it started from.
+    const refreshed = await new OAuthProvider(getTestDb(), undefined, true).refreshAccessToken({
+      grant_type: 'refresh_token',
+      client_id: client.client_id,
+      client_secret: client.client_secret,
+      refresh_token: 'upgrade-refresh-token',
+    });
+    expect(refreshed).toMatchObject({ scope: expect.stringContaining('mcp:admin') });
   });
 });

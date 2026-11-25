@@ -1,3 +1,5 @@
+import { Type } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
 import type { TokenType } from './registry';
 import { getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { isAdminOrOwnerRole } from './access-control';
@@ -14,6 +16,22 @@ export type AccessRemedy =
   | { kind: 'ask_admin'; organizationId: string | null };
 
 /** The wire shape at `structuredContent.error.fix` (MCP). */
+export const AccessFixSchema = Type.Object(
+  {
+    action: Type.Union([
+      Type.Literal('grant_workspace'),
+      Type.Literal('raise_access'),
+      Type.Literal('edit_rule'),
+      Type.Literal('edit_allowlist'),
+      Type.Literal('ask_admin'),
+    ]),
+    url: Type.Optional(Type.String()),
+    who: Type.Union([Type.Literal('you'), Type.Literal('workspace_admin')]),
+    workspace: Type.Union([Type.String(), Type.Null()]),
+  },
+  { description: 'What would lift this denial and who can do it; `url` opens the page to do it.' }
+);
+
 export interface AccessFix {
   action: 'grant_workspace' | 'raise_access' | 'edit_rule' | 'edit_allowlist' | 'ask_admin';
   url?: string;
@@ -76,6 +94,11 @@ export function loginGrantUrl(
 }
 
 /** The message with the fix's text form, for clients that only show text. */
+/** The fix on an already-serialized error, when it is one. */
+export function accessFixOf(value: unknown): AccessFix | null {
+  return Value.Check(AccessFixSchema, value) ? (value as AccessFix) : null;
+}
+
 export function appendAccessFix(message: string, fix: AccessFix | null): string {
   const text = fix ? describeAccessFix(fix) : '';
   if (!text) return message;
@@ -122,11 +145,15 @@ export async function buildPolicyFix(
   }
   const origin = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   if (!origin || !workspace) return { action, who: 'you', workspace };
-  const query = new URLSearchParams({ connection: String(input.connectionId) });
+  // An allowed-actions list is not a connector rule, so a connection filter
+  // would hide it; it is found by its app.
+  const query = new URLSearchParams(
+    input.reason === 'allowlist' ? {} : { connection: String(input.connectionId) }
+  );
   if (input.appPrincipalId) query.set('app', input.appPrincipalId);
   return {
     action,
-    url: `${origin}/${encodeURIComponent(workspace)}/settings/policies?${query}`,
+    url: `${origin}/${encodeURIComponent(workspace)}/settings/policies${query.size > 0 ? `?${query}` : ''}`,
     who: 'you',
     workspace,
   };

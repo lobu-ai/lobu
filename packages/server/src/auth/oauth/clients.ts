@@ -9,9 +9,9 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { DbClient } from '../../db/client';
 import { pgTextArray, parsePgTextArray } from '../../db/client';
 import { recordLifecycleEvent } from '../../utils/insert-event';
-import { canonicalizeOAuthScopeGrant } from './scopes';
+import { canonicalizeOAuthScopeGrant, DEFAULT_SCOPES } from './scopes';
 import type { OAuthClient, OAuthClientMetadata, StoredOAuthClient } from './types';
-import { generateClientId, generateClientSecret } from './utils';
+import { generateClientId, generateClientSecret, parseScopes } from './utils';
 
 export type OAuthMcpLevel = 'read' | 'write' | 'admin';
 
@@ -33,9 +33,13 @@ export interface LiveLogin {
   grantedOrganizationIds: string[];
 }
 
-/** The highest MCP level a stored scope string carries. */
+/**
+ * The highest MCP level a stored scope string carries, read the way
+ * authentication reads it (`parseScopes`): a missing scope is the default
+ * grant, not none.
+ */
 export function mcpLevelOf(scope: string | null | undefined): OAuthMcpLevel | null {
-  const scopes = new Set((scope ?? '').split(/\s+/).filter(Boolean));
+  const scopes = new Set(parseScopes(scope));
   for (const level of [...MCP_LEVELS].reverse()) {
     if (scopes.has(`mcp:${level}`)) return level;
   }
@@ -50,7 +54,9 @@ function raiseMcpScope(scope: string | null | undefined, level: OAuthMcpLevel | 
   if (!level) return scope ?? null;
   const current = mcpLevelOf(scope);
   if (current && MCP_LEVELS.indexOf(current) >= MCP_LEVELS.indexOf(level)) return scope ?? null;
-  return canonicalizeOAuthScopeGrant(`${scope ?? ''} mcp:${level}`);
+  // A missing scope authenticates as the default grant; raise from that.
+  const effective = scope || DEFAULT_SCOPES.join(' ');
+  return canonicalizeOAuthScopeGrant(`${effective} mcp:${level}`);
 }
 
 /**
@@ -511,12 +517,13 @@ export class OAuthClientsStore {
         updatedTokens += updated.length;
       }
 
-      // A code still in flight must not mint a narrower token afterwards.
+      // A code still in flight must not mint a narrower token afterwards. That
+      // includes a code already claimed whose exchange is waiting on this lock:
+      // the exchange re-reads the code's grant and scope once it holds it.
       const authorizationCodes = await tx`
         SELECT code, scope FROM oauth_authorization_codes
         WHERE client_id = ${clientId}
           AND user_id = ${userId}
-          AND used_at IS NULL
           AND expires_at > NOW()
           AND granted_organization_ids IS NOT NULL
       `;

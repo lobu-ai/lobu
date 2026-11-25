@@ -204,16 +204,6 @@ export class OAuthProvider {
       return createOAuthError('invalid_grant', 'Invalid code_verifier');
     }
 
-    // Defense in depth for authorization codes minted before consent started
-    // stripping device-flow-only scopes. Auth-code clients must never receive
-    // device or managed-connector credentials, even across a rolling deploy.
-    const authorizedScope = stripNonPublicOAuthScopes(
-      authCode.scope === null ? DEFAULT_SCOPES_STRING : authCode.scope
-    );
-    if (!authorizedScope) {
-      return createOAuthError('invalid_scope', 'Authorization code has no public scopes');
-    }
-
     // Re-read and lock the claimed code while its tokens are inserted. A
     // connected-app workspace revoke may delete a bound code or narrow a
     // secondary grant after the initial claim; using the live row here makes
@@ -223,7 +213,7 @@ export class OAuthProvider {
         SELECT id FROM oauth_clients WHERE id = ${authCode.client_id} FOR UPDATE
       `;
       const liveCodeRows = await tx`
-        SELECT organization_id, granted_organization_ids
+        SELECT organization_id, granted_organization_ids, scope
         FROM oauth_authorization_codes
         WHERE code = ${authCode.code}
           AND used_at IS NOT NULL
@@ -234,8 +224,17 @@ export class OAuthProvider {
       }
       const liveCode = liveCodeRows[0] as Pick<
         StoredAuthorizationCode,
-        'organization_id' | 'granted_organization_ids'
+        'organization_id' | 'granted_organization_ids' | 'scope'
       >;
+      // Consume scope under the same mutex as workspace authority: the owner
+      // may have raised it after this exchange initially claimed the code.
+      // Keep stripping device-only scopes from legacy authorization codes.
+      const authorizedScope = stripNonPublicOAuthScopes(
+        liveCode.scope === null ? DEFAULT_SCOPES_STRING : liveCode.scope
+      );
+      if (!authorizedScope) {
+        return createOAuthError('invalid_scope', 'Authorization code has no public scopes');
+      }
       return this.issueTokens(
         authCode.client_id,
         authCode.user_id,
@@ -292,27 +291,6 @@ export class OAuthProvider {
     }
 
     const oldRefreshToken = tokenResult[0] as StoredOAuthToken;
-    if (
-      normalizeStoredGrantedOrganizationIds(
-        oldRefreshToken.granted_organization_ids
-      ).length > 1 &&
-      !this.multiWorkspaceGrantIssuanceEnabled
-    ) {
-      return createOAuthError('invalid_grant', 'Multiple-workspace authorization is not enabled');
-    }
-
-    // Rows created before grant provenance was persisted are safe for ordinary
-    // OAuth scopes, but a legacy token carrying a device-flow-only scope could
-    // have originated from the old auth-code leak. Fail closed and require a
-    // fresh device authorization rather than guessing its provenance.
-    const originalScopes = parseScopes(oldRefreshToken.scope);
-    const hasNonPublicScope = originalScopes.some((scope) =>
-      (NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(scope)
-    );
-    if (hasNonPublicScope && oldRefreshToken.authorization_grant_type !== 'device_code') {
-      return createOAuthError('invalid_grant', 'Re-authorization required');
-    }
-
     // Validate client_id matches
     if (oldRefreshToken.client_id !== params.client_id) {
       return createOAuthError('invalid_grant', 'Client ID mismatch');
@@ -323,30 +301,6 @@ export class OAuthProvider {
     }
 
     const resource = oldRefreshToken.resource || params.resource || null;
-    // Use requested scope only if it is a subset of the original grant.
-    let scope = oldRefreshToken.scope;
-    if (params.scope !== undefined) {
-      if (params.scope.trim().length === 0) {
-        return createOAuthError('invalid_scope', 'Requested scope must not be empty');
-      }
-      const requestedScopesRaw = params.scope.split(' ').filter(Boolean);
-      const requestedScopes = parseScopes(params.scope);
-      if (requestedScopesRaw.length !== requestedScopes.length) {
-        return createOAuthError('invalid_scope', 'Requested scope contains unsupported values');
-      }
-      const originalScopeSet = new Set(originalScopes);
-      const isSubset = requestedScopes.every((requestedScope) =>
-        originalScopeSet.has(requestedScope)
-      );
-      if (!isSubset) {
-        return createOAuthError(
-          'invalid_scope',
-          'Requested scope exceeds originally granted scope'
-        );
-      }
-      scope = requestedScopes.join(' ');
-    }
-
     // Generate new tokens
     const accessToken = generateAccessToken();
     const newRefreshToken = generateRefreshToken();
@@ -356,32 +310,72 @@ export class OAuthProvider {
     const refreshExpiresAt = calculateExpiry(REFRESH_TOKEN_LIFETIME_SECONDS);
 
     // Revoke old refresh token and issue new tokens atomically
-    const rotated = await this.sql.begin(async (tx) => {
+    return this.sql.begin(async (tx) => {
       // Registration-row mutex shared with connected-app revoke and every
       // token-issuing grant path. Waiting here completes before the token claim
       // starts, so all later statements observe the revoke's committed grant.
       await tx`
         SELECT id FROM oauth_clients WHERE id = ${oldRefreshToken.client_id} FOR UPDATE
       `;
-      // Claim the live refresh row inside the same transaction that mints its
-      // children. This serializes with grant removal/revocation and prevents a
-      // stale pre-transaction snapshot from resurrecting removed workspaces.
-      const claimed = await tx`
-        UPDATE oauth_tokens
-        SET revoked_at = NOW()
+      // Read all authority under the client mutex, before consuming the row.
+      // Scope validation failures must leave the refresh token usable.
+      const liveRows = await tx`
+        SELECT granted_organization_ids, organization_id, authorization_grant_type, scope
+        FROM oauth_tokens
         WHERE id = ${oldRefreshToken.id}
           AND revoked_at IS NULL
           AND expires_at > NOW()
-        RETURNING granted_organization_ids, organization_id, authorization_grant_type
       `;
-      if (claimed.length === 0) return false;
-      const liveRefreshToken = claimed[0] as Pick<
+      if (liveRows.length === 0) {
+        return createOAuthError('invalid_grant', 'Invalid or expired refresh token');
+      }
+      const liveRefreshToken = liveRows[0] as Pick<
         StoredOAuthToken,
-        'granted_organization_ids' | 'organization_id' | 'authorization_grant_type'
+        'granted_organization_ids' | 'organization_id' | 'authorization_grant_type' | 'scope'
       >;
       const grantedOrganizationIds = normalizeStoredGrantedOrganizationIds(
         liveRefreshToken.granted_organization_ids
       );
+      if (grantedOrganizationIds.length > 1 && !this.multiWorkspaceGrantIssuanceEnabled) {
+        return createOAuthError('invalid_grant', 'Multiple-workspace authorization is not enabled');
+      }
+
+      // Legacy grants with device-only scopes need known device provenance.
+      const originalScopes = parseScopes(liveRefreshToken.scope);
+      const hasNonPublicScope = originalScopes.some((scope) =>
+        (NON_PUBLIC_OAUTH_SCOPES as readonly string[]).includes(scope)
+      );
+      if (hasNonPublicScope && liveRefreshToken.authorization_grant_type !== 'device_code') {
+        return createOAuthError('invalid_grant', 'Re-authorization required');
+      }
+
+      // Explicit narrowing remains allowed, against the current grant.
+      let scope = liveRefreshToken.scope;
+      if (params.scope !== undefined) {
+        if (params.scope.trim().length === 0) {
+          return createOAuthError('invalid_scope', 'Requested scope must not be empty');
+        }
+        const requestedScopesRaw = params.scope.split(' ').filter(Boolean);
+        const requestedScopes = parseScopes(params.scope);
+        if (requestedScopesRaw.length !== requestedScopes.length) {
+          return createOAuthError('invalid_scope', 'Requested scope contains unsupported values');
+        }
+        const originalScopeSet = new Set(originalScopes);
+        if (!requestedScopes.every((requestedScope) => originalScopeSet.has(requestedScope))) {
+          return createOAuthError('invalid_scope', 'Requested scope exceeds originally granted scope');
+        }
+        scope = requestedScopes.join(' ');
+      }
+
+      const claimed = await tx`
+        UPDATE oauth_tokens SET revoked_at = NOW()
+        WHERE id = ${oldRefreshToken.id}
+          AND revoked_at IS NULL AND expires_at > NOW()
+        RETURNING id
+      `;
+      if (claimed.length === 0) {
+        return createOAuthError('invalid_grant', 'Invalid or expired refresh token');
+      }
 
       await tx`
         INSERT INTO oauth_tokens (
@@ -400,21 +394,15 @@ export class OAuthProvider {
            ${liveRefreshToken.authorization_grant_type},
            ${scope}, ${resource}, ${oldRefreshToken.id}, ${refreshExpiresAt})
       `;
-      return true;
+      return {
+        access_token: accessToken,
+        token_type: 'Bearer' as const,
+        expires_in: ACCESS_TOKEN_LIFETIME_SECONDS,
+        refresh_token: newRefreshToken,
+        scope: scope || undefined,
+        ...(resource ? { resource } : {}),
+      };
     });
-
-    if (!rotated) {
-      return createOAuthError('invalid_grant', 'Invalid or expired refresh token');
-    }
-
-    return {
-      access_token: accessToken,
-      token_type: 'Bearer',
-      expires_in: ACCESS_TOKEN_LIFETIME_SECONDS,
-      refresh_token: newRefreshToken,
-      scope: scope || undefined,
-      ...(resource ? { resource } : {}),
-    };
   }
 
   /**
