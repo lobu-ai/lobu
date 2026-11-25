@@ -17,7 +17,11 @@ import { assertGuardrailConfigReadAllowed } from "../authz/guardrail-config-acce
 import { type DbClient, getDb, pgTextArray } from "../db/client";
 import { loadAllowedDomains } from "../gateway/config/network-allowlist";
 import { resolveSystemJudgeTarget } from "../gateway/inference/system-judge-target";
-import { findSuppressedJudgedDomains, judgedEgressDomains } from "../gateway/permissions/policy-store";
+import {
+	findSuppressedJudgedDomains,
+	judgedEgressDomains,
+	lockEgressJudgeDecisions,
+} from "../gateway/permissions/policy-store";
 import { getOrgDefaultModel } from "../lobu/stores/provider-secrets";
 import { insertToolConfigChange } from "../tools/admin/helpers/config-audit";
 import type { ToolContext } from "../tools/registry";
@@ -199,6 +203,9 @@ async function applyAndAudit(
 ): Promise<WorkspaceGuardrail> {
 	return getDb().begin(async (tx) => {
 		await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
+		// Shared with GrantStore.grant: an allow grant commits either before
+		// this write's grant cleanup or after its judge is visible.
+		await lockEgressJudgeDecisions(tx, ctx.organizationId);
 		const { before, after, changed } = await applyGuardrailWrite(tx, ctx.organizationId, write);
 		if (!changed) return after;
 		if (write.guardrail) await revokeShadowingGrants(tx, ctx.organizationId, shadowAgentIds, write.guardrail);

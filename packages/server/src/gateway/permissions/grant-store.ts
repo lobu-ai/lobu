@@ -10,7 +10,10 @@ import {
   wildcardParentPatterns,
 } from "@lobu/connector-sdk/egress-policy";
 import { getDb, pgTextArray } from "../../db/client.js";
-import { readJudgedEgressDomains } from "./policy-store.js";
+import {
+  lockEgressJudgeDecisions,
+  readJudgedEgressDomains,
+} from "./policy-store.js";
 import { orgScope, requireOrgId } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("grant-store");
@@ -117,26 +120,34 @@ export class GrantStore {
     // Denies are exempt: a deny grant outranks the judge by design. Non-domain
     // kinds (MCP tool patterns, which is what interactive tool approvals
     // write) cannot shadow a domain judge at all.
-    if (kind === "domain" && !denied) {
-      const judged = await readJudgedEgressDomains(orgId, agentId);
-      if (judged.some((j) => patternReaches(j, pattern))) {
-        logger.info(
-          "Skipped allow grant — the egress judge governs this domain",
-          { agentId, pattern }
-        );
-        return;
+    //
+    // The judged-domain read and the insert share one transaction under the
+    // organization's egress-judge lock, so a concurrent guardrail write either
+    // commits its judge first (and this read sees it) or runs its grant
+    // cleanup after this insert commits.
+    const skipped = await getDb().begin(async (tx) => {
+      if (kind === "domain" && !denied) {
+        await lockEgressJudgeDecisions(tx, orgId);
+        const judged = await readJudgedEgressDomains(orgId, agentId, tx);
+        if (judged.some((j) => patternReaches(j, pattern))) return true;
       }
+      await tx`
+        INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
+        VALUES (${orgId}, ${agentId}, ${kind}, ${pattern}, ${expiresAtTs}, now(), ${denied ?? false})
+        ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
+          expires_at = EXCLUDED.expires_at,
+          granted_at = EXCLUDED.granted_at,
+          denied = EXCLUDED.denied
+      `;
+      return false;
+    });
+    if (skipped) {
+      logger.info("Skipped allow grant — the egress judge governs this domain", {
+        agentId,
+        pattern,
+      });
+      return;
     }
-
-    const sql = getDb();
-    await sql`
-      INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
-      VALUES (${orgId}, ${agentId}, ${kind}, ${pattern}, ${expiresAtTs}, now(), ${denied ?? false})
-      ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
-        expires_at = EXCLUDED.expires_at,
-        granted_at = EXCLUDED.granted_at,
-        denied = EXCLUDED.denied
-    `;
     logger.info("Granted access", { agentId, pattern, expiresAt });
   }
 

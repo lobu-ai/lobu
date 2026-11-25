@@ -8,6 +8,8 @@
 import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { GrantStore } from "../../../gateway/permissions/grant-store";
+import { lockEgressJudgeDecisions } from "../../../gateway/permissions/policy-store";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
 import { postForm } from "../../setup/test-helpers";
@@ -223,6 +225,64 @@ describe("guardrail library writes", () => {
 		expect((await create(egress(granted.agentId))).status).toBe(200);
 		const left = await sql`SELECT pattern, denied FROM grants WHERE agent_id = ${granted.agentId} ORDER BY pattern, denied`;
 		expect(left.map((row) => [row.pattern, row.denied])).toEqual([["*.payments.test", true], ["unrelated.test", false]]);
+	});
+
+	it("serializes an egress judge write with allow-grant writes, so no grant outlives its judge", async () => {
+		const sql = getTestDb();
+		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+		const egress = {
+			name: "payments",
+			config: { kind: "judge", stage: "egress", policy: "Only read invoices.", model: RUNNABLE_MODEL, domains: ["api.payments.test"] },
+			applies_to: [{ principal_kind: "agent", principal_id: agent.agentId }],
+		};
+		const allowGrants = async () =>
+			(await sql`SELECT pattern FROM grants WHERE agent_id = ${agent.agentId} AND NOT denied`).map((row) => row.pattern);
+		/** Run `body` in a transaction holding the org's egress-judge lock until `release`. */
+		const holdLock = (body: (tx: typeof sql) => Promise<void>) => {
+			let release!: () => void;
+			let locked!: () => void;
+			const held = new Promise<void>((resolve) => (release = resolve));
+			const isLocked = new Promise<void>((resolve) => (locked = resolve));
+			const done = sql.begin(async (tx) => {
+				await lockEgressJudgeDecisions(tx as unknown as typeof sql, org.id);
+				locked();
+				await held;
+				await body(tx as unknown as typeof sql);
+			});
+			return { isLocked, release, done };
+		};
+		const stateAfter = (pending: Promise<unknown>) =>
+			Promise.race([pending.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
+
+		// An allow grant mid-write: the judge write waits for it, then revokes it.
+		const grantWrite = holdLock(async (tx) => {
+			await tx`INSERT INTO grants (agent_id, kind, pattern, denied, organization_id) VALUES (${agent.agentId}, 'domain', 'api.payments.test', false, ${org.id})`;
+		});
+		await grantWrite.isLocked;
+		const judgeWrite = create(egress);
+		const judgeWriteState = await stateAfter(judgeWrite);
+		grantWrite.release();
+		await grantWrite.done;
+		expect((await judgeWrite).status).toBe(200);
+		expect(await allowGrants()).toEqual([]);
+		expect(judgeWriteState).toBe("waiting");
+
+		// A judge write mid-commit: GrantStore.grant waits, sees the judge, and skips.
+		const other = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
+		const otherJudge = holdLock(async (tx) => {
+			await tx`INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled)
+				VALUES ('guardrail-race', ${org.id}, 'payments-other', ${tx.json(egress.config)}, true)`;
+			await tx`INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
+				VALUES ('guardrail-race', ${org.id}, 'agent', ${other.agentId})`;
+		});
+		await otherJudge.isLocked;
+		const grant = new GrantStore().grant(other.agentId, "api.payments.test", null, false, org.id);
+		const grantState = await stateAfter(grant);
+		otherJudge.release();
+		await otherJudge.done;
+		await grant;
+		expect((await sql`SELECT pattern FROM grants WHERE agent_id = ${other.agentId}`).map((row) => row.pattern)).toEqual([]);
+		expect(grantState).toBe("waiting");
 	});
 
 	it("records a config event that digests the judge policy", async () => {
