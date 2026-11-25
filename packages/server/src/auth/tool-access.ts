@@ -194,11 +194,12 @@ export const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 		"classify",
 	]),
 	manage_views: new Set(["set", "remove", "set_navigation"]),
-	// manage_skills has only reads (list/get); library writes arrive later. The
-	// empty admin set is the explicit policy entry that drops both to the READ
-	// tier. They stay out of PUBLIC_READ_ACTIONS: skill bodies are workspace
-	// instructions, not something an anonymous visitor of a public org reads.
-	manage_skills: new Set([]),
+	// Library writes are workspace administration, like agent configuration
+	// (`manage_agents`): skill bodies become instructions for every agent they
+	// apply to. list/get stay at the READ tier, and out of PUBLIC_READ_ACTIONS:
+	// skill bodies are workspace instructions, not something an anonymous
+	// visitor of a public org reads.
+	manage_skills: new Set(["put", "archive", "install_from_catalog"]),
 };
 
 export const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {

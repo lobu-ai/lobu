@@ -32,6 +32,7 @@ export const CONFIG_RESOURCE_KINDS = [
   'feed',
   'inference-provider',
   'provider-key',
+  'skill',
 ] as const;
 
 export type ConfigResourceKind = (typeof CONFIG_RESOURCE_KINDS)[number];

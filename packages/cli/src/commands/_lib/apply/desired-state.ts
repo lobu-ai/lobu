@@ -10,6 +10,11 @@ import type {
   FeedDefinition,
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
+import {
+  deriveSkillDescription,
+  isLibrarySkillName,
+  LIBRARY_SKILL_NAME_MAX_CHARS,
+} from "@lobu/core/agent-tooling";
 import { createAjv } from "@lobu/core/ajv";
 import { hasWorkspaceAttachment } from "@lobu/core/contracts/tools/view-attach";
 import {
@@ -298,6 +303,21 @@ export interface DesiredView extends RetainedSource {
   compiledCode: string;
 }
 
+/**
+ * A workspace library skill declared on one or more agents (`defineSkill` /
+ * `skillFromFile`). Apply converges the library skill of this name: body from
+ * the config, and an `applies_to` that names exactly the declaring agents among
+ * this config's agents (subjects for anyone else are left alone).
+ */
+export interface DesiredSkill {
+  name: string;
+  /** Declared, else derived from the body (the server needs one). */
+  description: string;
+  content: string;
+  /** Declaring agent ids, sorted. */
+  agents: string[];
+}
+
 export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
@@ -379,6 +399,12 @@ export interface DesiredState {
    * config leaves navigation unmanaged; null returns it to the default.
    */
   navigation?: NavigationConfig | null;
+  /**
+   * Library skills the config's agents declare, merged by name. Undefined when
+   * the run does not reconcile skills (`--only memory`); an empty list still
+   * detaches skills this config applied earlier from its agents.
+   */
+  skills?: DesiredSkill[];
   /**
    * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
    * auth-profile + mcp credentials). The CLI surfaces these before mutating
@@ -501,6 +527,54 @@ async function resolveAgentSkills(
     byName.set(skill.name, skill);
   }
   return [...byName.values()];
+}
+
+/**
+ * One library skill per name across every agent that declares it. Two agents
+ * may share a skill only with the same body: the library holds one text.
+ */
+function mergeDeclaredSkills(
+  declared: Array<{ agentId: string; skill: LocalSkill }>
+): DesiredSkill[] {
+  const byName = new Map<string, DesiredSkill>();
+  for (const { agentId, skill } of declared) {
+    if (!isLibrarySkillName(skill.name)) {
+      throw new ValidationError(
+        `Agent "${agentId}" declares skill "${skill.name}": a library skill name is lowercase letters, digits and hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`
+      );
+    }
+    if (!skill.content.trim()) {
+      throw new ValidationError(
+        `Agent "${agentId}" declares skill "${skill.name}" with no content.`
+      );
+    }
+    const description =
+      skill.description?.trim() ||
+      deriveSkillDescription(skill.content) ||
+      skill.name;
+    const existing = byName.get(skill.name);
+    if (!existing) {
+      byName.set(skill.name, {
+        name: skill.name,
+        description,
+        content: skill.content,
+        agents: [agentId],
+      });
+      continue;
+    }
+    if (
+      existing.content !== skill.content ||
+      existing.description !== description
+    ) {
+      throw new ValidationError(
+        `Skill "${skill.name}" is declared by agents "${existing.agents.join('", "')}" and "${agentId}" with different text. The workspace library holds one "${skill.name}": declare it once and share it, or give one a new name.`
+      );
+    }
+    existing.agents.push(agentId);
+  }
+  return [...byName.values()]
+    .map((skill) => ({ ...skill, agents: [...skill.agents].sort() }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function readMarkdown(agentDir: string): Promise<AgentMarkdown> {
@@ -1260,22 +1334,23 @@ export async function loadDesiredStateFromConfig(
 
   // Agent artifacts: SOUL/IDENTITY/USER.md (convention, from the agent dir).
   // The mapper stays pure (no file IO); we read the files here and merge them in.
-  // Skills declared on an agent are still resolved, so a broken SKILL.md fails
-  // the load, but apply does not write the workspace skill library yet.
+  // Skills declared on an agent resolve here too and become library skills.
   const warnings: string[] = [];
-  await Promise.all(
+  const declaredSkills = await Promise.all(
     typedProject.agents.map(async (agent, i) => {
       const settings = state.agents[i]?.settings;
-      if (!settings) return;
+      if (!settings) return [];
       const agentDir = resolve(opts.cwd, agent.dir ?? join("agents", agent.id));
       mergeAgentDirArtifacts(settings, await readMarkdown(agentDir));
-      if (agent.skills === undefined || agent.skills.length === 0) return;
-      const declared = await resolveAgentSkills(agent.skills, opts.cwd);
-      warnings.push(
-        `Agent "${agent.id}" declares skills (${declared.map((skill) => skill.name).join(", ")}) that lobu apply does not write: skills live in the workspace skill library and apply cannot edit the library yet.`
-      );
+      if (agent.skills === undefined || agent.skills.length === 0) return [];
+      const skills = await resolveAgentSkills(agent.skills, opts.cwd);
+      return skills.map((skill) => ({ agentId: agent.id, skill }));
     })
   );
+  // `--only memory` maps no agents, so it reconciles no skills either.
+  if (opts.only !== "memory") {
+    state.skills = mergeDeclaredSkills(declaredSkills.flat());
+  }
 
   // Automation lifecycle modules: sibling `.ts` files referenced
   // by path. The mapper stays pure; resolve + read each raw source here for the

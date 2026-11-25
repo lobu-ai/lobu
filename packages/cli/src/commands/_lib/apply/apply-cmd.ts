@@ -440,6 +440,12 @@ export async function fetchRemoteSnapshot(
     only === undefined && state.navigation !== undefined
       ? await client.getNavigation()
       : undefined;
+  // The skill library is read whenever the run reconciles skills (every run
+  // but `--only memory`, whose desired state carries none).
+  const skills =
+    only !== "memory" && state.skills !== undefined
+      ? await client.listSkills()
+      : undefined;
 
   return {
     agents,
@@ -454,6 +460,7 @@ export async function fetchRemoteSnapshot(
     inferenceProviders,
     views,
     ...(navigation ? { navigation } : {}),
+    ...(skills ? { skills } : {}),
   };
 }
 
@@ -990,6 +997,37 @@ export async function executePlan(
         row.changedFields ? `(${row.changedFields.join(", ")})` : undefined
       )
     );
+  }
+
+  // 4b) Skills — after agents (a skill's subjects must exist) and before
+  //     Automations (a version freezes the library body it names). Each put
+  //     presents the revision this apply read, so an edit made in between
+  //     fails it (409) rather than being overwritten.
+  for (const row of rowsByKind("skill")) {
+    if (row.kind !== "skill" || !row.write) continue;
+    try {
+      const skill = await ctx.client.putSkill(
+        row.write,
+        row.remote
+          ? { id: row.remote.id, expectedRevision: row.remote.revision }
+          : null
+      );
+      printText(
+        renderProgress(
+          row.verb,
+          "skill",
+          row.id,
+          `(revision ${skill.revision})`
+        )
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        throw new Error(
+          `Skill "${row.id}" changed since this apply read it. Run lobu apply again to plan against the current library.`
+        );
+      }
+      throw error;
+    }
   }
 
   // Automations are applied after connections so declarative connection slugs
@@ -1726,12 +1764,23 @@ async function applyProject(
    *   - `--only agents` touches neither memory nor connectors → carry the prior
    *     baseline verbatim, leaving it absent when none was recorded;
    *   - `--only memory` rebuilds memory but carries prior connector ownership.
+   * Skills follow the agents that declare them: `--only agents` records them
+   * over the carried baseline, `--only memory` carries the last record.
    */
   const recordableBaseline = (
     snapshot: RemoteSnapshot
   ): BaselineRecord | undefined => {
     if (opts.only === "agents") {
-      return baselineRecord ?? undefined;
+      if (!baselineRecord) return undefined;
+      return snapshot.skills !== undefined && state.skills !== undefined
+        ? {
+            ...baselineRecord,
+            attribution: {
+              ...baselineRecord.attribution,
+              skills: state.skills,
+            },
+          }
+        : baselineRecord;
     }
     const built = buildAttributionAndOwned(
       state,
@@ -1742,6 +1791,9 @@ async function applyProject(
     // Navigation is full-apply only: a partial run keeps the last record.
     if (opts.only !== undefined && baselineRecord?.attribution.navigation) {
       built.attribution.navigation = baselineRecord.attribution.navigation;
+    }
+    if (opts.only === "memory" && baselineRecord?.attribution.skills) {
+      built.attribution.skills = baselineRecord.attribution.skills;
     }
     if (opts.only === "memory" && baselineRecord) {
       built.owned = [

@@ -62,6 +62,13 @@ import {
 	MANAGE_ENTITY_SCHEMA_ACTION_KEY,
 	type StoredManageEntitySchemaProposal,
 } from "../../manage_entity_schema";
+import {
+	applyManageSkillsProposal,
+	describeManageSkillsProposal,
+	isManageSkillsProposal,
+	MANAGE_SKILLS_ACTION_KEY,
+	type ManageSkillsProposal,
+} from "../../manage_skills";
 import { isDelegatedBrowserAffinityConnector } from "../../../../utils/connector-execution-placement";
 import { newGatewayInlineOwner, runLeaseFence } from "../../../../runs/run-lease";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
@@ -348,6 +355,15 @@ function getBuilderApprovalHandlers(): BuilderApprovalHandler[] {
 				const proposal = p as StoredManageEntitySchemaProposal;
 				return `${proposal.action} ${String(proposal.args.slug)}`;
 			},
+		},
+		{
+			actionKey: MANAGE_SKILLS_ACTION_KEY,
+			nounLabel: "Skill",
+			isValidProposal: isManageSkillsProposal,
+			applyInTransaction: (p, ctx, _env, owner, _input, db) =>
+				applyManageSkillsProposal(p as ManageSkillsProposal, ctx, owner, db),
+			describe: (p) =>
+				isManageSkillsProposal(p) ? describeManageSkillsProposal(p) : MANAGE_SKILLS_ACTION_KEY,
 		},
 		{
 			// An agent-authored ask. Unlike the builder families there is no held

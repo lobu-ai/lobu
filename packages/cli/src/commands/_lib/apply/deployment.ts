@@ -15,7 +15,7 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deepRedactSecrets, REDACTED_SENTINEL } from "@lobu/core";
-import type { DesiredState } from "./desired-state.js";
+import type { DesiredSkill, DesiredState } from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
 import {
   canonical,
@@ -127,6 +127,8 @@ export interface DeploymentManifest {
     automations: unknown[];
     /** The navigation document this config last applied (or found equal). */
     navigation?: NavigationBaseline;
+    /** The library skills as this config left them (its agents only). */
+    skills?: DesiredSkill[];
   };
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
@@ -146,6 +148,7 @@ export interface BaselineRecord {
     relationshipTypes: unknown[];
     automations: unknown[];
     navigation?: NavigationBaseline;
+    skills?: DesiredSkill[];
   };
   owned: string[];
   /** Connector key → version from the deployment's post-apply pins. */
@@ -183,6 +186,9 @@ export function loadBaselineFromManifest(
       automations: attribution.automations,
       ...(navigation && typeof navigation === "object" && "config" in navigation
         ? { navigation: { config: navigation.config } }
+        : {}),
+      ...(Array.isArray(attribution.skills)
+        ? { skills: attribution.skills }
         : {}),
     },
     owned: manifest.owned,
@@ -351,6 +357,10 @@ export function buildAttributionAndOwned(
       // (a write, or already equal); the next apply compares against this.
       ...(remote.navigation !== undefined && state.navigation !== undefined
         ? { navigation: { config: state.navigation } }
+        : {}),
+      // Likewise the library skills this config declares, as it declares them.
+      ...(remote.skills !== undefined && state.skills !== undefined
+        ? { skills: state.skills }
         : {}),
     },
     owned,

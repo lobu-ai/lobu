@@ -981,8 +981,8 @@ function generateProject(
   }
 
   // The workspace skill library exports as skills/<name>/SKILL.md so the bodies
-  // live in the project. Apply cannot write the library yet, so the config
-  // references none of them; Automations keep naming skills directly.
+  // live in the project. The config references none of them: who a skill
+  // applies to stays in the workspace, and Automations keep naming skills.
   if ("error" in state.skillLibrary) {
     warnings.push(
       `Could not read the workspace skill library (${state.skillLibrary.error}) — skills were not exported.`
@@ -995,7 +995,7 @@ function generateProject(
       });
     }
     warnings.push(
-      `Exported ${state.skillLibrary.skills.length} workspace skill(s) to skills/ for reference. lobu apply does not write the skill library yet, so lobu.config.ts does not reference them; who each skill applies to and whether it is enabled stay in the workspace (see \`lobu skills list\`).`
+      `Exported ${state.skillLibrary.skills.length} workspace skill(s) to skills/ for reference. lobu.config.ts does not reference them, so who each skill applies to and whether it is enabled stay in the workspace (see \`lobu skills list\`); add one to an agent's skills with skillFromFile to manage it from the config.`
     );
   }
 

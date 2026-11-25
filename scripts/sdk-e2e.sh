@@ -104,7 +104,7 @@ PROJ="$RUN_DIR/proj"; mkdir -p "$PROJ"
 ( cd "$PROJ" && $LOBU init . -y --here --provider gemini >/dev/null 2>&1 )
 rm -rf "$PROJ/package.json" "$PROJ/node_modules" "$PROJ/bun.lock"
 cat > "$PROJ/lobu.config.ts" <<'TS'
-import { connectorFromFile, defineAgent, defineAutomation, defineConfig, defineConnection, defineEntityType, defineRelationshipType, reactionFromFile, secret } from "@lobu/cli/config";
+import { connectorFromFile, defineAgent, defineAutomation, defineConfig, defineConnection, defineEntityType, defineRelationshipType, defineSkill, reactionFromFile, secret } from "@lobu/cli/config";
 import type PulseConnector from "./connectors/pulse.connector.ts";
 import type digestReaction from "./reactions/digest.reaction.ts";
 
@@ -113,11 +113,20 @@ const agent = defineAgent({
   settings: { verboseLogging: false, showToolCalls: false, guardrailsInline: [], nixConfig: { packages: [] } },
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
 });
-// Its skill lives in the workspace skill library, which `lobu apply` cannot
-// write yet; step 4a seeds it once the gateway is up.
+// Apply writes its skill into the workspace skill library, applied to this
+// agent. The body carries a token the turn has to READ off the delivered file
+// to report, so a pass proves the chat producer delivered the library skill to
+// the isolate's filesystem rather than that the prompt merely mentioned it.
 const isolateAgent = defineAgent({
   id: "isolate-smoke", name: "Isolate smoke", dir: "./agents/isolate-smoke",
   providers: [{ id: "mock", model: "mock-model", key: secret("MOCK_API_KEY") }],
+  skills: [
+    defineSkill({
+      name: "isolate-smoke-skill",
+      description: "Isolate smoke skill",
+      content: "# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n",
+    }),
+  ],
 });
 // `company` exercises the declarative rendering config: event_kinds (with a
 // metadataSchema), applied + diffed by lobu apply. (View templates were
@@ -395,38 +404,18 @@ assert.equal(agent.settings.showToolCalls, false);
 JS
 echo "✓ MCP agents.get exposes canonical settings and revision"
 
-# 4a) Seed the isolate agent's skill into the workspace skill library. The
-#     library has no write path yet (`lobu apply` and manage_skills only read
-#     it), so the gate inserts the row the way a backfilled workspace holds it.
-#     The skill body carries a token the turn has to READ off the seeded file to
-#     report, so a pass proves the chat producer delivered the library skill to
-#     the isolate's filesystem rather than that the prompt merely mentioned it.
-if [ -n "${DATABASE_URL:-}" ]; then
-  SEED_DB_URL="$DATABASE_URL"
-else
-  PG_PORT="$(sed -n 4p "$PROJ/.lobu/pgdata/postmaster.pid" 2>/dev/null)"
-  [ -n "$PG_PORT" ] || fail "could not read the embedded Postgres port from postmaster.pid"
-  SEED_DB_URL="postgresql://postgres:postgres@127.0.0.1:$PG_PORT/postgres?sslmode=disable"
-fi
-node - "$WT/packages/server/package.json" "$SEED_DB_URL" "$ORG" <<'JS' || fail "could not seed the isolate agent's library skill"
-const postgres = require("node:module").createRequire(process.argv[2])("postgres");
-const sql = postgres(process.argv[3], { max: 1 });
-(async () => {
-  const [org] = await sql`SELECT id FROM organization WHERE slug = ${process.argv[4]}`;
-  if (!org) throw new Error(`no organization with slug ${process.argv[4]}`);
-  await sql.begin(async (tx) => {
-    await tx`
-      INSERT INTO workspace_skills (id, organization_id, name, description, content)
-      VALUES ('skill_sdk_e2e_isolate', ${org.id}, 'isolate-smoke-skill', 'Isolate smoke skill',
-              ${"# Isolate smoke skill\n\nThe skill token is SKILL-SEED-OK.\n"})`;
-    await tx`
-      INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
-      VALUES ('skill_sdk_e2e_isolate', ${org.id}, 'agent', 'isolate-smoke')`;
-  });
-  await sql.end();
-})().catch(async (err) => { console.error(err); await sql.end(); process.exit(1); });
+# 4a) The isolate agent's config-declared skill reached the workspace library,
+#     applied to that agent.
+SKILLS="$RUN_DIR/skills.json"
+api manage_skills '{"action":"get","name":"isolate-smoke-skill"}' > "$SKILLS" 2>/dev/null \
+  || { cat "$SKILLS" >&2; fail "apply did not create the isolate agent's library skill"; }
+node - "$SKILLS" <<'JS' || { cat "$SKILLS" >&2; fail "the applied library skill is not applied to isolate-smoke"; }
+const assert = require('node:assert/strict');
+const { skill } = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
+assert.ok(skill.content.includes('SKILL-SEED-OK'));
+assert.deepEqual(skill.applies_to, [{ principal_kind: 'agent', principal_id: 'isolate-smoke' }]);
 JS
-echo "✓ seeded the isolate agent's library skill"
+echo "✓ apply created the isolate agent's library skill"
 
 # 4b) Client SDK consumption — drive @lobu/client (the CONSUMPTION SDK) against
 #     the live gateway: create a session, send a message, stream the reply back.
@@ -678,6 +667,9 @@ echo "✓ re-apply is idempotent (no deletes on a stable config)"
 grep -qE "entity-type company" "$REAPPLY" && grep -qiE "eventKinds" "$REAPPLY" \
   && fail "re-apply reported a company eventKinds change on a stable config (diff churn)"
 echo "✓ re-apply did not churn entity-type event_kinds"
+grep -qE "[~+] skill isolate-smoke-skill" "$REAPPLY" \
+  && fail "re-apply rewrote the library skill on a stable config (diff churn)"
+echo "✓ re-apply did not rewrite the library skill"
 
 # The unchanged config must not mint a new Automation revision. Read the real
 # stored version/config before exercising omitted and explicit-clear options.

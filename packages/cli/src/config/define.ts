@@ -1040,9 +1040,10 @@ export interface Agent {
   dir?: string;
   /**
    * Skills declared for this agent — built inline with {@link defineSkill} or
-   * loaded from a `SKILL.md` with {@link skillFromFile}. Skills now live in the
-   * workspace skill library, which `lobu apply` does not write yet: apply
-   * validates these and warns that it skips them.
+   * loaded from a `SKILL.md` with {@link skillFromFile}. `lobu apply` writes
+   * each into the workspace skill library, applied to this agent; agents that
+   * declare the same name must declare the same body. Apply never archives a
+   * library skill: dropping one here only stops applying it to this agent.
    */
   skills?: Skill[];
   providers?: ProviderConfig[];

@@ -2,6 +2,11 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { type AgentSettings, isSystemEntityType } from "@lobu/core";
 import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import type {
+  SkillInput,
+  SkillSubject,
+  WorkspaceSkill,
+} from "@lobu/core/contracts/tools/manage-skills";
+import type {
   InferenceCapabilityBlock,
   InferenceModality,
 } from "../../../config/define.js";
@@ -32,6 +37,7 @@ import type {
   DesiredFeed,
   DesiredOrgProvider,
   DesiredRelationshipType,
+  DesiredSkill,
   DesiredState,
   DesiredView,
 } from "./desired-state.js";
@@ -200,6 +206,20 @@ export interface NavigationDiffRow extends BaseRow {
 }
 
 /**
+ * A workspace library skill the config's agents declare, or one this config
+ * applied before and no longer declares (its agents are then detached; the
+ * skill itself is never archived by apply).
+ */
+export interface SkillDiffRow extends BaseRow {
+  kind: "skill";
+  desired?: DesiredSkill;
+  remote?: WorkspaceSkill;
+  changedFields?: string[];
+  /** The full replacement apply puts; present on create and update. */
+  write?: SkillInput;
+}
+
+/**
  * A blocking drift item: either a field moved remotely or a remote-only
  * definition is not safe to delete. Apply must not converge over it — the
  * whole run blocks and reports this.
@@ -208,7 +228,12 @@ export interface BlockingDriftRow extends BaseRow {
   verb: "drift";
   /** Always true — distinguishes blocking drift from legacy non-blocking drift. */
   blocking: true;
-  kind: "entity-type" | "relationship-type" | "automation" | "navigation";
+  kind:
+    | "entity-type"
+    | "relationship-type"
+    | "automation"
+    | "navigation"
+    | "skill";
   id: string;
   /** The moved field; absent for a whole remote-only definition. */
   field?: string;
@@ -229,6 +254,11 @@ export interface AttributionSnapshot {
   automations: RemoteAutomation[];
   /** The navigation document after this config's last apply. */
   navigation?: { config: NavigationConfig | null };
+  /**
+   * The library skills as this config left them (its agents only). Absent in
+   * a manifest written before apply managed skills: two-way convergence.
+   */
+  skills?: DesiredSkill[];
 }
 
 export interface Baseline {
@@ -265,6 +295,7 @@ export type DiffRow =
   | InferenceProviderDiffRow
   | ViewDiffRow
   | NavigationDiffRow
+  | SkillDiffRow
   | BlockingDriftRow;
 
 export interface DiffPlan {
@@ -2085,6 +2116,184 @@ function diffInferenceProvider(
   };
 }
 
+// ── Workspace skills ───────────────────────────────────────────────────────
+
+const SKILL_FIELDS = ["description", "content", "agents"] as const;
+
+/** The part of a library skill a config owns: body, plus its own agents. */
+export function projectSkill(
+  remote: WorkspaceSkill,
+  configAgents: ReadonlySet<string>
+): DesiredSkill {
+  return {
+    name: remote.name,
+    description: remote.description,
+    content: remote.content,
+    agents: remote.applies_to
+      .flatMap((subject) =>
+        subject.principal_kind === "agent" &&
+        subject.principal_id !== null &&
+        configAgents.has(subject.principal_id)
+          ? [subject.principal_id]
+          : []
+      )
+      .sort(),
+  };
+}
+
+/**
+ * The replacement put for `remote` (or a create): the config's body and its
+ * agents, keeping every subject, flag and provenance the config does not own.
+ */
+function skillWrite(
+  desired: DesiredSkill,
+  remote: WorkspaceSkill | undefined,
+  configAgents: ReadonlySet<string>
+): SkillInput {
+  const kept: SkillSubject[] = (remote?.applies_to ?? []).filter(
+    (subject) =>
+      !(
+        subject.principal_kind === "agent" &&
+        subject.principal_id !== null &&
+        configAgents.has(subject.principal_id)
+      )
+  );
+  return {
+    name: desired.name,
+    description: desired.description,
+    content: desired.content,
+    applies_to: [
+      ...kept,
+      ...desired.agents.map((agent) => ({
+        principal_kind: "agent" as const,
+        principal_id: agent,
+      })),
+    ],
+    ...(remote
+      ? {
+          enabled: remote.enabled,
+          sort_order: remote.sort_order,
+          ...(remote.provenance ? { provenance: remote.provenance } : {}),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Three-way when this config's last apply recorded skills: a field the
+ * library moved since then (or a same-name skill this config never applied)
+ * blocks; a field only the config moved converges. Without that record the
+ * compare is two-way and the config wins.
+ */
+function diffSkill(
+  desired: DesiredSkill,
+  remote: WorkspaceSkill | undefined,
+  applied: DesiredSkill[] | undefined,
+  configAgents: ReadonlySet<string>
+): { row: SkillDiffRow; blocking: BlockingDriftRow[] } {
+  if (!remote) {
+    return {
+      row: {
+        kind: "skill",
+        verb: "create",
+        id: desired.name,
+        desired,
+        write: skillWrite(desired, undefined, configAgents),
+      },
+      blocking: [],
+    };
+  }
+  const current = projectSkill(remote, configAgents);
+  const attribution = applied?.find((skill) => skill.name === desired.name);
+  const triples = SKILL_FIELDS.map((field) => ({
+    field,
+    desired: desired[field],
+    remote: current[field],
+    attribution: applied === undefined ? current[field] : attribution?.[field],
+  }));
+  const { changedFields, blockingFields } = classifyThreeWay(triples);
+  if (blockingFields.length > 0) {
+    return {
+      row: { kind: "skill", verb: "noop", id: desired.name, desired, remote },
+      blocking: blockingFields.map((b) => ({
+        kind: "skill" as const,
+        verb: "drift" as const,
+        blocking: true as const,
+        id: desired.name,
+        field: b.field,
+        remoteChange: b.remoteChange,
+        desiredChange: b.desiredChange,
+      })),
+    };
+  }
+  if (changedFields.length === 0) {
+    return {
+      row: { kind: "skill", verb: "noop", id: desired.name, desired, remote },
+      blocking: [],
+    };
+  }
+  return {
+    row: {
+      kind: "skill",
+      verb: "update",
+      id: desired.name,
+      desired,
+      remote,
+      changedFields,
+      write: skillWrite(desired, remote, configAgents),
+    },
+    blocking: [],
+  };
+}
+
+/**
+ * Library skills the config does not declare. One this config applied and
+ * still finds as it left it loses this config's agents (an update; apply never
+ * archives). Any other that applies to a config agent is reported as drift.
+ */
+function diffUndeclaredSkill(
+  remote: WorkspaceSkill,
+  applied: DesiredSkill[] | undefined,
+  configAgents: ReadonlySet<string>
+): { row?: SkillDiffRow; blocking: BlockingDriftRow[] } {
+  const current = projectSkill(remote, configAgents);
+  if (current.agents.length === 0) return { blocking: [] };
+  const attribution = applied?.find((skill) => skill.name === remote.name);
+  if (!attribution) {
+    return {
+      row: { kind: "skill", verb: "drift", id: remote.name, remote },
+      blocking: [],
+    };
+  }
+  if (!deepEqual(current.agents, attribution.agents)) {
+    return {
+      blocking: [
+        {
+          kind: "skill",
+          verb: "drift",
+          blocking: true,
+          id: remote.name,
+          field: "agents",
+          remoteChange: current.agents,
+          desiredChange: [],
+        },
+      ],
+    };
+  }
+  const detached = { ...current, agents: [] };
+  return {
+    row: {
+      kind: "skill",
+      verb: "update",
+      id: remote.name,
+      remote,
+      changedFields: ["agents"],
+      write: skillWrite(detached, remote, configAgents),
+    },
+    blocking: [],
+  };
+}
+
 // ── Top-level diff ─────────────────────────────────────────────────────────
 
 export interface RemoteSnapshot {
@@ -2105,6 +2314,8 @@ export interface RemoteSnapshot {
   views: RemoteView[];
   /** The stored navigation document; read only when the config manages it. */
   navigation?: { revision: number; config: NavigationConfig | null };
+  /** Unarchived library skills; read only when the run reconciles skills. */
+  skills?: WorkspaceSkill[];
 }
 
 /**
@@ -2120,6 +2331,7 @@ type DesiredStateForDiff = Pick<
   | "providers"
   | "views"
   | "navigation"
+  | "skills"
 >;
 
 interface ComputeDiffOptions {
@@ -2720,6 +2932,61 @@ export function computeDiff(
             ? "a different document (never applied from this config)"
             : "a different document",
       });
+    }
+  }
+
+  // Workspace skills, reconciled with the agents that declare them. Written
+  // before Automations, and an Automation pinning a skill this apply writes
+  // re-saves in the same run (its frozen copy would be outdated otherwise).
+  if (only !== "memory" && desired.skills !== undefined) {
+    const configAgents = new Set(desired.agents.map((a) => a.metadata.agentId));
+    const applied = baseline?.recorded
+      ? baseline.attribution.skills
+      : undefined;
+    const declaredNames = new Set(desired.skills.map((skill) => skill.name));
+    const remoteSkills = remote.skills ?? [];
+    const remoteSkillByName = new Map(remoteSkills.map((s) => [s.name, s]));
+    const written = new Set<string>();
+    const push = (result: {
+      row?: SkillDiffRow;
+      blocking: BlockingDriftRow[];
+    }) => {
+      if (result.row) rows.push(result.row);
+      rows.push(...result.blocking);
+      if (result.row?.write) written.add(result.row.id);
+    };
+    for (const skill of desired.skills) {
+      push(
+        diffSkill(
+          skill,
+          remoteSkillByName.get(skill.name),
+          applied,
+          configAgents
+        )
+      );
+    }
+    for (const skill of remoteSkills) {
+      if (declaredNames.has(skill.name)) continue;
+      push(diffUndeclaredSkill(skill, applied, configAgents));
+    }
+    for (const [i, row] of rows.entries()) {
+      if (row.kind !== "automation") continue;
+      if (row.verb !== "noop" && row.verb !== "update") continue;
+      if (row.versionBoundFields?.includes("skills")) continue;
+      if (!row.desired?.skills?.some((name) => written.has(name))) continue;
+      rows[i] = {
+        ...row,
+        verb: "update",
+        changedFields: [...(row.changedFields ?? []), "skills"],
+        versionBoundFields: [...(row.versionBoundFields ?? []), "skills"],
+      };
+    }
+    for (const skill of desired.skills) {
+      if (remoteSkillByName.has(skill.name)) continue;
+      if (!applied?.some((recorded) => recorded.name === skill.name)) continue;
+      notes.push(
+        `skill "${skill.name}" was applied from this config but is no longer in the library (archived outside it); apply recreates it`
+      );
     }
   }
 

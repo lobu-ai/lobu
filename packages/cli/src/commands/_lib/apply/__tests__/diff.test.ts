@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { defineAgent, defineAutomation, defineConfig } from "@lobu/cli/config";
 import type { AgentSettings } from "@lobu/core";
+import type { WorkspaceSkill } from "@lobu/core/contracts/tools/manage-skills";
 import chalk from "chalk";
 import {
   type DesiredAgent,
@@ -2315,5 +2316,240 @@ describe("apply diff — prune", () => {
     expect(
       renderSummary(computeDiff(desiredKeepingLead(), emptyRemote()))
     ).not.toContain("delete");
+  });
+});
+
+describe("apply diff — workspace skills", () => {
+  const OPS = {
+    name: "ops",
+    description: "Run ops.",
+    content: "Run the ops playbook.",
+    agents: ["triage"],
+  };
+  const librarySkill = (
+    overrides: Partial<WorkspaceSkill> = {}
+  ): WorkspaceSkill => ({
+    id: "skill_ops",
+    name: "ops",
+    description: "Run ops.",
+    content: "Run the ops playbook.",
+    applies_to: [{ principal_kind: "agent", principal_id: "triage" }],
+    enabled: true,
+    sort_order: 0,
+    revision: 3,
+    archived: false,
+    ...overrides,
+  });
+  const stateWith = (
+    skills: DesiredState["skills"],
+    agents = ["triage", "intake"]
+  ) =>
+    buildState(
+      agents.map((id) => buildDesiredAgent(id)),
+      { skills }
+    );
+  const remoteWith = (skills: WorkspaceSkill[]): RemoteSnapshot => ({
+    ...emptyRemote(),
+    skills,
+  });
+  const recorded = (skills: DesiredState["skills"]): Baseline => ({
+    recorded: true,
+    attribution: {
+      entityTypes: [],
+      relationshipTypes: [],
+      automations: [],
+      ...(skills ? { skills } : {}),
+    },
+    owned: new Set(),
+  });
+  const skillRows = (plan: DiffPlan) =>
+    plan.rows.filter((row) => row.kind === "skill");
+
+  test("creates a declared skill applied to exactly its declaring agents", () => {
+    const [row] = skillRows(computeDiff(stateWith([OPS]), remoteWith([])));
+    expect(row).toMatchObject({
+      verb: "create",
+      id: "ops",
+      write: {
+        name: "ops",
+        description: "Run ops.",
+        content: "Run the ops playbook.",
+        applies_to: [{ principal_kind: "agent", principal_id: "triage" }],
+      },
+    });
+  });
+
+  test("is a noop when the library already holds the declared skill", () => {
+    const plan = computeDiff(stateWith([OPS]), remoteWith([librarySkill()]), {
+      baseline: recorded([OPS]),
+    });
+    expect(skillRows(plan).map((row) => row.verb)).toEqual(["noop"]);
+  });
+
+  test("an edit keeps subjects, flags and provenance the config does not own", () => {
+    const remote = librarySkill({
+      content: "Old playbook.",
+      applies_to: [
+        { principal_kind: null },
+        { principal_kind: "agent", principal_id: "intake" },
+        { principal_kind: "agent", principal_id: "someone-else" },
+      ],
+      enabled: false,
+      sort_order: 4,
+      provenance: "bundled/lobu",
+    });
+    const [row] = skillRows(
+      computeDiff(stateWith([OPS]), remoteWith([remote]))
+    );
+    expect(row?.verb).toBe("update");
+    if (row?.kind !== "skill") throw new Error("expected a skill row");
+    expect(row.changedFields).toEqual(["content", "agents"]);
+    expect(row.write).toEqual({
+      name: "ops",
+      description: "Run ops.",
+      content: "Run the ops playbook.",
+      // `intake` is a config agent that no longer declares ops: detached.
+      applies_to: [
+        { principal_kind: null },
+        { principal_kind: "agent", principal_id: "someone-else" },
+        { principal_kind: "agent", principal_id: "triage" },
+      ],
+      enabled: false,
+      sort_order: 4,
+      provenance: "bundled/lobu",
+    });
+  });
+
+  test("blocks when the library moved a field this config last applied", () => {
+    const plan = computeDiff(
+      stateWith([OPS]),
+      remoteWith([librarySkill({ content: "Edited in the app." })]),
+      { baseline: recorded([OPS]) }
+    );
+    expect(plan.rows).toContainEqual(
+      expect.objectContaining({
+        kind: "skill",
+        verb: "drift",
+        blocking: true,
+        id: "ops",
+        field: "content",
+      })
+    );
+    expect(skillRows(plan).some((row) => row.verb === "update")).toBe(false);
+  });
+
+  test("applies a config edit while the library is still as this config left it", () => {
+    const plan = computeDiff(
+      stateWith([{ ...OPS, content: "New playbook." }]),
+      remoteWith([librarySkill()]),
+      { baseline: recorded([OPS]) }
+    );
+    const [row] = skillRows(plan);
+    expect(row).toMatchObject({ verb: "update", changedFields: ["content"] });
+  });
+
+  test("a same-name skill this config never applied blocks instead of being overwritten", () => {
+    const plan = computeDiff(
+      stateWith([OPS]),
+      remoteWith([librarySkill({ content: "Someone else's ops." })]),
+      { baseline: recorded([]) }
+    );
+    expect(
+      plan.rows.some(
+        (row) => row.kind === "skill" && "blocking" in row && row.blocking
+      )
+    ).toBe(true);
+  });
+
+  test("an undeclared skill this config applied is detached from its agents, never archived", () => {
+    const remote = librarySkill({
+      applies_to: [
+        { principal_kind: "agent", principal_id: "triage" },
+        { principal_kind: "agent", principal_id: "someone-else" },
+      ],
+    });
+    const [row] = skillRows(
+      computeDiff(stateWith([]), remoteWith([remote]), {
+        baseline: recorded([OPS]),
+      })
+    );
+    expect(row).toMatchObject({ verb: "update", changedFields: ["agents"] });
+    if (row?.kind !== "skill") throw new Error("expected a skill row");
+    expect(row.write?.applies_to).toEqual([
+      { principal_kind: "agent", principal_id: "someone-else" },
+    ]);
+  });
+
+  test("an undeclared skill this config never applied is reported, not touched", () => {
+    const plan = computeDiff(stateWith([]), remoteWith([librarySkill()]), {
+      baseline: recorded([]),
+    });
+    expect(skillRows(plan)).toEqual([
+      expect.objectContaining({ verb: "drift", id: "ops" }),
+    ]);
+    expect(plan.rows.some((row) => "blocking" in row && row.blocking)).toBe(
+      false
+    );
+  });
+
+  test("a skill write re-saves the Automation that pins it in the same run", () => {
+    const agent = defineAgent({ id: "triage" });
+    const desired = mapProjectToDesiredState(
+      defineConfig({
+        agents: [agent],
+        automations: [
+          defineAutomation({
+            agent,
+            slug: "digest-run",
+            skills: ["ops"],
+            triggers: [{ kind: "schedule", cron: "0 9 * * 1" }],
+          }),
+        ],
+      })
+    );
+    desired.skills = [{ ...OPS, content: "New playbook." }];
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "triage" }],
+      agentSettings: new Map([["triage", null]]),
+      automations: [
+        {
+          slug: "digest-run",
+          managed_agent_id: "triage",
+          prompt: "",
+          skills: [
+            {
+              name: "ops",
+              content: "Run the ops playbook.",
+              missing: false,
+              outdated: false,
+            },
+          ],
+          triggers: [
+            {
+              kind: "schedule",
+              cron: "0 9 * * 1",
+              timezone: null,
+              execution: "window",
+              active_run: "coalesce",
+              skip_if_unchanged: true,
+            },
+          ],
+        },
+      ],
+      skills: [librarySkill()],
+    };
+    const before = computeDiff({ ...desired, skills: [OPS] }, remote).rows.find(
+      (row) => row.kind === "automation"
+    );
+    expect(before?.verb).toBe("noop");
+
+    const row = computeDiff(desired, remote).rows.find(
+      (candidate) => candidate.kind === "automation"
+    );
+    expect(row).toMatchObject({
+      verb: "update",
+      versionBoundFields: ["skills"],
+    });
   });
 });

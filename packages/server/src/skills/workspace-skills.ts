@@ -1,10 +1,12 @@
 /**
- * Reads of the workspace skill library (`workspace_skills` +
- * `workspace_skill_subjects`). Every reader goes through here: the chat
- * producer's per-principal resolution, the Automation save-time freeze, and
- * `manage_skills` list/get. Library writes arrive with P3b.
+ * The workspace skill library (`workspace_skills` +
+ * `workspace_skill_subjects`). Every reader and writer goes through here: the
+ * chat producer's per-principal resolution, the Automation save-time freeze,
+ * and `manage_skills` list/get/put/archive/install_from_catalog.
  */
-import type { SkillSubject, WorkspaceSkill } from "@lobu/core/contracts/tools/manage-skills";
+import { randomBytes } from "node:crypto";
+import { isLibrarySkillName, LIBRARY_SKILL_NAME_MAX_CHARS } from "@lobu/core/agent-tooling";
+import type { SkillInput, SkillSubject, WorkspaceSkill } from "@lobu/core/contracts/tools/manage-skills";
 import type { DbClient } from "../db/client";
 import { pgTextArray } from "../db/client";
 import type { ActingPrincipal } from "../authz/entity-policy";
@@ -319,4 +321,224 @@ export async function getWorkspaceSkill(
 		);
 	}
 	return skill;
+}
+
+// ============================================
+// manage_skills writes
+// ============================================
+
+/** A skill's writable fields with every default applied. */
+export interface SkillBody {
+	name: string;
+	description: string;
+	content: string;
+	provenance: string | null;
+	applies_to: SkillSubject[];
+	enabled: boolean;
+	sort_order: number;
+}
+
+/**
+ * One library write, validated and ready to apply: a create (no id, revision
+ * 0), a full replace of skill `id` at `expected_revision`, or an archive.
+ */
+export type SkillWrite =
+	| { op: "create"; id: null; expected_revision: 0; skill: SkillBody }
+	| { op: "update"; id: string; expected_revision: number; skill: SkillBody }
+	| { op: "archive"; id: string; expected_revision: number; skill: null };
+
+const EVERYONE: SkillSubject[] = [{ principal_kind: null }];
+
+/**
+ * Apply defaults and the rules the input schema cannot express: the library
+ * name grammar, non-blank text, agent-only subjects (app subjects arrive with
+ * the MCP Skills extension), and duplicate subjects folded. 422 on bad input.
+ */
+export function normalizeSkillInput(input: SkillInput): SkillBody {
+	if (!isLibrarySkillName(input.name)) {
+		throw new ToolUserError(
+			`Skill name "${input.name}" is invalid: use lowercase letters, digits and single inner hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`,
+			422,
+		);
+	}
+	const description = input.description.trim();
+	if (!description) throw new ToolUserError("Skill description must not be blank.", 422);
+	if (!input.content.trim()) throw new ToolUserError("Skill content must not be blank.", 422);
+	return {
+		name: input.name,
+		description,
+		content: input.content,
+		provenance: input.provenance ?? null,
+		applies_to: normalizeSkillSubjects(input.applies_to ?? EVERYONE),
+		enabled: input.enabled ?? true,
+		sort_order: input.sort_order ?? 0,
+	};
+}
+
+/** Reject app subjects and fold duplicates, keeping the caller's order. */
+function normalizeSkillSubjects(subjects: readonly SkillSubject[]): SkillSubject[] {
+	const seen = new Set<string>();
+	const out: SkillSubject[] = [];
+	for (const subject of subjects) {
+		if (subject.principal_kind === "app") {
+			throw new ToolUserError("Skills apply to everyone or to agents; app subjects are not accepted yet.", 422);
+		}
+		const key = subject.principal_kind === null ? "" : `agent:${subject.principal_id ?? ""}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(subject);
+	}
+	return out;
+}
+
+/** 422 when a subject names an agent this workspace does not have. */
+async function assertSubjectAgentsExist(sql: DbClient, organizationId: string, subjects: readonly SkillSubject[]): Promise<void> {
+	const ids = subjects.flatMap((subject) =>
+		subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
+	);
+	if (ids.length === 0) return;
+	const rows = await sql<{ id: string }>`
+		SELECT id FROM agents
+		WHERE organization_id = ${organizationId} AND id = ANY(${pgTextArray(ids)}::text[])
+	`;
+	const found = new Set(rows.map((row) => row.id));
+	const missing = ids.filter((id) => !found.has(id));
+	if (missing.length > 0) {
+		throw new ToolUserError(`applies_to names agent(s) not in this workspace: ${missing.join(", ")}`, 422);
+	}
+}
+
+/**
+ * Check a write against the library's current state and return the skill it
+ * replaces (null for a create): 404 for a missing or foreign id, 409 for an
+ * archived target, a stale `expected_revision` or a taken name, 422 for a
+ * rename. `lock` takes the target row's write lock, for the applying
+ * transaction; the approval queue checks without it.
+ */
+export async function checkSkillWrite(
+	sql: DbClient,
+	organizationId: string,
+	write: SkillWrite,
+	options: { lock: boolean },
+): Promise<WorkspaceSkill | null> {
+	if (write.skill) await assertSubjectAgentsExist(sql, organizationId, write.skill.applies_to);
+	if (write.op === "create") {
+		const [taken] = await sql<{ id: string }>`
+			SELECT id FROM workspace_skills
+			WHERE organization_id = ${organizationId} AND name = ${write.skill.name} AND archived_at IS NULL
+		`;
+		if (taken) throw new ToolUserError(`A skill named "${write.skill.name}" already exists (id ${taken.id}).`, 409);
+		return null;
+	}
+	const rows = options.lock
+		? await sql<SkillRow>`
+			SELECT id, name, description, content, provenance, enabled, sort_order, revision, archived_at
+			FROM workspace_skills
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+			FOR UPDATE
+		`
+		: await sql<SkillRow>`
+			SELECT id, name, description, content, provenance, enabled, sort_order, revision, archived_at
+			FROM workspace_skills
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+		`;
+	const [current] = await withSubjects(sql, organizationId, rows);
+	if (!current) throw new ToolUserError(`Skill "${write.id}" not found`, 404);
+	if (current.archived) throw new ToolUserError(`Skill "${write.id}" is archived.`, 409);
+	if (current.revision !== write.expected_revision) {
+		throw new ToolUserError(
+			`Skill "${current.name}" is at revision ${current.revision}, not ${write.expected_revision}; re-read it and retry.`,
+			409,
+		);
+	}
+	if (write.op === "update" && write.skill.name !== current.name) {
+		throw new ToolUserError(
+			`Skill names are fixed: "${current.name}" cannot become "${write.skill.name}". Archive it and create a new skill instead.`,
+			422,
+		);
+	}
+	return current;
+}
+
+function subjectKeys(subjects: readonly SkillSubject[]): string {
+	return subjects
+		.map((subject) => (subject.principal_kind === null ? "*" : `${subject.principal_kind}:${subject.principal_id ?? "*"}`))
+		.sort()
+		.join("\n");
+}
+
+function sameSkillBody(current: WorkspaceSkill, next: SkillBody): boolean {
+	return (
+		current.description === next.description &&
+		current.content === next.content &&
+		(current.provenance ?? null) === next.provenance &&
+		current.enabled === next.enabled &&
+		current.sort_order === next.sort_order &&
+		subjectKeys(current.applies_to) === subjectKeys(next.applies_to)
+	);
+}
+
+async function insertSubjects(sql: DbClient, organizationId: string, skillId: string, subjects: readonly SkillSubject[]): Promise<void> {
+	for (const subject of subjects) {
+		await sql`
+			INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
+			VALUES (${skillId}, ${organizationId}, ${subject.principal_kind},
+			        ${subject.principal_kind === null ? null : subject.principal_id})
+		`;
+	}
+}
+
+/**
+ * Apply a write inside the caller's transaction, re-checking it under the row
+ * lock first. Returns the skill before and after; `changed` is false for a put
+ * that matches the stored skill, which then keeps its revision.
+ */
+export async function applySkillWrite(
+	tx: DbClient,
+	organizationId: string,
+	write: SkillWrite,
+): Promise<{ before: WorkspaceSkill | null; after: WorkspaceSkill; changed: boolean }> {
+	const before = await checkSkillWrite(tx, organizationId, write, { lock: true });
+	if (write.op === "archive") {
+		await tx`
+			UPDATE workspace_skills
+			SET archived_at = now(), revision = revision + 1, updated_at = now()
+			WHERE organization_id = ${organizationId} AND id = ${write.id}
+		`;
+		return { before, after: await getWorkspaceSkill(tx, organizationId, { id: write.id }), changed: true };
+	}
+	const skill = write.skill;
+	if (write.op === "update" && before && sameSkillBody(before, skill)) {
+		return { before, after: before, changed: false };
+	}
+	let id: string;
+	if (write.op === "create") {
+		id = `skill_${randomBytes(16).toString("hex")}`;
+		// A concurrent create can take the name between the check and here; the
+		// partial unique index on unarchived names turns that into no row.
+		const inserted = await tx`
+			INSERT INTO workspace_skills
+			  (id, organization_id, name, description, content, provenance, enabled, sort_order)
+			VALUES (${id}, ${organizationId}, ${skill.name}, ${skill.description}, ${skill.content},
+			        ${skill.provenance}, ${skill.enabled}, ${skill.sort_order})
+			ON CONFLICT DO NOTHING
+			RETURNING id
+		`;
+		if (inserted.length === 0) throw new ToolUserError(`A skill named "${skill.name}" already exists.`, 409);
+	} else {
+		id = write.id;
+		await tx`
+			UPDATE workspace_skills
+			SET description = ${skill.description}, content = ${skill.content}, provenance = ${skill.provenance},
+			    enabled = ${skill.enabled}, sort_order = ${skill.sort_order},
+			    revision = revision + 1, updated_at = now()
+			WHERE organization_id = ${organizationId} AND id = ${id}
+		`;
+		await tx`
+			DELETE FROM workspace_skill_subjects
+			WHERE organization_id = ${organizationId} AND skill_id = ${id}
+		`;
+	}
+	await insertSubjects(tx, organizationId, id, skill.applies_to);
+	return { before, after: await getWorkspaceSkill(tx, organizationId, { id }), changed: true };
 }

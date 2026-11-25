@@ -1196,7 +1196,7 @@ export default async (_ctx, client) => {
 	// skills
 	"skills.manage": {
 		summary: "Raw manage_skills action wrapper. Prefer named methods.",
-		access: "write",
+		access: "admin",
 	},
 	"skills.list": {
 		summary:
@@ -1211,6 +1211,31 @@ export default async (_ctx, client) => {
 		access: "read",
 		signature: "skills.get(input: { id?: string; name?: string }): Promise<{ skill: WorkspaceSkill }>",
 		example: "await client.skills.get({ name: 'release-notes' });",
+	},
+	"skills.put": {
+		summary:
+			"Create a skill (omit id, expected_revision 0) or replace one (its id and current revision; a stale revision is a 409). The whole skill is replaced: omitted applies_to means everyone, enabled true, sort_order 0. Names are fixed once created. An agent principal is held for approval when a skill_config rule asks. Requires admin tier + skill_config create/update.",
+		access: "admin",
+		signature:
+			"skills.put(input: { skill: { name: string; description: string; content: string; provenance?: string; applies_to?: SkillSubject[]; enabled?: boolean; sort_order?: number }; id?: string; expected_revision: number }): Promise<{ skill: WorkspaceSkill } | { status: 'pending_approval'; run_id: number; event_id: number; message: string; proposal: object }>",
+		example:
+			"await client.skills.put({ skill: { name: 'release-notes', description: 'Draft release notes', content: '# Release notes\\n...', applies_to: [{ principal_kind: 'agent', principal_id: 'writer' }] }, expected_revision: 0 });",
+	},
+	"skills.archive": {
+		summary:
+			"Archive a skill at its current revision (a stale revision is a 409). Requires admin tier + skill_config delete.",
+		access: "admin",
+		signature:
+			"skills.archive(input: { id: string; expected_revision: number }): Promise<{ skill: WorkspaceSkill } | { status: 'pending_approval'; run_id: number }>",
+		example: "await client.skills.archive({ id: skill.id, expected_revision: skill.revision });",
+	},
+	"skills.installFromCatalog": {
+		summary:
+			"Add a catalog skill (catalog.listCatalog kinds ['skills']) to the library with provenance = its catalog id. applies_to defaults to everyone. Requires admin tier + skill_config create.",
+		access: "admin",
+		signature:
+			"skills.installFromCatalog(input: { catalog_id: string; applies_to?: SkillSubject[] }): Promise<{ skill: WorkspaceSkill } | { status: 'pending_approval'; run_id: number }>",
+		example: "await client.skills.installFromCatalog({ catalog_id: 'bundled/lobu' });",
 	},
 
 	"views.manage": {
