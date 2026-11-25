@@ -256,33 +256,67 @@ export function unwritableCacheMessage(
   ].join("\n");
 }
 
-async function installDependencies(
-  directory: string,
-  signal?: AbortSignal
-): Promise<void> {
-  const hasBun =
-    spawnSync("bun", ["--version"], { stdio: "ignore" }).status === 0;
+function assertWritableCache(hasBun: boolean): void {
   const cacheDir = packageManagerCacheDir(hasBun);
   const unwritable = cacheDir ? findUnwritableCachePath(cacheDir) : null;
   if (unwritable)
     throw new Error(unwritableCacheMessage(hasBun ? "bun" : "npm", unwritable));
-  if (hasBun)
+}
+
+async function installDependencies(
+  directory: string,
+  signal?: AbortSignal
+): Promise<void> {
+  if (spawnSync("bun", ["--version"], { stdio: "ignore" }).status === 0) {
+    assertWritableCache(true);
     await copyFile(
       join(directory, "dist/dependencies.bun.lock"),
       join(directory, "bun.lock")
     );
-  const command = hasBun
-    ? "bun"
-    : process.platform === "win32"
-      ? "npm.cmd"
-      : "npm";
-  const args = hasBun
-    ? // Bun 1.3's hoisted linker creates empty nested directories for repeated
+    try {
+      // Bun 1.3's hoisted linker creates empty nested directories for repeated
       // file dependencies, shadowing the vendored SDK's package exports. Its
       // isolated linker preserves the complete graph on both 1.3 and 1.4.
-      ["install", "--frozen-lockfile", "--ignore-scripts", "--linker=isolated"]
-    : ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
-  if (!existsSync(join(directory, hasBun ? "bun.lock" : "npm-shrinkwrap.json")))
+      await runInstall(
+        "bun",
+        [
+          "install",
+          "--frozen-lockfile",
+          "--ignore-scripts",
+          "--linker=isolated",
+        ],
+        directory,
+        signal
+      );
+      return;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // The release's bun.lock is frozen by the Bun that published it; an
+      // older Bun on PATH rejects a newer lockfile format. The same release
+      // ships an npm-shrinkwrap.json of the identical graph, and npm ci
+      // replaces whatever node_modules the failed attempt left behind.
+      console.error(
+        `${(error as Error).message}\nInstalling from the release's npm lock instead.`
+      );
+    }
+  }
+  assertWritableCache(false);
+  await runInstall(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+    directory,
+    signal
+  );
+}
+
+async function runInstall(
+  command: string,
+  args: string[],
+  directory: string,
+  signal?: AbortSignal
+): Promise<void> {
+  const lock = command === "bun" ? "bun.lock" : "npm-shrinkwrap.json";
+  if (!existsSync(join(directory, lock)))
     throw new Error("Runtime release is missing its frozen dependency lock");
   await new Promise<void>((done, reject) => {
     const child = spawn(command, args, {

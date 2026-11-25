@@ -259,6 +259,58 @@ describe("atomic runtime installation", () => {
       "20.0.0"
     );
   });
+  test("a Bun that cannot read the release lock installs from the npm lock", async () => {
+    // A Bun older than the one that froze the release rejects its bun.lock
+    // (a newer lockfileVersion). The release also ships npm-shrinkwrap.json.
+    const { options } = await fixture();
+    const bin = await mkdtemp(join(tmpdir(), "lobu-old-bun-"));
+    directories.push(bin);
+    await writeFile(
+      join(bin, "bun"),
+      [
+        "#!/bin/sh",
+        'case "$1" in',
+        "  --version) echo 1.3.0 ;;",
+        `  pm) echo "${join(bin, "cache")}" ;;`,
+        "  install) echo 'error: Unknown lockfile version' >&2; exit 1 ;;",
+        "esac",
+      ].join("\n")
+    );
+    await chmod(join(bin, "bun"), 0o755);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const directory = await ensureComponent(component, {
+        cacheRoot: options.cacheRoot,
+        fetchArtifact: async (descriptor, temporary) => {
+          await options.fetchArtifact(descriptor, temporary);
+          const identity = {
+            name: descriptor.name,
+            version: descriptor.version,
+          };
+          await writeFile(
+            join(temporary, "package.json"),
+            JSON.stringify(identity)
+          );
+          await writeFile(join(temporary, "dist/dependencies.bun.lock"), "{}");
+          await writeFile(
+            join(temporary, "npm-shrinkwrap.json"),
+            JSON.stringify({
+              ...identity,
+              lockfileVersion: 3,
+              requires: true,
+              packages: { "": identity },
+            })
+          );
+        },
+      });
+      expect(
+        JSON.parse(await readFile(join(directory, ".complete.json"), "utf8"))
+      ).toMatchObject({ version: "20.0.0" });
+    } finally {
+      process.env.PATH = path;
+    }
+  });
   test("upgrades keep the previous component intact", async () => {
     const { options } = await fixture();
     const previous = await ensureComponent(component, options);
