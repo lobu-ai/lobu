@@ -90,6 +90,11 @@ interface Store {
   concurrentEdit?: boolean;
   /** Answer writes 403, as the server does for a CLI login. */
   denyWrites?: boolean;
+  /**
+   * Another editor archives each row apply creates and recreates it under
+   * the same name with a new id, right after the create response.
+   */
+  replaceAfterCreate?: boolean;
   latestManifest?: unknown;
   rollbackManifest?: unknown;
 }
@@ -184,7 +189,9 @@ function makeFetch(store: Store) {
       };
       store.guardrails = [
         ...store.guardrails.filter((g) => g.id !== next.id),
-        next,
+        store.replaceAfterCreate && !current
+          ? { ...next, id: `${next.id}_replacement` }
+          : next,
       ];
       return json({ guardrail: next });
     }
@@ -408,6 +415,22 @@ describe("apply workspace guardrails over the wire", () => {
     await runApply(mkProject("[]", { prune: true }), pruned.fetchStub);
     expect(guardrailWrites(pruned.calls)).toEqual([]);
     expect(store.guardrails.map((g) => g.name)).toEqual(["app-made"]);
+  });
+
+  test("owns the id its create returned, never a same-name replacement made right after", async () => {
+    const store: Store = { guardrails: [], replaceAfterCreate: true };
+    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    store.replaceAfterCreate = false;
+    expect(store.guardrails.map((g) => g.id)).toEqual([
+      "gr_no-refunds_replacement",
+    ]);
+
+    const pruned = makeFetch(store);
+    await runApply(mkProject("[]", { prune: true }), pruned.fetchStub);
+    expect(guardrailWrites(pruned.calls)).toEqual([]);
+    expect(store.guardrails.map((g) => g.id)).toEqual([
+      "gr_no-refunds_replacement",
+    ]);
   });
 
   test("blocks archiving a guardrail edited in the app since this config created it", async () => {

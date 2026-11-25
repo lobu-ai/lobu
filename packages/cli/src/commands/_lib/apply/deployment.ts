@@ -251,29 +251,39 @@ export function loadLibraryRecord(
   };
 }
 
+/** The guardrail writes an apply made, from the write responses themselves. */
+export interface GuardrailWriteOutcome {
+  /** Rows this apply created, as each successful create returned them. */
+  created: WorkspaceGuardrail[];
+  /** Ids this apply archived. */
+  archivedIds: string[];
+}
+
 /**
  * The guardrails record a run leaves: each declared guardrail under the id it
  * has in the library, plus the rows an apply created that this config no
  * longer declares and has not archived (only prune archives them, so they
- * stay owned, with the record of how this config left them). A row is
- * `created` when this run created it (`createdNames`) or an earlier record
- * of the same id says so; a row adopted by name never becomes created.
+ * stay owned, with the record of how this config left them).
+ *
+ * Ownership is keyed on id, never on name: a row is `created` only when its
+ * id came back from this run's create (`createdIds`) or an earlier record
+ * marked that id created. A row adopted by name, or a same-name replacement
+ * another editor made, is recorded but never owned.
  */
 export function recordGuardrails(
   desired: DesiredGuardrail[],
   library: WorkspaceGuardrail[],
   previous: RecordedGuardrail[] | undefined,
-  createdNames: ReadonlySet<string> = new Set()
+  createdIds: ReadonlySet<string> = new Set()
 ): RecordedGuardrail[] {
   const byName = new Map(library.map((row) => [row.name, row]));
-  const createdIds = new Set(
-    (previous ?? []).filter((record) => record.created).map((r) => r.id)
-  );
+  const owned = new Set([
+    ...createdIds,
+    ...(previous ?? []).filter((record) => record.created).map((r) => r.id),
+  ]);
   const declared = desired.flatMap((guardrail) => {
     const row = byName.get(guardrail.name);
-    if (!row) return [];
-    const created = createdIds.has(row.id) || createdNames.has(guardrail.name);
-    return [recordGuardrail(row.id, guardrail, created)];
+    return row ? [recordGuardrail(row.id, guardrail, owned.has(row.id))] : [];
   });
   const declaredNames = new Set(desired.map((guardrail) => guardrail.name));
   const libraryIds = new Set(library.map((row) => row.id));

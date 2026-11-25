@@ -26,6 +26,7 @@ import {
   collectGitInfo,
   computeManifestHash,
   type DeploymentSummary,
+  type GuardrailWriteOutcome,
   loadBaselineFromManifest,
   loadLibraryRecord,
   mintApplyId,
@@ -809,7 +810,9 @@ export async function pushProviderApiKeys(
 
 export async function executePlan(
   ctx: ApplyContext,
-  pendingAuth: PendingAuthEntry[]
+  pendingAuth: PendingAuthEntry[],
+  /** Filled as guardrail writes succeed, so a partial failure still reports them. */
+  guardrailOutcome: GuardrailWriteOutcome = { created: [], archivedIds: [] }
 ): Promise<{ connectorVersions: Record<string, string> }> {
   const rowsByKind = <K extends DiffRow["kind"]>(kind: K) =>
     ctx.plan.rows.filter(
@@ -1047,6 +1050,7 @@ export async function executePlan(
     try {
       if (row.verb === "delete" && row.remote) {
         await ctx.client.archiveGuardrail(row.remote.id, row.remote.revision);
+        guardrailOutcome.archivedIds.push(row.remote.id);
         printText(renderProgress("delete", "guardrail", row.id, "(archived)"));
         continue;
       }
@@ -1057,6 +1061,7 @@ export async function executePlan(
           ? { id: row.remote.id, expectedRevision: row.remote.revision }
           : null
       );
+      if (!row.remote) guardrailOutcome.created.push(guardrail);
       printText(
         renderProgress(
           row.verb,
@@ -1825,16 +1830,22 @@ async function applyProject(
    */
   const recordableGuardrails = (
     snapshot: RemoteSnapshot,
-    archivedIds: ReadonlySet<string> = new Set(),
-    createdNames: ReadonlySet<string> = new Set()
+    outcome: GuardrailWriteOutcome = { created: [], archivedIds: [] }
   ): RecordedGuardrail[] | undefined => {
     if (state.guardrails === undefined || snapshot.guardrails === undefined)
       return libraryRecord.guardrails;
+    // The library as this run left it: the pre-apply rows minus those it
+    // archived, plus the rows its creates returned. Never a refetch, which
+    // could show another editor's same-name replacement.
+    const archived = new Set(outcome.archivedIds);
     return recordGuardrails(
       state.guardrails,
-      snapshot.guardrails.filter((row) => !archivedIds.has(row.id)),
+      [
+        ...snapshot.guardrails.filter((row) => !archived.has(row.id)),
+        ...outcome.created,
+      ],
       libraryRecord.guardrails,
-      createdNames
+      new Set(outcome.created.map((row) => row.id))
     );
   };
   /**
@@ -2036,6 +2047,10 @@ async function applyProject(
     plan.counts.create > 0 || plan.counts.update > 0 || plan.counts.delete > 0;
 
   const pendingAuth: PendingAuthEntry[] = [];
+  const guardrailOutcome: GuardrailWriteOutcome = {
+    created: [],
+    archivedIds: [],
+  };
   let applyErr: unknown;
   let connectorVersions: Record<string, string> = {};
   try {
@@ -2046,7 +2061,8 @@ async function applyProject(
       printText(chalk.bold("\nApplying:"));
       const executed = await executePlan(
         { client, state, plan, remote, apiBaseUrl, orgSlug },
-        pendingAuth
+        pendingAuth,
+        guardrailOutcome
       );
       connectorVersions = executed.connectorVersions;
     }
@@ -2086,17 +2102,9 @@ async function applyProject(
         };
     // Post-apply ownership: if this run created definitions, re-fetch remote
     // so owned gets real incarnation ids (pre-apply remote has none for creates).
-    // Guardrails this run archived leave the record (and ownership).
-    guardrailsForRecording = recordableGuardrails(
-      remote,
-      new Set(
-        plan.rows.flatMap((row) =>
-          row.kind === "guardrail" && row.verb === "delete" && row.remote
-            ? [row.remote.id]
-            : []
-        )
-      )
-    );
+    // Guardrails: from the pre-apply snapshot and this run's own write
+    // responses (success or partial failure), so ownership is the created id.
+    guardrailsForRecording = recordableGuardrails(remote, guardrailOutcome);
     if (!applyErr && hasResourceWork && plan.counts.create > 0) {
       try {
         const postRemote = await fetchRemoteSnapshot(
@@ -2107,16 +2115,6 @@ async function applyProject(
         );
         baselineRecordForRecording = recordableBaseline(postRemote);
         skillsForRecording = recordableSkills(postRemote);
-        // Only rows this run created become prune-owned; adopted ones never.
-        guardrailsForRecording = recordableGuardrails(
-          postRemote,
-          new Set(),
-          new Set(
-            plan.rows.flatMap((row) =>
-              row.kind === "guardrail" && row.verb === "create" ? [row.id] : []
-            )
-          )
-        );
         if (!opts.only) {
           pins = {
             ...connectorVersionPins(state, postRemote.connectorDefinitions),
