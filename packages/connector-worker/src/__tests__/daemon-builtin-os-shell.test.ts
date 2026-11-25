@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeRun } from '../daemon/executor.js';
 import { executeDaemonBuiltin, hasDaemonBuiltin } from '../daemon/builtins/index.js';
-import { runShellBuiltin } from '../daemon/builtins/os-shell.js';
+import { SHELL_DETACH_PREFIX, runShellBuiltin } from '../daemon/builtins/os-shell.js';
 
 function processIsLive(pid: number): boolean {
   try {
@@ -624,6 +624,34 @@ describe('daemon-builtin os.shell', () => {
     expect(output.reaped_descendants).toBeUndefined();
     expect(output.process_stage).toBeUndefined();
   });
+
+  // Both failure messages hand callers this recipe for work longer than the
+  // call. It must actually escape the run's cleanup: the call succeeds without
+  // a reaping claim, and the detached work still finishes afterwards. `nohup
+  // cmd &` and a backgrounded `setsid cmd &` both fail one of these.
+  test('the advertised detach recipe outlives the call', async () => {
+    if (process.platform === 'win32') return;
+    const dir = mkdtempSync(join(tmpdir(), 'os-shell-detach-'));
+    const log = join(dir, 'job.log');
+    try {
+      const output = await runShellBuiltin({
+        command: `${SHELL_DETACH_PREFIX} sh -c 'sleep 1; echo done' > ${log} 2>&1 < /dev/null`,
+        cwd: dir,
+        timeout_ms: 10_000,
+      });
+
+      const finished = () => existsSync(log) && readFileSync(log, 'utf8').includes('done');
+      expect(output.success).toBe(true);
+      expect(output.reaped_descendants).toBeUndefined();
+      // The call returned while the work was still running, not after it.
+      expect(finished()).toBe(false);
+      const deadline = Date.now() + 5_000;
+      while (!finished() && Date.now() < deadline) await Bun.sleep(100);
+      expect(finished()).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   // The reap signal is scoped to a run that ended by its own exit, and this
   // pins that scope. A timeout kills the group while the command is still a
