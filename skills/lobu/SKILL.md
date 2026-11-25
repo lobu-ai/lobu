@@ -79,7 +79,7 @@ After the local proof, ask the user whether to keep running locally or deploy to
 - **Lobu** is the agent framework, runtime, deployment layer, and memory surface.
 - Keep framework configuration in `lobu.config.ts` (TypeScript, `defineConfig` from `@lobu/cli/config`).
 - Keep agent identity and instructions in `IDENTITY.md`, `SOUL.md`, and `USER.md`.
-- Reusable capability bundles are skills in the workspace skill library. Read them with `lobu skills list` / `lobu skills show <name>`; `lobu apply` does not write the library yet. `lobu init --from-org` exports local copies to `skills/<name>/SKILL.md` for reference.
+- Reusable capability bundles are skills in the workspace skill library. Read them with `lobu skills list` / `lobu skills show <name>`; `lobu apply` writes an agent's declared skills (`defineSkill` / `skillFromFile`) into it, applied to that agent, and never archives one. `lobu init --from-org` exports local copies to `skills/<name>/SKILL.md` for reference.
 - Use `lobu login` for CLI authentication. Do not use a separate memory login command.
 - Use `lobu connect` for MCP client and skill setup.
 - Use `lobu memory ...` for memory operations, seeding, and direct tool calls.

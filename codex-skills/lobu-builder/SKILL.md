@@ -27,7 +27,7 @@ Do not assume there is only one agent or one platform connection.
 - `SOUL.md`: rules, workflows, guardrails
 - `USER.md`: user or tenant context
 - `lobu.config.ts`: providers, connections, Automation skill names, MCP servers, network allowlist (authored with `define*` from `@lobu/cli/config`)
-- Skills live in the workspace skill library, not in project files; `lobu apply` does not write the library yet
+- Skills live in the workspace skill library; an agent's `skills` in `lobu.config.ts` are written into it by `lobu apply`, applied to that agent
 - `agents/<id>/evals/promptfooconfig.yaml`: promptfoo eval suite (runs via `bunx promptfoo eval` with `@lobu/promptfoo-provider`)
 
 Prefer editing these files directly instead of burying semantics in ad hoc code.
