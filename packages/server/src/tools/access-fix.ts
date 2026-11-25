@@ -93,12 +93,12 @@ export function loginGrantUrl(
   return `${origin}/${encodeURIComponent(workspace)}/agents/connected/${encodeURIComponent(ctx.clientId)}?${query}`;
 }
 
-/** The message with the fix's text form, for clients that only show text. */
 /** The fix on an already-serialized error, when it is one. */
 export function accessFixOf(value: unknown): AccessFix | null {
   return Value.Check(AccessFixSchema, value) ? (value as AccessFix) : null;
 }
 
+/** The message with the fix's text form, for clients that only show text. */
 export function appendAccessFix(message: string, fix: AccessFix | null): string {
   const text = fix ? describeAccessFix(fix) : '';
   if (!text) return message;
@@ -112,9 +112,9 @@ function describeAccessFix(fix: AccessFix): string {
   if (!fix.url) return '';
   switch (fix.action) {
     case 'grant_workspace':
-      return ` To allow this app${where} without reconnecting, open ${fix.url}`;
+      return ` Quicker, without reconnecting: open ${fix.url} to allow this app${where}.`;
     case 'raise_access':
-      return ` To give this app more access${where} without reconnecting, open ${fix.url}`;
+      return ` Quicker, without reconnecting: open ${fix.url} to give this app more access${where}.`;
     case 'edit_rule':
       return ` To change the rule${where}, open ${fix.url}`;
     case 'edit_allowlist':

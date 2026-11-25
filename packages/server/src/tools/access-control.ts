@@ -176,7 +176,7 @@ function baseScopeDenialMessage(input: AccessDenialInput): string {
     const standing = isAdminOrOwnerRole(memberRole)
       ? `As an ${memberRole}${ofWorkspace}, retry`
       : "If you're an owner/admin of the workspace, retry";
-    return `${subject} needs admin access, which ${connectionTo} doesn't have (tokens aren't upgraded on refresh). ${standing} the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.`;
+    return `${subject} needs admin access, which ${connectionTo} doesn't have. ${standing} the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.`;
   }
   const reconnect =
     "disconnect Lobu in this app's connector settings, connect again, and choose";
