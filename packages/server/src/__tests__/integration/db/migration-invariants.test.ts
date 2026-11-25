@@ -219,6 +219,17 @@ describe('migration invariants', () => {
       expect(rows).toHaveLength(0);
     });
 
+    it('agents no longer carry skills or guardrails: the workspace libraries own them', async () => {
+      const sql = getTestDb();
+      const rows = await sql<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agents'
+          AND column_name IN ('skills_config', 'guardrails', 'guardrails_inline')
+      `;
+      expect(rows).toHaveLength(0);
+    });
+
     it('environments.scope + owner_user_id are dropped (contract phase of the #1914 env→provider unification)', async () => {
       const sql = getTestDb();
       const rows = await sql<{ column_name: string }[]>`
