@@ -197,6 +197,7 @@ async function governSkillWrite(args: WriteArgs, ctx: ToolContext): Promise<Mana
     organizationId: ctx.organizationId,
     userId: ctx.userId,
     agentId: ctx.agentId,
+    appId: ctx.appPrincipalId,
     sessionAutomationId: ctx.actingAutomationId ?? null,
   });
   const policyAction = POLICY_ACTION[write.op];

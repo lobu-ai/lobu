@@ -337,13 +337,24 @@ describe("manage_skills", () => {
 			.toMatchObject({ skill: { revision: 1, archived: false } });
 	});
 
-	it("answers 403 to a member and to an agent the write policy denies", async () => {
+	it("answers 403 to a member and to an agent or app the write policy denies", async () => {
 		// The admin tier refuses a member before any policy runs (REST answers 403).
 		const memberWriter = { ...memberCtx, scopes: WRITE_SCOPES };
 		await expect(put(memberWriter, { expected_revision: 0, skill: body("member-made") }))
 			.rejects.toMatchObject({ name: "AccessDeniedError", code: "PERMISSION" });
 		await expect(put(refusedAgentCtx, { expected_revision: 0, skill: body("refused-made") }))
+			.rejects.toMatchObject({ httpStatus: 403 });		// An unbound OAuth/PAT client is an app principal: its own write rule applies.
+		const appWriter: AuthContext = { ...ownerCtx, tokenType: "pat", appPrincipalId: "pat:skills-writer" };
+		await upsertEntityApprovalPolicy(orgId, {
+			resourceClass: "skill_config",
+			principalKind: "app",
+			principalId: "pat:skills-writer",
+			effects: { create: "deny" },
+		});
+		await expect(put(appWriter, { expected_revision: 0, skill: body("app-made") }))
 			.rejects.toMatchObject({ httpStatus: 403 });
+		await expect(put({ ...appWriter, appPrincipalId: "pat:other-writer" }, { expected_revision: 0, skill: body("other-app-made") }))
+			.resolves.toMatchObject({ skill: { name: "other-app-made" } });
 	});
 
 	it("queues an agent write for approval and applies it once a human approves", async () => {
