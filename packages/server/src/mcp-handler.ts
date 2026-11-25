@@ -58,7 +58,8 @@ import {
 import { MCP_SESSION_MAX_AGE_MS, McpSessionStore, type PersistedMcpSession } from './mcp-session-store';
 import { LOBU_SKILL_MARKDOWN } from './skills/lobu-skill.generated';
 import { mcpImagesForResourceLinks, readMcpAttachmentResource } from './mcp-media-resources';
-import { AccessDeniedError, isAdminOrOwnerRole, workspaceScopeDenialMessage } from './tools/access-control';
+import { AccessDeniedError, isAdminOrOwnerRole, scopeRemedy, workspaceScopeDenialMessage } from './tools/access-control';
+import { accessRemedyOf, appendAccessFix, buildAccessFix, loginGrantUrl, withAccessRemedy } from './tools/access-fix';
 import {
   type AuthContext,
   executeTool,
@@ -593,7 +594,10 @@ function createServerForContext(
         throw new Error('Authentication required to read views.');
       }
       if (!hasRequiredMcpScope('read', authCtx.scopes)) {
-        throw new AccessDeniedError(await workspaceScopeDenialMessage(authCtx, 'Reading views', 'read'));
+        throw withAccessRemedy(
+          new AccessDeniedError(await workspaceScopeDenialMessage(authCtx, 'Reading views', 'read')),
+          scopeRemedy(authCtx, 'read')
+        );
       }
       const viewOrganization = viewOrganizationFromResourceUri(uri);
       // An account session has no workspace of its own: the frame names the
@@ -845,7 +849,7 @@ function createServerForContext(
       // carries a code, so the client/agent gets a stable code + retryability +
       // per-call correlation id alongside the human message.
       const code = error?.code as string | undefined;
-      const structuredError =
+      const taxonomy =
         typeof code === 'string' && typeof error?.retryable === 'boolean'
           ? {
               ...(error instanceof ToolUserError ? (error.details ?? {}) : {}),
@@ -854,6 +858,13 @@ function createServerForContext(
               ...(error.callId ? { call_id: error.callId as string } : {}),
             }
           : undefined;
+      // A denial that one click by the human (or their admin) would lift
+      // carries that fix, structured for the agent and in the text for clients
+      // that only show the message.
+      const remedy = accessRemedyOf(error);
+      const fix = remedy ? await buildAccessFix(remedy, authCtx) : null;
+      const structuredError =
+        taxonomy || fix ? { ...(taxonomy ?? {}), ...(fix ? { fix } : {}) } : undefined;
       const errorMeta = scopeChallenge
         ? { 'mcp/www_authenticate': [scopeChallenge] }
         : undefined;
@@ -861,7 +872,7 @@ function createServerForContext(
         content: [
           {
             type: 'text' as const,
-            text: error.message ?? 'Tool execution failed',
+            text: appendAccessFix(error.message ?? 'Tool execution failed', fix),
           },
         ],
         isError: true,
@@ -1109,9 +1120,23 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
   if (workspaces.length === 0) {
     return [firstRun, base].filter(Boolean).join('\n\n') || undefined;
   }
+  // What this login may do in each workspace: its consented level, capped by
+  // the person's role there. Where the role allows more, the human can raise
+  // it from the login's page instead of reconnecting.
+  const consented = (['admin', 'write', 'read'] as const).find((level) =>
+    hasRequiredMcpScope(level, authCtx.scopes)
+  );
+  const raises: string[] = [];
   const labels = workspaces.map((workspace) => {
+    const roleCeiling = isAdminOrOwnerRole(workspace.role) ? 'admin' : 'write';
+    const level = consented === 'admin' && roleCeiling === 'write' ? 'write' : consented;
+    if (level !== roleCeiling) {
+      const url = loginGrantUrl(workspace.slug, roleCeiling, authCtx);
+      if (url) raises.push(`${roleCeiling} in ${workspace.slug}: ${url}`);
+    }
     const qualifiers = [
       workspace.personal ? 'personal' : null,
+      level ?? null,
     ].filter((value): value is string => value !== null);
     return qualifiers.length > 0
       ? `${workspace.slug} (${qualifiers.join(', ')})`
@@ -1122,7 +1147,18 @@ async function buildSessionInstructions(authCtx: AuthContext): Promise<string | 
     (authCtx.directSearchFederation
       ? 'Unqualified search searches all granted workspaces. Select each SDK target with await client.org(workspace). Pass org_slug to save_memory and query_sql, and organization to get_approval. Never infer a target from entity IDs or a previous call.'
       : 'This connection operates in its explicitly bound workspace.');
-  return [firstRun, base, grantLine].filter(Boolean).join('\n\n');
+  const accessLine =
+    authCtx.tokenType === 'oauth'
+      ? [
+          raises.length > 0
+            ? `Your human can raise this app's access without reconnecting (${raises.join('; ')}).`
+            : null,
+          'When an error carries fix.url, give that link to your human.',
+        ]
+          .filter(Boolean)
+          .join(' ')
+      : null;
+  return [firstRun, base, grantLine, accessLine].filter(Boolean).join('\n\n');
 }
 
 /** Agent/Automation policy is workspace-bound; it must never inherit a user's
@@ -1749,22 +1785,11 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
           clearSession();
           return buildJsonRpcErrorResponse('Session client changed. Re-initialize.', null, 400);
         }
-        // Grant stability only applies to an already-authenticated session; an
-        // anonymous session upgrading in place legitimately gains its first
-        // workspace snapshot below.
-        const oldGrantIds = requestAuthCtx.grantedOrganizationIds ?? [];
-        const freshGrantIds = freshCtx.grantedOrganizationIds ?? [];
-        if (
-          oldGrantIds.length !== freshGrantIds.length ||
-          oldGrantIds.some((id, index) => id !== freshGrantIds[index])
-        ) {
-          clearSession();
-          return buildJsonRpcErrorResponse(
-            'Session workspace access changed. Re-initialize.',
-            null,
-            400
-          );
-        }
+        // Workspace grants are not session identity. Each request acts with its
+        // own token's grant (assigned below), so a narrowed grant can't reach a
+        // removed workspace. Comparing it to the session would end the session
+        // when an older request, whose token was read before the login was
+        // widened, finishes after a newer one. Revocation closes sessions itself.
       }
 
       requestAuthCtx.isAuthenticated = true;

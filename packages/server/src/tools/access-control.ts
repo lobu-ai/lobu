@@ -7,6 +7,7 @@
  */
 
 import type { ToolErrorCode } from '@lobu/core';
+import { type AccessRemedy, withAccessRemedy } from './access-fix';
 import { hasRequiredMcpScope, type ToolAccessLevel } from '../auth/tool-access';
 import { AUTOMATION_RUN_SOURCE } from '../gateway/automation-run-session';
 import { ToolUserError } from '../utils/errors';
@@ -175,7 +176,7 @@ function baseScopeDenialMessage(input: AccessDenialInput): string {
     const standing = isAdminOrOwnerRole(memberRole)
       ? `As an ${memberRole}${ofWorkspace}, retry`
       : "If you're an owner/admin of the workspace, retry";
-    return `${subject} needs admin access, which ${connectionTo} doesn't have (tokens aren't upgraded on refresh). ${standing} the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.`;
+    return `${subject} needs admin access, which ${connectionTo} doesn't have. ${standing} the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.`;
   }
   const reconnect =
     "disconnect Lobu in this app's connector settings, connect again, and choose";
@@ -303,8 +304,9 @@ export async function enforceRoleScopeAccess(
   alternative?: string | null
 ): Promise<void> {
   if (requiredAccess === 'admin' && !isAdminOrOwnerRole(ctx.memberRole)) {
-    throw new AccessDeniedError(
-      await workspaceScopeDenialMessage(ctx, subject, 'admin', alternative)
+    throw withAccessRemedy(
+      new AccessDeniedError(await workspaceScopeDenialMessage(ctx, subject, 'admin', alternative)),
+      scopeRemedy(ctx, 'admin')
     );
   }
 
@@ -314,7 +316,25 @@ export async function enforceRoleScopeAccess(
 
   if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
     const message = await workspaceScopeDenialMessage(ctx, subject, requiredAccess, alternative);
-    if (requiredAccess === 'admin') throw new McpScopeRequiredError(message, 'mcp:admin');
-    throw new AccessDeniedError(message);
+    const error =
+      requiredAccess === 'admin'
+        ? new McpScopeRequiredError(message, 'mcp:admin')
+        : new AccessDeniedError(message);
+    throw withAccessRemedy(error, scopeRemedy(ctx, requiredAccess));
   }
+}
+
+/**
+ * What lifts a workspace-bound role or scope denial: an admin action for a
+ * non-admin goes to a workspace admin; anything the caller's role allows is
+ * one click on this login's page in that workspace.
+ */
+export function scopeRemedy(
+  ctx: { organizationId: string | null; memberRole: string | null | undefined },
+  requiredAccess: ToolAccessLevel
+): AccessRemedy {
+  if (requiredAccess === 'admin' && !isAdminOrOwnerRole(ctx.memberRole)) {
+    return { kind: 'ask_admin', organizationId: ctx.organizationId };
+  }
+  return { kind: 'raise_access', organizationId: ctx.organizationId, level: requiredAccess };
 }

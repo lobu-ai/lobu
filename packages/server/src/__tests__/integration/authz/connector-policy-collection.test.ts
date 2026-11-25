@@ -503,12 +503,22 @@ describe("caller action allowlists", () => {
     const [ledger] = await sql`SELECT metadata FROM events WHERE run_id = ${logged.run_id}
       AND organization_id = ${org.id} AND semantic_type = 'operation' AND superseded_by IS NULL`;
     expect(ledger?.metadata).toMatchObject({ policy: { effect: "log" } });
-    // The token's own list refuses an unlisted write and says so; a workspace rule still refuses a listed one.
+    // The token's own list refuses an unlisted write and says so, with a link
+    // for the owner to the Policies page narrowed to this app (a connection
+    // filter would hide the list, which is not a connector rule);
+    // a workspace rule still refuses a listed one.
     const caller = { kind: "app", id: `pat:${pat.id}`, label: "Test PAT" };
-    expect(await (await execute("outside")).json()).toMatchObject({
-      error: "'outside' isn't on this caller's allowed actions list.",
+    const outside = await (await execute("outside")).json();
+    expect(outside).toMatchObject({
       policy: { reason: "allowlist", rules: [], principal: caller },
+      fix: { action: "edit_allowlist", who: "you", workspace: org.slug },
     });
+    const allowlistUrl = new URL(outside.fix.url);
+    expect(allowlistUrl.pathname).toBe(`/${org.slug}/settings/policies`);
+    expect(Object.fromEntries(allowlistUrl.searchParams)).toEqual({ app: caller.id });
+    expect(outside.error).toBe(
+      `'outside' isn't on this caller's allowed actions list. To change this app's allowed actions in ${org.slug}, open ${outside.fix.url}`,
+    );
     expect(await (await execute("restricted")).json()).toMatchObject({
       error: expect.stringContaining("Policy blocks 'restricted'"),
       policy: { reason: "guardrail", principal: caller },

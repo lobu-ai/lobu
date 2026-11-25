@@ -17,8 +17,10 @@ import {
   canReadWorkspaceIdentity,
   isInProcessSystemCall,
   isPublicReader,
+  scopeRemedy,
   workspaceScopeDenialMessage,
 } from '../../tools/access-control';
+import { withAccessRemedy } from '../../tools/access-fix';
 import { createDbClientFromEnv, type DbClient, getDb, pgBigintArray } from '../../db/client';
 import { AUTOMATION_RUN_SOURCE } from '../../gateway/automation-run-session';
 import { ArtifactStore } from '../../gateway/files/artifact-store';
@@ -229,7 +231,10 @@ async function getContentImpl(
   // not-applicable sentinel otherwise.
   const isMcpTokenCaller = ctx.tokenType === 'oauth' || ctx.tokenType === 'pat';
   if (isMcpTokenCaller && !hasRequiredMcpScope('read', ctx.scopes)) {
-    throw new ToolUserError(await workspaceScopeDenialMessage(ctx, 'read_knowledge', 'read'), 403);
+    throw withAccessRemedy(
+      new ToolUserError(await workspaceScopeDenialMessage(ctx, 'read_knowledge', 'read'), 403),
+      scopeRemedy(ctx, 'read')
+    );
   }
 
   // Workspace-identity audit events record member/invitation lifecycle

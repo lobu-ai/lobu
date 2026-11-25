@@ -12,7 +12,7 @@ describe("scopeDenialMessage", () => {
 				workspace: "example-org",
 			}),
 		).toBe(
-			"manage_agents.delete needs admin access, which this connection to example-org doesn't have (tokens aren't upgraded on refresh). As an owner of example-org, retry the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.",
+			"manage_agents.delete needs admin access, which this connection to example-org doesn't have. As an owner of example-org, retry the action so this app asks you to grant more access; if it doesn't, disconnect and reconnect Lobu in this app's connector settings and choose 'Administer workspaces' if the consent screen offers it. If it isn't offered, this app doesn't request admin access; do this from the Lobu web app or CLI instead.",
 		);
 	});
 

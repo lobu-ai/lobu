@@ -10,6 +10,7 @@ import { captureEffect } from "../gateway/routes/internal/capture-mode";
 import { buildMcpBearerChallenge } from "../auth/oauth/resource-indicator";
 import { DISCOVERY_SCOPES } from "../auth/oauth/scopes";
 import { isAdminOrOwnerRole } from "./access-control";
+import { AccessFixSchema, accessFixOf, appendAccessFix, buildAccessFix } from "./access-fix";
 import type { Env } from "../index";
 import { buildClientSDK, type SDKMode } from "../sandbox/client-sdk";
 import {
@@ -170,6 +171,7 @@ export const SdkScriptResultSchema = Type.Object({
               "Structured result of the failed SDK call when an uncaught ClientSdkActionError ended the script (the same value a catch block reads as error.details), redacted and size-bounded. For a failed operations.execute it holds run_id, error_message, failure_fingerprint, next_action and any output the action reported, such as output.dialog for a browser action blocked by a JS dialog.",
           }),
         ),
+        fix: Type.Optional(AccessFixSchema),
       },
       { description: "Concise script failure information, without stack traces or internal diagnostics." },
     ),
@@ -346,6 +348,7 @@ export function toMcpPublicSdkScriptResult(result: unknown): unknown {
         ...(error.name === "ClientSdkActionError" && error.details !== undefined
           ? { details: safeErrorDetails(error.details) }
           : {}),
+        ...(accessFixOf(error.fix) ? { fix: accessFixOf(error.fix) } : {}),
       };
     }
   }
@@ -503,10 +506,18 @@ async function runSandbox(
   // transient upstream failure (worth re-running) from a permanent script fault.
   // run_sdk is never auto-retried by the wrapper (arbitrary side effects), so this
   // is purely advisory.
+  // A failed run that hit an access denial carries the fix that would lift
+  // it, in the message too for clients that only show text.
+  const fix =
+    result.error && result.accessRemedy ? await buildAccessFix(result.accessRemedy, ctx) : null;
   const error = result.error
     ? (() => {
         const classification = classifySdkScriptError(result.error);
-        return { ...result.error, ...classification };
+        return {
+          ...result.error,
+          ...classification,
+          ...(fix ? { message: appendAccessFix(result.error.message, fix), fix } : {}),
+        };
       })()
     : result.error;
   const title = args.title?.trim() || undefined;

@@ -35,6 +35,7 @@ import {
   memberReadRole,
   requireWorkspaceContext,
 } from './access-control';
+import { withAccessRemedy } from './access-fix';
 import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { AccountToolContext, ToolContext } from './registry';
 import { withValidatedArgs } from './validate-args';
@@ -401,7 +402,12 @@ async function _resolvePath(
             userId: ctx.userId,
             slugOrId: workspace.id,
           });
-          if (ungranted) throw new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403);
+          if (ungranted) {
+            throw withAccessRemedy(new ToolUserError(formatUngrantedMemberMessage(ungranted.slug), 403), {
+              kind: 'grant_workspace',
+              workspace: ungranted.slug,
+            });
+          }
         }
         throw new ToolUserError('Workspace is not available for this authorization', 404);
       }

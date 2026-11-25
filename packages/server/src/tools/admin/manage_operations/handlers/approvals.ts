@@ -26,8 +26,10 @@ import logger from "../../../../utils/logger";
 import {
 	AccessDeniedError,
 	isAdminOrOwnerRole,
+	scopeRemedy,
 	workspaceScopeDenialMessage,
 } from "../../../access-control";
+import { withAccessRemedy } from "../../../access-fix";
 import { ENTITY_CHANGE_ACTION_KEYS, runDeciderUserIdSql } from "../../run-decider";
 import type { ToolContext } from "../../../registry";
 import {
@@ -960,8 +962,11 @@ async function requireApprovalAuthority(
 	if (await isPendingRunDecider(runId, ctx.organizationId, ctx.userId)) {
 		return;
 	}
-	throw new AccessDeniedError(
-		await workspaceScopeDenialMessage(ctx, `manage_operations.${action}`, "admin"),
+	throw withAccessRemedy(
+		new AccessDeniedError(
+			await workspaceScopeDenialMessage(ctx, `manage_operations.${action}`, "admin"),
+		),
+		scopeRemedy(ctx, "admin"),
 	);
 }
 
