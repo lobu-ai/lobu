@@ -94,7 +94,7 @@ export default function StoreToday() {
           </Badge>
         ),
         url: l.admin_url,
-        entityId: products.get(l.admin_url),
+        entityId: products.get(l.variant_id),
         available: l.available,
       }))
       .sort((x, y) => x.available - y.available),

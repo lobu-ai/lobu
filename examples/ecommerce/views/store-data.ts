@@ -101,7 +101,7 @@ export interface Feed {
 interface ProductEntity {
   id: number;
   entity_type: string;
-  metadata: { admin_url?: string };
+  metadata: { aliases?: string[] };
 }
 
 export const STATE_ORDER: StockState[] = [
@@ -195,9 +195,9 @@ export function useShopifyFeeds() {
 }
 
 /**
- * Product records keyed by their Shopify admin URL, so a stock row can open
- * the product's record peek. A variant without a matching record keeps its
- * Shopify link.
+ * Product records keyed by their Shopify variant identity, which attribution
+ * also stores in metadata.aliases. Sibling variants share an admin URL, so
+ * that URL cannot identify a record. Unmatched variants keep their Shopify link.
  */
 export function useProductIndex() {
   const q = useQuery<{ entities?: ProductEntity[] }>(
@@ -207,11 +207,14 @@ export function useProductIndex() {
       limit: 500,
     })
   );
-  const byAdminUrl = new Map<string, number>();
+  const byVariantId = new Map<string, number>();
   for (const e of q.data?.entities ?? []) {
-    if (e.metadata?.admin_url) byAdminUrl.set(e.metadata.admin_url, e.id);
+    for (const alias of e.metadata?.aliases ?? []) {
+      if (alias.startsWith("gid://shopify/ProductVariant/"))
+        byVariantId.set(alias, e.id);
+    }
   }
-  return byAdminUrl;
+  return byVariantId;
 }
 
 interface FeedReads {
@@ -224,17 +227,17 @@ interface FeedReads {
 }
 
 /**
- * The 50 most recently updated orders, read from Shopify on open and on
- * refresh, never stored.
+ * The 50 most recently updated matching orders, read from Shopify on open
+ * and on refresh, never stored. Source constraints apply before the page limit.
  */
-export function useLiveOrders() {
+export function useLiveOrders(query?: string) {
   const feeds = useShopifyFeeds();
   const feedId = feeds.orders?.id ?? null;
   const live = useQuery<FeedReads>(
     feedId
       ? tool("manage_feeds", {
           action: "read_feeds",
-          reads: [{ feed_id: feedId, limit: 50 }],
+          reads: [{ feed_id: feedId, limit: 50, ...(query ? { query } : {}) }],
           timeout_ms: 15000,
         })
       : null,

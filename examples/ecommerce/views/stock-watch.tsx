@@ -123,7 +123,7 @@ export default function StockWatch() {
     setParams({ state: next === state && next !== "all" ? "all" : next });
 
   const openProduct = (row: Row) => {
-    const id = products.get(row.admin_url);
+    const id = products.get(row.variant_id);
     if (id)
       host
         .openRecord({ entity_id: id, entity_type: "product" }, { mode: "peek" })
@@ -253,7 +253,7 @@ export default function StockWatch() {
                     type="button"
                     onClick={() => openProduct(r)}
                     title={
-                      products.has(r.admin_url)
+                      products.has(r.variant_id)
                         ? "Open product record"
                         : "Open in Shopify admin"
                     }

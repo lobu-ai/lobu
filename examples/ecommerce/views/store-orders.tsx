@@ -76,15 +76,27 @@ const sortValue = (o: OrderRow, key: string): string | number => {
 
 export default function StoreOrders() {
   const [params, setParams] = useParams();
-  const orders = useLiveOrders();
+  const status = Object.hasOwn(FILTERS, String(params.status))
+    ? String(params.status)
+    : "all";
+  // Keep the cutoff stable across renders; advancing it starts a fresh read.
+  const [readTime, setReadTime] = useState(Date.now);
+  const orders = useLiveOrders(
+    status === "overdue"
+      ? `financial_status:paid AND fulfillment_status:unfulfilled AND processed_at:<'${new Date(readTime - OVERDUE_MS).toISOString()}'`
+      : undefined
+  );
+  const refresh = () => {
+    const next = Date.now();
+    if (status === "overdue" && next !== readTime) setReadTime(next);
+    else orders.refetch();
+  };
   const [sort, setSort] = useState<{ key: string; dir: SortDir }>({
     key: "processed_at",
     dir: "desc",
   });
   const now = Date.now();
 
-  const status =
-    String(params.status) in FILTERS ? String(params.status) : "all";
   const search = String(params.q ?? "");
   const needle = search.trim().toLowerCase();
   const all = orders.rows;
@@ -136,14 +148,14 @@ export default function StoreOrders() {
         title="Orders"
         subtitle={
           orders.readAt
-            ? `${all.length === 1 ? "The most recently updated order" : `The ${all.length} most recently updated orders`}, read live from Shopify ${formatRelative(orders.readAt)}. No buyer details are requested.`
+            ? `${all.length === 1 ? "The most recently updated order" : `The ${all.length} most recently updated orders`}${status === "overdue" ? " matching the overdue filter" : ""}, read live from Shopify ${formatRelative(orders.readAt)}. No buyer details are requested.`
             : "Read live from Shopify when this page opens. No buyer details are requested."
         }
         actions={
           <Button
             size="sm"
             variant="outline"
-            onClick={() => orders.refetch()}
+            onClick={refresh}
             disabled={orders.loading}
           >
             {orders.loading ? "Reading…" : "Refresh"}
@@ -152,7 +164,7 @@ export default function StoreOrders() {
       />
 
       {orders.error ? (
-        <BriefFallback message={orders.error} onRetry={orders.refetch} />
+        <BriefFallback message={orders.error} onRetry={refresh} />
       ) : (
         <>
           <Grid min={160}>
@@ -252,7 +264,9 @@ export default function StoreOrders() {
               }
               caption={
                 orders.hasMore
-                  ? "Older orders exist in Shopify beyond this read."
+                  ? status === "overdue"
+                    ? "More overdue orders exist in Shopify beyond this read."
+                    : "Older orders exist in Shopify beyond this read."
                   : undefined
               }
               sort={sort}
