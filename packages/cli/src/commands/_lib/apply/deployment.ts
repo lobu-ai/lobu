@@ -15,7 +15,11 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deepRedactSecrets, REDACTED_SENTINEL } from "@lobu/core";
-import type { DesiredState } from "./desired-state.js";
+import {
+  type DesiredState,
+  type RecordedSkill,
+  recordSkill,
+} from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
 import {
   canonical,
@@ -68,6 +72,14 @@ export function redactDesiredState(
 ): Record<string, unknown> {
   return deepRedactSecrets({
     ...state,
+    // A rollback re-records a snapshot whose skills are already digests.
+    ...(state.skills
+      ? {
+          skills: state.skills.map((skill) =>
+            typeof skill.content === "string" ? recordSkill(skill) : skill
+          ),
+        }
+      : {}),
     agents: state.agents.map((agent) => ({
       ...agent,
       providerKeys: agent.providerKeys.map((k) => ({
@@ -128,6 +140,12 @@ export interface DeploymentManifest {
     /** The navigation document this config last applied (or found equal). */
     navigation?: NavigationBaseline;
   };
+  /**
+   * The library skills as this config left them (its agents only). Recorded
+   * apart from `attribution`: skills follow the agents that declare them, so
+   * an `--only agents` run records them even when no memory attribution exists.
+   */
+  skills?: RecordedSkill[];
   /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
    * `automation:b7-…`) this config actually applied — the delete-eligible set.
@@ -192,19 +210,34 @@ export function loadBaselineFromManifest(
   };
 }
 
+/** The recorded library skills; undefined before apply managed skills. */
+export function loadSkillsBaseline(
+  manifest: { skills?: unknown[] } | null | undefined
+): RecordedSkill[] | undefined {
+  return Array.isArray(manifest?.skills)
+    ? (manifest.skills as RecordedSkill[])
+    : undefined;
+}
+
 /**
  * Preserve whether attribution was absent or recorded as empty. The former
  * cannot prove ownership and must not enable three-way comparisons.
  */
-export function toBaseline(record: BaselineRecord | null): Baseline {
+export function toBaseline(
+  record: BaselineRecord | null,
+  skills?: RecordedSkill[]
+): Baseline {
+  const recordedSkills = skills ? { skills } : {};
   if (!record) {
     return {
       recorded: false,
       attribution: { entityTypes: [], relationshipTypes: [], automations: [] },
       owned: new Set<string>(),
+      ...recordedSkills,
     };
   }
   return {
+    ...recordedSkills,
     recorded: true,
     attribution: record.attribution as unknown as Baseline["attribution"],
     owned: new Set(record.owned),
@@ -366,7 +399,8 @@ export function buildAttributionAndOwned(
 export function buildDeploymentManifest(
   state: DesiredState,
   connectorVersions: Record<string, string>,
-  baseline?: BaselineRecord
+  baseline?: BaselineRecord,
+  skills?: RecordedSkill[]
 ): DeploymentManifest {
   const redacted = redactDesiredState(state);
   const connectors = (redacted.connectors ?? {}) as Record<string, unknown>;
@@ -394,6 +428,7 @@ export function buildDeploymentManifest(
     ...(baseline
       ? { attribution: baseline.attribution, owned: baseline.owned }
       : {}),
+    ...(skills ? { skills } : {}),
   };
 }
 

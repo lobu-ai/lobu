@@ -7643,6 +7643,85 @@ export type ManageSkillsData = {
          * Name of an unarchived skill
          */
         name?: string;
+      }
+    | {
+        /**
+         * Create a skill (no id, expected_revision 0) or replace one (its id and current revision). Omitted optional fields take their defaults.
+         */
+        action: "put";
+        skill: {
+          /**
+           * Lowercase letters, digits and single inner hyphens. Fixed once created: a rename is archive plus create.
+           */
+          name: string;
+          description: string;
+          /**
+           * The SKILL.md body
+           */
+          content: string;
+          provenance?: string;
+          /**
+           * Who the skill applies to (default: everyone). At most 100 subjects.
+           */
+          applies_to?: Array<
+            | {
+                principal_kind: null;
+              }
+            | {
+                principal_kind: "agent" | "app";
+                principal_id: string | null;
+              }
+          >;
+          enabled?: boolean;
+          /**
+           * Delivery order; ties order by name
+           */
+          sort_order?: number;
+        };
+        /**
+         * Skill id to replace
+         */
+        id?: string;
+        /**
+         * The revision the write is based on: 0 with no id creates; otherwise the skill's current revision, or the write fails with 409.
+         */
+        expected_revision: number;
+      }
+    | {
+        /**
+         * Archive a skill. Its name becomes free for a new skill; the archived row keeps its id.
+         */
+        action: "archive";
+        /**
+         * Skill id
+         */
+        id: string;
+        /**
+         * The skill's current revision, or the archive fails with 409
+         */
+        expected_revision: number;
+      }
+    | {
+        /**
+         * Add a catalog skill (manage_catalog list_catalog, kind skills) to the library, with provenance set to its catalog id.
+         */
+        action: "install_from_catalog";
+        /**
+         * Catalog entry id, e.g. bundled/<name>
+         */
+        catalog_id: string;
+        /**
+         * Who the skill applies to (default: everyone). At most 100 subjects.
+         */
+        applies_to?: Array<
+          | {
+              principal_kind: null;
+            }
+          | {
+              principal_kind: "agent" | "app";
+              principal_id: string | null;
+            }
+        >;
       };
   path: {
     /**
@@ -7749,6 +7828,15 @@ export type ManageSkillsResponses = {
           sort_order: number;
           revision: number;
           archived: boolean;
+        };
+      }
+    | {
+        status: "pending_approval";
+        run_id: number;
+        event_id: number;
+        message: string;
+        proposal: {
+          [key: string]: unknown;
         };
       };
 };

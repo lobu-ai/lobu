@@ -1,9 +1,15 @@
 /**
- * ClientSDK `skills` namespace. Thin wrapper over `manageSkills`: reads of the
+ * ClientSDK `skills` namespace. Thin wrapper over `manageSkills`: the
  * workspace skill library.
  */
 
-import type { SkillGetInput, SkillListInput } from "@lobu/core/contracts/tools/manage-skills";
+import type {
+	SkillArchiveInput,
+	SkillGetInput,
+	SkillInstallFromCatalogInput,
+	SkillListInput,
+	SkillPutInput,
+} from "@lobu/core/contracts/tools/manage-skills";
 import type { Env } from "../../index";
 import { manageSkills } from "../../tools/admin/manage_skills";
 import type { ToolContext } from "../../tools/registry";
@@ -13,6 +19,9 @@ export interface SkillsNamespace {
 	manage(input: Record<string, unknown>): Promise<unknown>;
 	list(input?: SkillListInput): Promise<unknown>;
 	get(input: SkillGetInput): Promise<unknown>;
+	put(input: SkillPutInput): Promise<unknown>;
+	archive(input: SkillArchiveInput): Promise<unknown>;
+	installFromCatalog(input: SkillInstallFromCatalogInput): Promise<unknown>;
 }
 
 export function buildSkillsNamespace(ctx: ToolContext, env: Env): SkillsNamespace {
@@ -21,5 +30,8 @@ export function buildSkillsNamespace(ctx: ToolContext, env: Env): SkillsNamespac
 		manage,
 		list: method("list"),
 		get: method("get"),
+		put: method("put"),
+		archive: method("archive"),
+		installFromCatalog: method("install_from_catalog"),
 	};
 }

@@ -195,6 +195,10 @@ describe("applyCommand orchestration", () => {
         if (c.url.includes("manage_feeds")) return false;
         if (c.url.includes("manage_auth_profiles")) return false;
         if (c.url.includes("manage_views")) return false;
+        // The skill library is read with `list`; any other action writes.
+        if (c.url.includes("manage_skills")) {
+          return JSON.parse(String(c.body)).action !== "list";
+        }
         // POST to /agents (create) is a write
         return true;
       }

@@ -37,6 +37,7 @@ import type {
   InferenceProviderCreateInput,
 } from "@lobu/core/contracts/tools/manage-inference-providers";
 import {
+  type SkillInput,
   SKILLS_LIST_MAX_LIMIT,
   type WorkspaceSkill,
 } from "@lobu/core/contracts/tools/manage-skills";
@@ -90,6 +91,8 @@ export interface RemoteDeployment {
     };
     /** Kind-qualified incarnation identities this config applied. */
     owned?: string[];
+    /** Library skills as this config left them; absent before apply managed skills. */
+    skills?: unknown[];
   } | null;
   /** Blocking-drift candidates + confirm token, present on `blocked` runs. */
   candidates?: {
@@ -786,9 +789,9 @@ export class ApplyClient {
   // ── Skills ────────────────────────────────────────────────────────────────
 
   /**
-   * The workspace skill library in delivery order, every page. `manage_skills`
-   * is read-only: the library is bounded workspace configuration, so callers
-   * get it whole rather than a cursor.
+   * The workspace skill library in delivery order, every page. The library is
+   * bounded workspace configuration, so callers get it whole rather than a
+   * cursor.
    */
   async listSkills(
     opts: { includeArchived?: boolean } = {}
@@ -817,6 +820,33 @@ export class ApplyClient {
       `/api/${this.orgSlug}/manage_skills`,
       { action: "get", name }
     );
+    return body.skill;
+  }
+
+  /**
+   * Create (no `id`, revision 0) or replace a library skill; 409 when
+   * `expectedRevision` is stale or a create's name is taken.
+   */
+  async putSkill(
+    skill: SkillInput,
+    target: { id: string; expectedRevision: number } | null
+  ): Promise<WorkspaceSkill> {
+    const { body } = await this.request<{ skill?: WorkspaceSkill }>(
+      "POST",
+      `/api/${this.orgSlug}/manage_skills`,
+      {
+        action: "put",
+        skill,
+        ...(target
+          ? { id: target.id, expected_revision: target.expectedRevision }
+          : { expected_revision: 0 }),
+      }
+    );
+    if (!body.skill) {
+      throw new Error(
+        `manage_skills put returned no skill for "${skill.name}"`
+      );
+    }
     return body.skill;
   }
 

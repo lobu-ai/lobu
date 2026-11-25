@@ -316,8 +316,9 @@ ask the user to add it to `.env`.
 An Automation's instructions come from its `prompt` and the workspace skill
 library: list skill names in `skills` and the server freezes each skill's current
 body (in order) into that Automation version when it saves. `lobu skills list`
-shows the library; `lobu apply` cannot add skills to it yet, so name only skills
-that already exist there (an unknown name fails the apply). Schedule triggers, connector events
+shows the library. An agent's `skills` (`defineSkill` / `skillFromFile`) are
+written into it by `lobu apply`, applied to that agent, so an Automation can name
+those or any skill already in the library (an unknown name fails the apply). Schedule triggers, connector events
 with `execution: "window"`, workspace events with their default window
 execution, and Automations with no triggers (manual) require a prompt, a skill, or
 both. A connector event with `execution: "turn"` (chat or another connector signal) may omit

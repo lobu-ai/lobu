@@ -27,6 +27,7 @@ import {
   computeManifestHash,
   type DeploymentSummary,
   loadBaselineFromManifest,
+  loadSkillsBaseline,
   mintApplyId,
   toBaseline,
 } from "./deployment.js";
@@ -36,6 +37,8 @@ import {
   type DesiredState,
   loadDesiredStateFromConfig,
   normalizeConnectionConfigScope,
+  type RecordedSkill,
+  recordSkill,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
@@ -440,6 +443,12 @@ export async function fetchRemoteSnapshot(
     only === undefined && state.navigation !== undefined
       ? await client.getNavigation()
       : undefined;
+  // The skill library is read whenever the run reconciles skills (every run
+  // but `--only memory`, whose desired state carries none).
+  const skills =
+    only !== "memory" && state.skills !== undefined
+      ? await client.listSkills()
+      : undefined;
 
   return {
     agents,
@@ -454,6 +463,7 @@ export async function fetchRemoteSnapshot(
     inferenceProviders,
     views,
     ...(navigation ? { navigation } : {}),
+    ...(skills ? { skills } : {}),
   };
 }
 
@@ -990,6 +1000,37 @@ export async function executePlan(
         row.changedFields ? `(${row.changedFields.join(", ")})` : undefined
       )
     );
+  }
+
+  // 4b) Skills — after agents (a skill's subjects must exist) and before
+  //     Automations (a version freezes the library body it names). Each put
+  //     presents the revision this apply read, so an edit made in between
+  //     fails it (409) rather than being overwritten.
+  for (const row of rowsByKind("skill")) {
+    if (row.kind !== "skill" || !row.write) continue;
+    try {
+      const skill = await ctx.client.putSkill(
+        row.write,
+        row.remote
+          ? { id: row.remote.id, expectedRevision: row.remote.revision }
+          : null
+      );
+      printText(
+        renderProgress(
+          row.verb,
+          "skill",
+          row.id,
+          `(revision ${skill.revision})`
+        )
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        throw new Error(
+          `Skill "${row.id}" changed since this apply read it. Run lobu apply again to plan against the current library.`
+        );
+      }
+      throw error;
+    }
   }
 
   // Automations are applied after connections so declarative connection slugs
@@ -1719,6 +1760,21 @@ async function applyProject(
     latestDeployment?.manifest === undefined
       ? null
       : loadBaselineFromManifest(latestDeployment.manifest);
+  const skillsBaseline = loadSkillsBaseline(latestDeployment?.manifest);
+  /**
+   * The skills this run should RECORD. Skills follow the agents that declare
+   * them, independently of memory attribution: a run that manages them (full
+   * or `--only agents`) records the config's declarations, even on a first
+   * apply with no memory baseline; `--only memory` carries the last record.
+   */
+  const recordableSkills = (
+    snapshot: RemoteSnapshot
+  ): RecordedSkill[] | undefined => {
+    if (opts.only === "memory") return skillsBaseline;
+    if (snapshot.skills !== undefined && state.skills !== undefined)
+      return state.skills.map(recordSkill);
+    return opts.only === "agents" ? skillsBaseline : undefined;
+  };
   /**
    * The baseline this run should RECORD, from a given remote snapshot. A
    * `--only` run executes one family, so the families it never touched must be
@@ -1730,9 +1786,7 @@ async function applyProject(
   const recordableBaseline = (
     snapshot: RemoteSnapshot
   ): BaselineRecord | undefined => {
-    if (opts.only === "agents") {
-      return baselineRecord ?? undefined;
-    }
+    if (opts.only === "agents") return baselineRecord ?? undefined;
     const built = buildAttributionAndOwned(
       state,
       snapshot,
@@ -1758,7 +1812,8 @@ async function applyProject(
   // newly allocated incarnation ids enter `owned` (otherwise the next prune
   // cannot config-expressed-delete them).
   let baselineRecordForRecording = recordableBaseline(remote);
-  const baseline = toBaseline(baselineRecord);
+  let skillsForRecording = recordableSkills(remote);
+  const baseline = toBaseline(baselineRecord, skillsBaseline);
 
   const plan = computeDiff(state, remote, {
     only: opts.only,
@@ -1884,7 +1939,8 @@ async function applyProject(
         opts.only
           ? (baselineRecord?.connectorVersions ?? {})
           : connectorVersionPins(state, remote.connectorDefinitions),
-        baselineRecordForRecording
+        baselineRecordForRecording,
+        skillsForRecording
       ),
     });
     printText(chalk.green("\nNothing to apply."));
@@ -1976,6 +2032,7 @@ async function applyProject(
           prune
         );
         baselineRecordForRecording = recordableBaseline(postRemote);
+        skillsForRecording = recordableSkills(postRemote);
         if (!opts.only) {
           pins = {
             ...connectorVersionPins(state, postRemote.connectorDefinitions),
@@ -1999,7 +2056,8 @@ async function applyProject(
       manifest: buildDeploymentManifest(
         state,
         pins,
-        applyErr ? undefined : baselineRecordForRecording
+        applyErr ? undefined : baselineRecordForRecording,
+        applyErr ? undefined : skillsForRecording
       ),
       ...(applyErr
         ? {

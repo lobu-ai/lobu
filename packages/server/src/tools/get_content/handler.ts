@@ -69,6 +69,7 @@ import { handleAutomationMode } from './automation-mode';
 import { readAutomationChanges } from './changes';
 import { resolveMcpActivitySessionIds } from './mcp-activity-filter';
 import { withValidatedArgs } from '../validate-args';
+import { revealSkillApprovalProposals } from '../admin/manage_skills';
 
 const MAX_EXACT_CONTENT_IDS = 2000;
 
@@ -903,6 +904,9 @@ async function getContentImpl(
     // batch Approve/Reject buttons must key off the CURRENT run state — not the
     // event itself — or they linger after every proposal is resolved and a
     // second click hits an already-decided run ("Run not found or not pending").
+    // Skill approval events carry digested bodies; a reader allowed to see
+    // skill bodies gets the full proposal back from its run.
+    await revealSkillApprovalProposals(sql, ctx, contentItems);
     await stampPendingProposalCounts(sql, ctx.organizationId, contentItems);
 
     const result: GetContentResult = {

@@ -185,7 +185,7 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
-  test("loads agent-dir markdown; a declared file skill is resolved but only warned about", async () => {
+  test("loads agent-dir markdown; a declared file skill becomes a library skill of that agent", async () => {
     dir = mkdtempSync(join(import.meta.dir, "agentdir-"));
     const agentDir = join(dir, "agents", "crm");
     mkdirSync(join(agentDir, "skills", "crm-ops"), { recursive: true });
@@ -225,10 +225,14 @@ describe("loadDesiredStateFromConfig", () => {
     expect(settings?.identityMd).toBe("CRM identity.");
     // Skills live in the workspace library, never in agent settings.
     expect(settings).not.toHaveProperty("skillsConfig");
-    expect(warnings).toEqual([
-      expect.stringMatching(
-        /Agent "crm" declares skills \(crm-ops\).*workspace skill library/
-      ),
+    expect(warnings).toEqual([]);
+    expect(state.skills).toEqual([
+      {
+        name: "crm-ops",
+        description: "Use the CRM API.",
+        content: "Use the CRM API.",
+        agents: ["crm"],
+      },
     ]);
     // Skills contribute no network — only the agent's domains remain.
     expect(settings?.networkConfig?.allowedDomains).toEqual(["github.com"]);
@@ -256,9 +260,21 @@ describe("loadDesiredStateFromConfig", () => {
 
     const { state, warnings } = await loadDesiredStateFromConfig({ cwd: dir });
     expect(state.agents[0]?.settings).not.toHaveProperty("skillsConfig");
-    expect(warnings).toEqual([
-      expect.stringContaining('Agent "a" declares skills (greet)'),
+    expect(warnings).toEqual([]);
+    expect(state.skills).toEqual([
+      {
+        name: "greet",
+        description: "Greet someone.",
+        content: "Generate a warm greeting.",
+        agents: ["a"],
+      },
     ]);
+    // A memory-only run reconciles no skills at all.
+    const memoryOnly = await loadDesiredStateFromConfig({
+      cwd: dir,
+      only: "memory",
+    });
+    expect(memoryOnly.state.skills).toBeUndefined();
   });
 
   test("two agents: custom + default dirs keep index alignment", async () => {
@@ -290,7 +306,7 @@ describe("loadDesiredStateFromConfig", () => {
     expect(state.agents[1]?.settings.soulMd).toBe("Agent B soul.");
   });
 
-  test("a skill shared by two agents via skillFromFile is warned about on both", async () => {
+  test("a skill shared by two agents via skillFromFile is one library skill of both", async () => {
     dir = mkdtempSync(join(import.meta.dir, "shared-"));
     mkdirSync(join(dir, "skills", "shared"), { recursive: true });
     writeFileSync(
@@ -312,11 +328,35 @@ describe("loadDesiredStateFromConfig", () => {
       ].join("\n")
     );
 
-    const { warnings } = await loadDesiredStateFromConfig({ cwd: dir });
-    expect([...warnings].sort()).toEqual([
-      expect.stringContaining('Agent "a" declares skills (shared)'),
-      expect.stringContaining('Agent "b" declares skills (shared)'),
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.skills).toEqual([
+      {
+        name: "shared",
+        description: "Shared.",
+        content: "Shared.",
+        agents: ["a", "b"],
+      },
     ]);
+  });
+
+  test("rejects one skill name declared with different text by two agents", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "conflict-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig, defineSkill } from "@lobu/cli/config";`,
+        `export default defineConfig({`,
+        `  agents: [`,
+        `    defineAgent({ id: "a", skills: [defineSkill({ name: "ops", content: "one" })] }),`,
+        `    defineAgent({ id: "b", skills: [defineSkill({ name: "ops", content: "two" })] }),`,
+        `  ],`,
+        `});`,
+        ``,
+      ].join("\n")
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /Skill "ops" is declared by agents "a" and "b" with different text/
+    );
   });
 
   test("rejects duplicate skill names within an agent", async () => {

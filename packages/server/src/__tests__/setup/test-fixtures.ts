@@ -221,8 +221,8 @@ export async function createTestAgent(options: {
  * `external_tenant_id` column. Legacy status maps stopped/* → paused.
  */
 /**
- * Insert a workspace library skill and its subjects. P3a ships no library
- * writer, so tests seed the library directly. `appliesTo` defaults to every
+ * Insert a workspace library skill and its subjects directly, skipping the
+ * manage_skills writer and its policy, for tests that only read the library. `appliesTo` defaults to every
  * principal; pass agent ids to scope it.
  */
 export async function createTestWorkspaceSkill(options: {

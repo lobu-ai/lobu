@@ -380,7 +380,7 @@ describe("lobu init --from-org", () => {
       )
     ).toContain("client.knowledge.save");
     // Library skills export to the project root, never into an agent dir, and
-    // the config references none of them (apply cannot write the library).
+    // the config references none of them (their subjects stay in the workspace).
     expect(existsSync(join(dir, "agents", "sales", "skills"))).toBe(false);
     expect(
       readFileSync(join(dir, "skills", "account-brief", "SKILL.md"), "utf-8")

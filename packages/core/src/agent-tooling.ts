@@ -48,6 +48,27 @@ export const AUTOMATION_PINNED_SKILLS_MAX_BYTES = 131_072;
 /** Longest workspace library skill name (Agent Skills `name`). */
 export const LIBRARY_SKILL_NAME_MAX_CHARS = 64;
 
+/** Longest library skill description, the `workspace_skills.description` bound. */
+export const SKILL_DESCRIPTION_MAX_CHARS = 1024;
+
+/** Most `applies_to` subjects one library skill carries. */
+export const SKILL_APPLIES_TO_MAX = 100;
+
+/**
+ * The description a skill without one gets: its body's first non-blank line,
+ * leading `#` and surrounding whitespace stripped, cut to
+ * {@link SKILL_DESCRIPTION_MAX_CHARS}. The same rule the library backfill
+ * applied; null when the body has no such line.
+ */
+export function deriveSkillDescription(content: string): string | null {
+  for (const line of content.split("\n")) {
+    let stripped = line.trim();
+    while (stripped.startsWith("#")) stripped = stripped.slice(1).trimStart();
+    if (stripped) return stripped.slice(0, SKILL_DESCRIPTION_MAX_CHARS);
+  }
+  return null;
+}
+
 /**
  * Whether `name` is a valid workspace library skill name under the Agent
  * Skills grammar: 1-64 lowercase letters and digits, with single hyphens only
