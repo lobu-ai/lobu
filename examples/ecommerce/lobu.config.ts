@@ -366,6 +366,12 @@ export default defineConfig({
             icon: "receipt",
             target: { kind: "view", key: "store-orders" },
           },
+          {
+            id: "shopify",
+            label: "Shopify",
+            icon: "shopping-bag",
+            target: { kind: "link", href: "connectors/shopify" },
+          },
         ],
       },
     ],
