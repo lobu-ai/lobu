@@ -374,4 +374,38 @@ describe("manage_skills", () => {
 		const [run] = await getTestDb()`SELECT status FROM runs WHERE id = ${pending.run_id} AND organization_id = ${orgId}`;
 		expect(run?.status).toBe("completed");
 	});
+
+	it("keeps library bodies out of the audit and approval events a read-denied agent can fetch", async () => {
+		const secret = "Only skill readers see this body.";
+		const created = (await put(ownerCtx, {
+			expected_revision: 0, skill: body("guarded", { content: secret }),
+		})) as SkillResult;
+		await put(ownerCtx, {
+			id: created.skill.id, expected_revision: 1, skill: body("guarded", { content: `${secret} Revised.` }),
+		});
+		// The proposer's own text is its business; the card's `current` is the library's.
+		const pending = (await put(proposingAgentCtx, {
+			id: created.skill.id, expected_revision: 2, skill: body("guarded", { content: "Proposed body." }),
+		})) as { event_id: number };
+
+		const audits = await getTestDb()<{ id: string }>`
+			SELECT id FROM current_event_records
+			WHERE organization_id = ${orgId} AND metadata->>'resource_kind' = 'skill'
+				AND metadata->>'resource_id' = ${created.skill.id}
+		`;
+		expect(audits).toHaveLength(2);
+		const read = (await executeTool(
+			"read_knowledge",
+			{ content_ids: [...audits.map((row) => Number(row.id)), pending.event_id] },
+			TEST_ENV,
+			deniedAgentCtx,
+		)) as { content: Array<{ id: number; payload_data?: { state?: Record<string, unknown> } }> };
+		expect(read.content.map((item) => item.id).sort()).toEqual(
+			[...audits.map((row) => Number(row.id)), pending.event_id].sort(),
+		);
+		expect(JSON.stringify(read)).not.toContain(secret);
+		const states = read.content.flatMap((item) => (item.payload_data?.state ? [item.payload_data.state] : []));
+		expect(states).toHaveLength(2);
+		for (const state of states) expect(state).toMatchObject({ content_sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+	});
 });

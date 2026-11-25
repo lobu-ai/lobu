@@ -371,7 +371,8 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
       manifest: buildDeploymentManifest(
         targetState,
         connectorPins,
-        baselineRecord
+        baselineRecord,
+        rollbackErr ? undefined : sanitized.state.skills
       ),
     });
   } catch (err) {

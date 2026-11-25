@@ -22,6 +22,7 @@ import type {
 import * as context from "../../../../internal/context.js";
 import * as credentials from "../../../../internal/credentials.js";
 import { applyCommand } from "../apply-cmd.js";
+import { rollbackCommand } from "../rollback-cmd.js";
 
 const tempDirs: string[] = [];
 const originalWrite = process.stdout.write.bind(process.stdout);
@@ -84,6 +85,7 @@ interface Store {
   /** Simulate another editor writing between apply's read and its write. */
   concurrentEdit?: boolean;
   latestManifest?: unknown;
+  rollbackManifest?: unknown;
 }
 
 function makeFetch(store: Store) {
@@ -116,6 +118,13 @@ function makeFetch(store: Store) {
           store.latestManifest === undefined
             ? null
             : { id: 1, status: "succeeded", manifest: store.latestManifest },
+      });
+    }
+    if (
+      urlStr.endsWith("/deployments/apl_11111111-2222-3333-4444-555555555555")
+    ) {
+      return json({
+        deployment: { status: "succeeded", manifest: store.rollbackManifest },
       });
     }
     if (urlStr.endsWith("/deployments") && method === "POST") {
@@ -259,6 +268,38 @@ describe("apply agent skills over the wire", () => {
       runApply(mkProject("v2"), makeFetch(store).fetchStub)
     ).rejects.toThrow(/Skill "ops" changed since this apply read it/);
     expect(store.skills).toMatchObject([{ content: "v1" }]);
+  });
+
+  test("preserves a human skill edit made after rollback on the next apply", async () => {
+    const store: Store = { skills: [] };
+    const dir = mkProject("v1");
+    await runApply(dir, makeFetch(store).fetchStub);
+    store.rollbackManifest = structuredClone(store.latestManifest);
+    await runApply(mkProject("v2"), makeFetch(store).fetchStub);
+
+    await rollbackCommand({
+      applyId: "apl_11111111-2222-3333-4444-555555555555",
+      cwd: dir,
+      yes: true,
+      url: "https://app.lobu.ai",
+      org: "acme",
+      fetchImpl: makeFetch(store).fetchStub,
+    });
+    expect(store.skills).toMatchObject([{ content: "v1", revision: 3 }]);
+
+    const skill = store.skills[0];
+    if (!skill) throw new Error("expected the restored skill");
+    skill.content = "Edited after rollback.";
+    skill.revision += 1;
+
+    const stale = makeFetch(store);
+    await expect(runApply(dir, stale.fetchStub)).rejects.toThrow(
+      /blocked by 1 drift item/
+    );
+    expect(skillActions(stale.calls)).not.toContain("put");
+    expect(store.skills).toMatchObject([
+      { content: "Edited after rollback.", revision: 4 },
+    ]);
   });
 
   test("an agents-only first apply records the skills it wrote, so dropping a declaration detaches it", async () => {

@@ -58,6 +58,7 @@ import {
   type SkillWrite,
 } from '../../skills/workspace-skills';
 import { ApprovalKind, approvalContext, normalApprovalImpact } from '../../utils/approval-context';
+import { redactConfigState } from '../../utils/config-redaction';
 import { ToolUserError } from '../../utils/errors';
 import { insertEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
@@ -283,7 +284,9 @@ async function queueSkillWriteForApproval(
           action: proposal.action,
           policy_action: proposal.policy_action,
           proposal,
-          current,
+          // The library's copy, digested like its audit rows: anyone who can
+          // read this event may lack skill_config read.
+          current: redactConfigState('skill', current ? { ...current } : null),
           initiator: { kind: initiator.initiatorKind, ...initiator.initiatorRef },
           status: 'pending_approval',
           ...currentMcpActivityEventMetadata(ctx),

@@ -10,6 +10,7 @@
  * rules that only the server needs.
  */
 
+import { createHash } from 'node:crypto';
 import { deepRedactSecrets, REDACTED_SENTINEL } from '@lobu/core';
 
 export { REDACTED_SENTINEL };
@@ -74,6 +75,10 @@ export type AuditResourceKind = ConfigResourceKind | WorkspaceAuditResourceKind;
  *  - `inference-provider`: `apiKey`/`api_key` (already denylisted; kept
  *    explicit as a guarantee, not a heuristic).
  *  - `provider-key`: never snapshotted — state is forced to null.
+ *  - `skill`: the body is replaced by `content_sha256`. The library's own
+ *    `skill_config` read policy can deny a principal the body, and these rows
+ *    are readable wherever workspace events are; the digest still shows when
+ *    and whether the body changed.
  *  - `organization` / `member` / `invitation`: no additional hard rules;
  *    ordinary identity fields remain visible while the denylist still strips
  *    any unexpectedly nested secret material.
@@ -87,6 +92,10 @@ export function redactConfigState(
 
   const redacted = deepRedactSecrets(state) as Record<string, unknown>;
 
+  if (kind === 'skill' && typeof redacted.content === 'string') {
+    const { content, ...rest } = redacted;
+    return { ...rest, content_sha256: createHash('sha256').update(content).digest('hex') };
+  }
   if (kind === 'auth-profile' && redacted.credentials != null) {
     redacted.credentials = REDACTED_SENTINEL;
   }
