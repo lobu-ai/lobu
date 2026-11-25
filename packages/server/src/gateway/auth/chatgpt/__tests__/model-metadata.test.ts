@@ -67,3 +67,22 @@ test.each([
   }) as typeof fetch;
   expect(await new TestModule().getModelMetadata("synthetic-agent", "synthetic-model", {})).toEqual(expected);
 });
+
+test("reads the Codex catalog from the configured upstream", async () => {
+  const saved = process.env.OPENAI_CODEX_BASE_URL;
+  process.env.OPENAI_CODEX_BASE_URL = "https://synthetic-codex-proxy.example/backend-api/";
+  let url = "";
+  globalThis.fetch = (async (input) => {
+    url = String(input);
+    return Response.json({ models: [{ slug: "synthetic-proxy-model" }] });
+  }) as typeof fetch;
+  try {
+    const models = await new TestModule().listModels({ kind: "oauth", value: token }, AbortSignal.timeout(5000));
+    expect(models?.map((model) => model.id)).toEqual(["synthetic-proxy-model"]);
+    expect(new URL(url).origin).toBe("https://synthetic-codex-proxy.example");
+    expect(new URL(url).pathname).toBe("/backend-api/codex/models");
+  } finally {
+    if (saved === undefined) delete process.env.OPENAI_CODEX_BASE_URL;
+    else process.env.OPENAI_CODEX_BASE_URL = saved;
+  }
+});

@@ -12,6 +12,7 @@ describe("ClaudeOAuthModule model listing — env-key credential", () => {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
   ] as const;
   const saved: Record<string, string | undefined> = {};
   let originalFetch: typeof globalThis.fetch;
@@ -93,6 +94,58 @@ describe("ClaudeOAuthModule model listing — env-key credential", () => {
     expect(sentAuthHeader).toBe("Bearer sk-ant-oat-bearer");
     expect(sentApiKeyHeader).toBeUndefined();
   });
+
+  test.each([
+    { kind: "api-key" as const, basePath: "" },
+    { kind: "api-key" as const, basePath: "/anthropic///" },
+    { kind: "oauth" as const, basePath: "" },
+    { kind: "oauth" as const, basePath: "/anthropic///" },
+  ])(
+    "lists models from the configured upstream ($kind, '$basePath')",
+    async ({ kind, basePath }) => {
+      const credential = { kind, value: "synthetic-proxy-only-credential" };
+      const expectedPath = basePath
+        ? "/anthropic/v1/models?limit=1000"
+        : "/v1/models?limit=1000";
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(request) {
+          const url = new URL(request.url);
+          const validAuth = kind === "oauth"
+            ? request.headers.get("authorization") === `Bearer ${credential.value}` &&
+              !request.headers.has("x-api-key")
+            : request.headers.get("x-api-key") === credential.value &&
+              !request.headers.has("authorization");
+          if (`${url.pathname}${url.search}` !== expectedPath || !validAuth) {
+            return new Response(null, { status: 401 });
+          }
+          return Response.json({ data: [{ id: "claude-proxy-model" }] });
+        },
+      });
+      try {
+        process.env.ANTHROPIC_BASE_URL = `${server.url.origin}${basePath}`;
+        // Block nonlocal requests if a regression targets the public API.
+        globalThis.fetch = ((input, init) => {
+          const url = new URL(
+            input instanceof Request ? input.url : String(input)
+          );
+          if (url.origin !== server.url.origin) {
+            throw new Error("Unexpected model listing destination");
+          }
+          return originalFetch(input, init);
+        }) as typeof globalThis.fetch;
+
+        const models = await makeModule().listModels(
+          credential,
+          AbortSignal.timeout(5000)
+        );
+        expect(models?.map((model) => model.id)).toEqual(["claude-proxy-model"]);
+      } finally {
+        await server.stop(true);
+      }
+    }
+  );
 
   test("no credentials → nothing listed and no request (no silent model)", async () => {
     let fetched = false;

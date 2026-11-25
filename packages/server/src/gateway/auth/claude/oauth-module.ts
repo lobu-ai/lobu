@@ -132,10 +132,12 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     signal: AbortSignal
   ): Promise<ProviderModel[] | null> {
     if (!credential) return null;
+    const upstream = this.getUpstreamConfig();
+    if (!upstream) return [];
     return fetchProviderModels<{
       data?: Array<{ id?: string; display_name?: string }>;
     }>({
-      url: "https://api.anthropic.com/v1/models?limit=1000",
+      url: `${upstream.upstreamBaseUrl.replace(/\/+$/, "")}/v1/models?limit=1000`,
       headers: {
         "anthropic-version": "2023-06-01",
         ...(credential.kind === "oauth"

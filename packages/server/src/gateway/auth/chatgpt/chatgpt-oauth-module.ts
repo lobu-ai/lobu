@@ -63,8 +63,10 @@ export class ChatGPTOAuthModule extends BaseProviderModule {
   ): Promise<Array<Record<string, unknown>>> {
     const accountId = extractJwtAccountId(token);
     if (!accountId) throw new Error("ChatGPT token carries no account id");
+    const upstream = this.getUpstreamConfig();
+    if (!upstream) throw new Error("ChatGPT has no configured upstream");
     const response = await fetch(
-      `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
+      `${upstream.upstreamBaseUrl.replace(/\/+$/, "")}/codex/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
