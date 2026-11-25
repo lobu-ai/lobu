@@ -71,10 +71,7 @@ import {
 	createPostgresAgentConfigStore,
 } from "./stores/postgres-stores";
 import { PostgresSecretStore } from "./stores/postgres-secret-store";
-import {
-	ensureOAuthInferenceProvider,
-	getOrgDefaultModel,
-} from "./stores/provider-secrets";
+import { ensureOAuthInferenceProvider } from "./stores/provider-secrets";
 import { routeFailure } from "../diagnostics";
 
 const routes = new Hono<{ Bindings: Env }>();
@@ -1406,20 +1403,6 @@ routes.get("/:agentId/guardrail-trips", async (c) => {
 	});
 
 	return c.json({ trips });
-});
-
-// ── Judge model default (for custom guardrail authoring) ─────────────────────
-//
-// Custom guardrails are LLM judges. There is no deployment-wide judge model:
-// a guardrail names its own, else the org's default provider model applies.
-// The create/edit UI uses this to either show that default (model optional) or
-// require a per-guardrail model (when the org has none). Returns null when the
-// org has no default model.
-routes.get("/:agentId/guardrail-judge-default", async (c) => {
-	const orgId = c.get("organizationId") as string;
-	return c.json({
-		defaultModel: (await getOrgDefaultModel(orgId).catch(() => null)) || null,
-	});
 });
 
 // ── Update agent config (settings) ───────────────────────────────────────────

@@ -80,6 +80,7 @@ After the local proof, ask the user whether to keep running locally or deploy to
 - Keep framework configuration in `lobu.config.ts` (TypeScript, `defineConfig` from `@lobu/cli/config`).
 - Keep agent identity and instructions in `IDENTITY.md`, `SOUL.md`, and `USER.md`.
 - Reusable capability bundles are skills in the workspace skill library. Read them with `lobu skills list` / `lobu skills show <name>`; `lobu apply` writes an agent's declared skills (`defineSkill` / `skillFromFile`) into it, applied to that agent, and never archives one. `lobu init --from-org` exports local copies to `skills/<name>/SKILL.md` for reference.
+- Guardrails live in the workspace guardrail library, not on an agent. Declare them with `defineGuardrail` in the top-level `guardrails` array of `defineConfig`; leaving the key out means `lobu apply` never touches the library. Writing guardrails needs a `guardrails:write` personal access token minted by an owner or admin in the web app and passed as `LOBU_API_TOKEN`; a CLI login gets a 403.
 - A connected MCP client reads the enabled library skills that apply to it through the MCP Skills extension: `skills/list`, `skills/get`, and `resources/read` of `skill://<workspace>/<name>/SKILL.md`. A skill can apply to everyone, to all agents or all connected apps, or to one agent or one connected app.
 - Use `lobu login` for CLI authentication. Do not use a separate memory login command.
 - Use `lobu connect` for MCP client and skill setup.

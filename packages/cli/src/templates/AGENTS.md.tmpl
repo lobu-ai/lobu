@@ -75,7 +75,7 @@ install it — don't work around it.
 Author everything in `lobu.config.ts` with helpers from `@lobu/cli/config`:
 `defineConfig`, `defineAgent`, `defineEntityType`, `defineRelationshipType`,
 `defineAutomation`, `defineConnection`, `defineAuthProfile`,
-`on`, `every`, `context`, `secret`, plus `connectorFromFile` and
+`defineGuardrail`, `on`, `every`, `context`, `secret`, plus `connectorFromFile` and
 `reactionFromFile`.
 
 Read the complete, working reference before editing:
@@ -379,6 +379,27 @@ part of an event output `key`, so include the record's id in a metadata key
 field when each record keeps its own current event. Omit `triggers` for a
 manual-only Automation.
 
+### Guardrails (checks on what agents say and do)
+
+Guardrails live in the workspace guardrail library, not on an agent. Declare
+them in the top-level `guardrails` array; each sets exactly one of `builtin`,
+`judge` or `requireTool`, and applies to every agent unless `appliesTo` names
+some.
+
+```ts
+const noSecrets = defineGuardrail({ name: "no-secrets", builtin: "secret-scan" });
+const noRefunds = defineGuardrail({
+  name: "no-refunds",
+  judge: { stage: "output", policy: "Never promise a refund." },
+  appliesTo: [{ agent: "support" }],
+});
+```
+
+Leave `guardrails` out and apply never touches the library. Writing it needs a
+`guardrails:write` personal access token, minted by a workspace owner or admin
+in the web app and passed as `LOBU_API_TOKEN`; a CLI login gets a 403. Ask the
+user for that token rather than working around the refusal.
+
 ### Wire it together
 
 ```ts
@@ -390,6 +411,7 @@ export default defineConfig({
   connections: [gh],
   authProfiles: [ghAccountAuth, ghAppAuth],
   automations: [digest],
+  guardrails: [noSecrets, noRefunds],
 });
 ```
 

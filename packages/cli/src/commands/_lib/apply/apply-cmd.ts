@@ -26,9 +26,11 @@ import {
   collectGitInfo,
   computeManifestHash,
   type DeploymentSummary,
+  type GuardrailWriteOutcome,
   loadBaselineFromManifest,
-  loadSkillsBaseline,
+  loadLibraryRecord,
   mintApplyId,
+  recordGuardrails,
   toBaseline,
 } from "./deployment.js";
 import {
@@ -37,6 +39,7 @@ import {
   type DesiredState,
   loadDesiredStateFromConfig,
   normalizeConnectionConfigScope,
+  type RecordedGuardrail,
   type RecordedSkill,
   recordSkill,
   resolveConnectorSchemas,
@@ -449,6 +452,9 @@ export async function fetchRemoteSnapshot(
     only !== "memory" && state.skills !== undefined
       ? await client.listSkills()
       : undefined;
+  // The guardrail library is read only when the config manages it.
+  const guardrails =
+    state.guardrails !== undefined ? await client.listGuardrails() : undefined;
 
   return {
     agents,
@@ -464,6 +470,7 @@ export async function fetchRemoteSnapshot(
     views,
     ...(navigation ? { navigation } : {}),
     ...(skills ? { skills } : {}),
+    ...(guardrails ? { guardrails } : {}),
   };
 }
 
@@ -803,7 +810,9 @@ export async function pushProviderApiKeys(
 
 export async function executePlan(
   ctx: ApplyContext,
-  pendingAuth: PendingAuthEntry[]
+  pendingAuth: PendingAuthEntry[],
+  /** Filled as guardrail writes succeed, so a partial failure still reports them. */
+  guardrailOutcome: GuardrailWriteOutcome = { created: [], archivedIds: [] }
 ): Promise<{ connectorVersions: Record<string, string> }> {
   const rowsByKind = <K extends DiffRow["kind"]>(kind: K) =>
     ctx.plan.rows.filter(
@@ -1027,6 +1036,44 @@ export async function executePlan(
       if (error instanceof ApiError && error.status === 409) {
         throw new Error(
           `Skill "${row.id}" changed since this apply read it. Run lobu apply again to plan against the current library.`
+        );
+      }
+      throw error;
+    }
+  }
+
+  // 4c) Guardrails — after agents (a guardrail's subjects must exist). Each
+  //     write presents the revision this apply read (409 when stale); a
+  //     `delete` row archives a guardrail this config created (prune only).
+  for (const row of rowsByKind("guardrail")) {
+    if (row.kind !== "guardrail") continue;
+    try {
+      if (row.verb === "delete" && row.remote) {
+        await ctx.client.archiveGuardrail(row.remote.id, row.remote.revision);
+        guardrailOutcome.archivedIds.push(row.remote.id);
+        printText(renderProgress("delete", "guardrail", row.id, "(archived)"));
+        continue;
+      }
+      if (!row.write) continue;
+      const guardrail = await ctx.client.putGuardrail(
+        row.write,
+        row.remote
+          ? { id: row.remote.id, expectedRevision: row.remote.revision }
+          : null
+      );
+      if (!row.remote) guardrailOutcome.created.push(guardrail);
+      printText(
+        renderProgress(
+          row.verb,
+          "guardrail",
+          row.id,
+          `(revision ${guardrail.revision})`
+        )
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        throw new Error(
+          `Guardrail "${row.id}" changed since this apply read it. Run lobu apply again to plan against the current library.`
         );
       }
       throw error;
@@ -1760,7 +1807,8 @@ async function applyProject(
     latestDeployment?.manifest === undefined
       ? null
       : loadBaselineFromManifest(latestDeployment.manifest);
-  const skillsBaseline = loadSkillsBaseline(latestDeployment?.manifest);
+  const libraryRecord = loadLibraryRecord(latestDeployment?.manifest);
+  const skillsBaseline = libraryRecord.skills;
   /**
    * The skills this run should RECORD. Skills follow the agents that declare
    * them, independently of memory attribution: a run that manages them (full
@@ -1774,6 +1822,31 @@ async function applyProject(
     if (snapshot.skills !== undefined && state.skills !== undefined)
       return state.skills.map(recordSkill);
     return opts.only === "agents" ? skillsBaseline : undefined;
+  };
+  /**
+   * The guardrails this run should RECORD: what it converged, under the ids
+   * the library holds (minus rows it archived), when it reconciled guardrails;
+   * otherwise the last record, carried forward.
+   */
+  const recordableGuardrails = (
+    snapshot: RemoteSnapshot,
+    outcome: GuardrailWriteOutcome = { created: [], archivedIds: [] }
+  ): RecordedGuardrail[] | undefined => {
+    if (state.guardrails === undefined || snapshot.guardrails === undefined)
+      return libraryRecord.guardrails;
+    // The library as this run left it: the pre-apply rows minus those it
+    // archived, plus the rows its creates returned. Never a refetch, which
+    // could show another editor's same-name replacement.
+    const archived = new Set(outcome.archivedIds);
+    return recordGuardrails(
+      state.guardrails,
+      [
+        ...snapshot.guardrails.filter((row) => !archived.has(row.id)),
+        ...outcome.created,
+      ],
+      libraryRecord.guardrails,
+      new Set(outcome.created.map((row) => row.id))
+    );
   };
   /**
    * The baseline this run should RECORD, from a given remote snapshot. A
@@ -1813,7 +1886,8 @@ async function applyProject(
   // cannot config-expressed-delete them).
   let baselineRecordForRecording = recordableBaseline(remote);
   let skillsForRecording = recordableSkills(remote);
-  const baseline = toBaseline(baselineRecord, skillsBaseline);
+  let guardrailsForRecording = recordableGuardrails(remote);
+  const baseline = toBaseline(baselineRecord, libraryRecord);
 
   const plan = computeDiff(state, remote, {
     only: opts.only,
@@ -1940,7 +2014,7 @@ async function applyProject(
           ? (baselineRecord?.connectorVersions ?? {})
           : connectorVersionPins(state, remote.connectorDefinitions),
         baselineRecordForRecording,
-        skillsForRecording
+        { skills: skillsForRecording, guardrails: guardrailsForRecording }
       ),
     });
     printText(chalk.green("\nNothing to apply."));
@@ -1973,6 +2047,10 @@ async function applyProject(
     plan.counts.create > 0 || plan.counts.update > 0 || plan.counts.delete > 0;
 
   const pendingAuth: PendingAuthEntry[] = [];
+  const guardrailOutcome: GuardrailWriteOutcome = {
+    created: [],
+    archivedIds: [],
+  };
   let applyErr: unknown;
   let connectorVersions: Record<string, string> = {};
   try {
@@ -1983,7 +2061,8 @@ async function applyProject(
       printText(chalk.bold("\nApplying:"));
       const executed = await executePlan(
         { client, state, plan, remote, apiBaseUrl, orgSlug },
-        pendingAuth
+        pendingAuth,
+        guardrailOutcome
       );
       connectorVersions = executed.connectorVersions;
     }
@@ -2023,6 +2102,9 @@ async function applyProject(
         };
     // Post-apply ownership: if this run created definitions, re-fetch remote
     // so owned gets real incarnation ids (pre-apply remote has none for creates).
+    // Guardrails: from the pre-apply snapshot and this run's own write
+    // responses (success or partial failure), so ownership is the created id.
+    guardrailsForRecording = recordableGuardrails(remote, guardrailOutcome);
     if (!applyErr && hasResourceWork && plan.counts.create > 0) {
       try {
         const postRemote = await fetchRemoteSnapshot(
@@ -2057,7 +2139,9 @@ async function applyProject(
         state,
         pins,
         applyErr ? undefined : baselineRecordForRecording,
-        applyErr ? undefined : skillsForRecording
+        applyErr
+          ? {}
+          : { skills: skillsForRecording, guardrails: guardrailsForRecording }
       ),
       ...(applyErr
         ? {

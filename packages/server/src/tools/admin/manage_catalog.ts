@@ -63,7 +63,7 @@ async function handleListInstalled(
 	const resolvedAgentKinds = requestedKinds
 		? agentKinds
 		: args.agent_id
-			? (["skills", "providers", "guardrails"] as AgentInstalledKind[])
+			? (["skills", "providers"] as AgentInstalledKind[])
 			: [];
 
 	const installed: Record<string, unknown> = {};

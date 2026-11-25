@@ -42,6 +42,11 @@ import {
   type WorkspaceSkill,
 } from "@lobu/core/contracts/tools/manage-skills";
 import type { ViewSetInput } from "@lobu/core/contracts/tools/manage-views";
+import {
+  GUARDRAILS_LIST_MAX_LIMIT,
+  type GuardrailInput,
+  type WorkspaceGuardrail,
+} from "@lobu/core/contracts/workspace-guardrails";
 import { ApiClient, type HttpMethod } from "../../../internal/api-client.js";
 import { resolveApiClient } from "../../../internal/index.js";
 import { ApiError } from "../../memory/_lib/errors.js";
@@ -848,6 +853,80 @@ export class ApplyClient {
       );
     }
     return body.skill;
+  }
+
+  // ── Guardrails ────────────────────────────────────────────────────────────
+
+  /** Every unarchived library guardrail, paged through. */
+  async listGuardrails(): Promise<WorkspaceGuardrail[]> {
+    const guardrails: WorkspaceGuardrail[] = [];
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({
+        limit: String(GUARDRAILS_LIST_MAX_LIMIT),
+        ...(cursor ? { cursor } : {}),
+      });
+      const page: {
+        body: { items?: WorkspaceGuardrail[]; next_cursor?: string | null };
+      } = await this.request("GET", `/api/${this.orgSlug}/guardrails?${query}`);
+      guardrails.push(...(page.body.items ?? []));
+      cursor = page.body.next_cursor ?? null;
+    } while (cursor);
+    return guardrails;
+  }
+
+  /**
+   * Create (no `target`, revision 0) or fully replace a library guardrail;
+   * 409 when `expectedRevision` is stale or a create's name is taken.
+   */
+  async putGuardrail(
+    guardrail: GuardrailInput,
+    target: { id: string; expectedRevision: number } | null
+  ): Promise<WorkspaceGuardrail> {
+    const path = target
+      ? `/api/${this.orgSlug}/guardrails/${encodeURIComponent(target.id)}`
+      : `/api/${this.orgSlug}/guardrails`;
+    const { body } = await this.guardrailWrite(() =>
+      this.request<{ guardrail?: WorkspaceGuardrail }>("PUT", path, {
+        guardrail,
+        expected_revision: target?.expectedRevision ?? 0,
+      })
+    );
+    if (!body.guardrail) {
+      throw new Error(
+        `PUT ${path} returned no guardrail for "${guardrail.name}"`
+      );
+    }
+    return body.guardrail;
+  }
+
+  /** Archive a library guardrail at its current revision (409 when stale). */
+  async archiveGuardrail(id: string, expectedRevision: number): Promise<void> {
+    await this.guardrailWrite(() =>
+      this.request(
+        "DELETE",
+        `/api/${this.orgSlug}/guardrails/${encodeURIComponent(id)}?expected_revision=${expectedRevision}`
+      )
+    );
+  }
+
+  /**
+   * Guardrail writes admit only an owner/admin web session or a human-minted
+   * `guardrails:write` token, so a CLI login is refused: say how to proceed.
+   */
+  private async guardrailWrite<T>(write: () => Promise<T>): Promise<T> {
+    try {
+      return await write();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        throw new ApiError(
+          `${error.message}\nWriting workspace guardrails needs a personal access token with the guardrails:write scope, minted by a workspace owner or admin from a signed-in web session. Run lobu apply with LOBU_API_TOKEN set to that token.`,
+          403,
+          error.code
+        );
+      }
+      throw error;
+    }
   }
 
   // ── Views ─────────────────────────────────────────────────────────────────

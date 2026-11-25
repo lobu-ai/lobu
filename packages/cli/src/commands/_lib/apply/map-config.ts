@@ -24,6 +24,10 @@ import {
   isLibrarySkillName,
   LIBRARY_SKILL_NAME_MAX_CHARS,
 } from "@lobu/core/agent-tooling";
+import {
+  type GuardrailSubject,
+  parseGuardrailConfig,
+} from "@lobu/core/contracts/workspace-guardrails";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
   RECORD_KEY_ANNOTATION,
@@ -53,6 +57,7 @@ import type {
   Connection,
   ConnectorRef,
   EntityType,
+  Guardrail,
   InferenceCapabilityBlock,
   OrgProvider,
   Project,
@@ -69,6 +74,7 @@ import type {
   DesiredConnection,
   DesiredEntityType,
   DesiredFeed,
+  DesiredGuardrail,
   DesiredOrgProvider,
   DesiredRelationshipType,
   DesiredState,
@@ -77,6 +83,7 @@ import {
   ENTITY_TYPE_DISPLAY_FIELDS,
   type EntityTypeDisplayFields,
   LEGACY_DISPLAY_FIELDS,
+  sortGuardrailSubjects,
 } from "./shared.js";
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
@@ -1054,6 +1061,14 @@ export function mapProjectToDesiredState(
     }
   }
 
+  // Guardrails govern agents, so every run but `--only memory` reconciles
+  // them; omitting `guardrails` leaves the library unmanaged.
+  const guardrails =
+    only === "memory" || project.guardrails === undefined
+      ? undefined
+      : project.guardrails.map(mapGuardrail);
+  if (guardrails) assertUniqueBy(guardrails, (g) => g.name, "guardrail name");
+
   const memory: NonNullable<DesiredState["memory"]> = {};
   if (project.org) memory.org = project.org;
   if (project.orgName) memory.name = project.orgName;
@@ -1072,8 +1087,69 @@ export function mapProjectToDesiredState(
     ...(project.navigation !== undefined
       ? { navigation: canonicalNavigation(project.navigation) }
       : {}),
+    ...(guardrails ? { guardrails } : {}),
     providers,
     requiredSecrets: [...required].sort(),
+  };
+}
+
+/**
+ * A `defineGuardrail` as the library stores it: the server's own config
+ * canonicalization, agent subjects (every agent when `appliesTo` is omitted)
+ * and `enabled` defaulting to true. A config error fails the load.
+ */
+function mapGuardrail(guardrail: Guardrail): DesiredGuardrail {
+  const where = `Guardrail "${String(guardrail.name)}"`;
+  if (
+    typeof guardrail.name !== "string" ||
+    !isLibrarySkillName(guardrail.name)
+  ) {
+    throw new ValidationError(
+      `${where}: the name must be lowercase letters, digits and single inner hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`
+    );
+  }
+  const declared = [
+    guardrail.builtin !== undefined,
+    guardrail.judge !== undefined,
+    guardrail.requireTool !== undefined,
+  ].filter(Boolean).length;
+  if (declared !== 1) {
+    throw new ValidationError(
+      `${where}: set exactly one of builtin, judge or requireTool.`
+    );
+  }
+  const raw =
+    guardrail.builtin !== undefined
+      ? { builtin: guardrail.builtin }
+      : guardrail.judge !== undefined
+        ? { kind: "judge", ...guardrail.judge }
+        : { kind: "require-tool", stage: "output", ...guardrail.requireTool };
+  const parsed = parseGuardrailConfig(raw);
+  if (!parsed.ok) throw new ValidationError(`${where}: ${parsed.error}`);
+  if (guardrail.appliesTo !== undefined && guardrail.appliesTo.length === 0) {
+    throw new ValidationError(
+      `${where}: appliesTo must name at least one agent (omit it for every agent; set enabled: false to turn it off).`
+    );
+  }
+  const agents = guardrail.appliesTo?.map((subject) => {
+    if (typeof subject?.agent !== "string" || subject.agent.trim() === "") {
+      throw new ValidationError(
+        `${where}: each appliesTo entry is { agent: "<agent id>" }.`
+      );
+    }
+    return subject.agent;
+  });
+  const appliesTo: GuardrailSubject[] = agents
+    ? [...new Set(agents)].map((agent) => ({
+        principal_kind: "agent",
+        principal_id: agent,
+      }))
+    : [{ principal_kind: "agent", principal_id: null }];
+  return {
+    name: guardrail.name,
+    config: parsed.config,
+    applies_to: sortGuardrailSubjects(appliesTo),
+    enabled: guardrail.enabled ?? true,
   };
 }
 

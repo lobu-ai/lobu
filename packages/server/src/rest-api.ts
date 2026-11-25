@@ -47,6 +47,9 @@ import {
 import { getContent } from "./tools/get_content";
 import { getAutomation } from "./tools/get_automation";
 import { getGuardrail, listGuardrails } from "./guardrails/guardrail-reads";
+import { archiveGuardrail, putGuardrail } from "./guardrails/guardrail-writes";
+import { GUARDRAILS_WRITE_SCOPE } from "./auth/oauth/scopes";
+import { requireHumanWorkspaceAdmin } from "./http/permission-policy-write";
 import { toMcpPublicSdkScriptResult } from "./tools/sdk_run";
 import { isToolFailureLogged } from "./tools/tool-error-log";
 import {
@@ -327,6 +330,45 @@ export async function restGetGuardrail(c: Context<{ Bindings: Env }>) {
 	try {
 		const result = await getGuardrail(
 			{ id: c.req.param("id") ?? "" },
+			toToolContext(extractAuthContext(c))
+		);
+		return c.json(toJsonSafe(result));
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * PUT /api/:orgSlug/guardrails and PUT /api/:orgSlug/guardrails/:id
+ * Create (`expected_revision: 0`, no id) or fully replace a guardrail at its
+ * current revision. Owner/admin web session or a `guardrails:write` PAT.
+ */
+export async function restPutGuardrail(c: Context<{ Bindings: Env }>) {
+	const denied = requireHumanWorkspaceAdmin(c, { acceptScopedToken: GUARDRAILS_WRITE_SCOPE });
+	if (denied) return denied;
+	const body = await parseRestJsonObject<Record<string, unknown>>(c);
+	if (body instanceof Response) return body;
+	try {
+		const result = await putGuardrail(
+			{ id: c.req.param("id"), body },
+			toToolContext(extractAuthContext(c))
+		);
+		return c.json(toJsonSafe(result));
+	} catch (error) {
+		return restErrorResponse(c, error);
+	}
+}
+
+/**
+ * DELETE /api/:orgSlug/guardrails/:id?expected_revision=N
+ * Archive a guardrail at its current revision. Same authority as PUT.
+ */
+export async function restDeleteGuardrail(c: Context<{ Bindings: Env }>) {
+	const denied = requireHumanWorkspaceAdmin(c, { acceptScopedToken: GUARDRAILS_WRITE_SCOPE });
+	if (denied) return denied;
+	try {
+		const result = await archiveGuardrail(
+			{ id: c.req.param("id") ?? "", expected_revision: c.req.query("expected_revision") },
 			toToolContext(extractAuthContext(c))
 		);
 		return c.json(toJsonSafe(result));

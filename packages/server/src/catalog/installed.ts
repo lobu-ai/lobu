@@ -1,7 +1,4 @@
-import type { GuardrailStage } from "@lobu/core";
-import { isBuiltinGuardrailConfig } from "@lobu/core/contracts/workspace-guardrails";
 import { assertAgentConfigReadAllowed } from "../authz/agent-config-access";
-import { assertGuardrailConfigReadAllowed } from "../authz/guardrail-config-access";
 import { assertSkillConfigReadAllowed } from "../authz/skill-config-access";
 import { resolveAutomationConnectionVisibilityUserId } from "../authz/automation-connection-visibility";
 import { getDb } from "../db/client";
@@ -9,13 +6,8 @@ import { resolveAutomationEventCatalog } from "../automations/connector-derived"
 import { withPlatformAutomationEvents } from "../automations/platform-event-catalog";
 import { getModelProviderModules } from "../gateway/modules/module-system";
 import type { Env } from "../index";
-import { getLobuCoreServices } from "../lobu/gateway";
 import { orgContext } from "../lobu/stores/org-context";
 import { librarySkillsApplyingTo } from "../skills/workspace-skills";
-import {
-	agentGuardrailPrincipal,
-	guardrailsApplyingTo,
-} from "../guardrails/workspace-guardrails";
 import { createPostgresAgentConfigStore } from "../lobu/stores/postgres-stores";
 import {
 	EMPTY_SUMMARY,
@@ -32,7 +24,6 @@ import {
 } from "./merge";
 import type {
 	AgentInstalledKind,
-	InstalledItem,
 	InstalledListResponse,
 	OrgInstalledKind,
 } from "./types";
@@ -59,8 +50,6 @@ function automationEventsForUi(
 
 const configStore = createPostgresAgentConfigStore();
 
-/** The message stages a built-in guardrail can be registered at. */
-const BUILTIN_STAGES: GuardrailStage[] = ["input", "output", "pre-tool"];
 
 /** Only MCP routing fields are public catalog metadata; credentials never are. */
 function publicMcpConfig(
@@ -295,31 +284,6 @@ export async function listAgentInstalled(
 				},
 			})),
 		};
-	}
-
-	if (wanted.has("guardrails")) {
-		await assertGuardrailConfigReadAllowed(ctx);
-		// The workspace library guardrails that apply to this agent, enabled or
-		// not. A built-in carries every stage it is registered at (`pii-scan`
-		// runs at input, output and pre-tool); a custom check carries its own.
-		const registry = getLobuCoreServices()?.getGuardrailRegistry?.();
-		const guardrails = await guardrailsApplyingTo(
-			getDb(),
-			ctx.organizationId,
-			agentGuardrailPrincipal(agentId),
-		);
-		const items: InstalledItem[] = guardrails.map((guardrail) => {
-			const config = guardrail.config;
-			const stages: GuardrailStage[] = isBuiltinGuardrailConfig(config)
-				? BUILTIN_STAGES.filter((stage) => registry?.get(stage, config.builtin))
-				: [config.stage];
-			return {
-				id: guardrail.id,
-				name: guardrail.name,
-				detail: { guardrail_id: guardrail.id, stages, enabled: guardrail.enabled },
-			};
-		});
-		result.guardrails = { kind: "guardrails", items };
 	}
 
 	return result;

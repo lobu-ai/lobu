@@ -5,7 +5,7 @@ import {
   matchesDomainPattern,
   patternReaches,
 } from "@lobu/connector-sdk/egress-policy";
-import { getDb } from "../../db/client.js";
+import { type DbClient, getDb } from "../../db/client.js";
 import {
   type ApplyingGuardrail,
   agentGuardrailPrincipal,
@@ -181,12 +181,29 @@ export function judgedEgressDomains(
  * Errors PROPAGATE. If a caller cannot tell whether a domain is judged,
  * granting it risks silently disabling a policy control.
  */
+/**
+ * Serialize an organization's egress-judge decisions: a guardrail library
+ * write and an allow-grant write each hold this for their whole transaction.
+ * The grant writer skips a domain a judge governs and the guardrail writer
+ * revokes allow grants its judge would be shadowed by; each reads the other's
+ * table, so without one exclusive lock an allow grant can commit just after a
+ * judge's grant cleanup and bypass that judge. Transaction-scoped: released on
+ * commit or rollback.
+ */
+export async function lockEgressJudgeDecisions(
+  tx: DbClient,
+  organizationId: string
+): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(["egress-judge", organizationId])}, 0))`;
+}
+
 export async function readJudgedEgressDomains(
   organizationId: string,
-  agentId: string
+  agentId: string,
+  sql: DbClient = getDb()
 ): Promise<string[]> {
   const { rows } = await resolveEgressGuardrails(
-    getDb(),
+    sql,
     organizationId,
     agentGuardrailPrincipal(agentId),
     null

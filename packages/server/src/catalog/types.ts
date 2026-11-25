@@ -16,7 +16,6 @@
  *   | automations   | Automation inventory rows                               | yes (rows)  |
  *   | skills      | workspace skill library rows that apply to the agent  | no          |
  *   | providers   | agent `models` slug prefixes + module registry metadata | no        |
- *   | guardrails  | workspace guardrail library rows that apply to the agent | no       |
  *
  * Only connector *definitions* are persisted as installable catalog entries in
  * Postgres. Everything else is manifest/registry + settings overlay.
@@ -29,7 +28,7 @@ export type CatalogKind = (typeof CATALOG_KINDS)[number];
 export const ORG_INSTALLED_KINDS = ['connectors', 'automations'] as const;
 export type OrgInstalledKind = (typeof ORG_INSTALLED_KINDS)[number];
 
-export const AGENT_INSTALLED_KINDS = ['skills', 'providers', 'guardrails'] as const;
+export const AGENT_INSTALLED_KINDS = ['skills', 'providers'] as const;
 export type AgentInstalledKind = (typeof AGENT_INSTALLED_KINDS)[number];
 
 export interface CatalogEntry {
