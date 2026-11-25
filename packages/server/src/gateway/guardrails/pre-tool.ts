@@ -22,7 +22,8 @@ export type PreToolTrip = NonNullable<GuardrailRunOutcome["tripped"]>;
  * agent's calls to its MCP servers) and inbound tool execution (a connected
  * app's calls to Lobu's own MCP server). A lookup error throws, and each
  * caller decides what that means: the proxy fails open, inbound fails closed.
- * The trip reason is audited only; callers answer with a generic block, since
+ * A judge provider failure is not a lookup error: the judge denies, so it
+ * comes back as a trip on both paths. The trip reason is audited only; callers answer with a generic block, since
  * the reason would be an evasion oracle.
  */
 export async function evaluatePreToolGuardrails(params: {

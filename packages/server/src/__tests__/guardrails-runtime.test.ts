@@ -1459,6 +1459,51 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     expectRan(await call('query_sql', PROBE));
   });
 
+  it('refuses the call as a policy block when the judge provider fails, without running the tool or leaking why', async () => {
+    const down = await hostedApp('chat.inbound-judge-down.test');
+    const control = await hostedApp('chat.inbound-judge-down-control.test');
+    const guardrail = await createTestWorkspaceGuardrail({
+      organizationId: orgA.id,
+      name: 'a-judge-provider-down',
+      // A policy of its own, so no verdict cached by an earlier test answers it.
+      config: { ...PRE_TOOL_JUDGE, policy: 'Deny inbound writes (provider-down-policy-body).' },
+      appliesTo: [{ kind: 'app', id: down.appKey }],
+    });
+    const writer = async (clientId: string) =>
+      openMcpSession(
+        `/mcp/${orgA.slug}`,
+        await appToken(clientId, orgA, [orgA.id], 'authorization_code', 'mcp:read mcp:write')
+      );
+    const savedNotes = (marker: string) =>
+      getTestDb()`SELECT 1 FROM events WHERE organization_id = ${orgA.id} AND payload_text = ${marker}`;
+    judgeStub.mockRejectedValue(new Error('upstream 503 Service Unavailable (provider-down-error)'));
+    try {
+      await flushPendingGuardrailAudits();
+      const tripsBefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
+
+      const refused = await (await writer(down.clientId))('save_memory', { semantic_type: 'note', content: 'judge-down blocked note' });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0]!.text).toBe('Tool call blocked by policy.');
+      expect(refused.structuredContent).toMatchObject({ error: { code: 'PERMISSION' } });
+      expect(JSON.stringify(refused)).not.toMatch(/provider-down|503|Judge call failed|denied/);
+      expect(await savedNotes('judge-down blocked note')).toHaveLength(0);
+
+      // The judge did deny: it is audited as a trip of that guardrail.
+      await flushPendingGuardrailAudits();
+      const trips = await fetchGuardrailEvents(orgA.id, 'pre-tool');
+      expect(trips).toHaveLength(tripsBefore + 1);
+      expect(trips[0]!.metadata).toMatchObject({ guardrail: 'a-judge-provider-down', app_id: down.appKey, agent_id: null });
+
+      // The same rejecting judge does not apply to another app.
+      const allowed = await (await writer(control.clientId))('save_memory', { semantic_type: 'note', content: 'judge-down control note' });
+      expect(allowed.isError, allowed.content[0]?.text).toBeFalsy();
+      expect(await savedNotes('judge-down control note')).toHaveLength(1);
+    } finally {
+      judgeStub.mockResolvedValue({ verdict: 'deny', reason: 'stub judge denied' });
+      await getTestDb()`DELETE FROM workspace_guardrails WHERE id = ${guardrail.id}`;
+    }
+  });
+
   it('enforces in the workspace a bare /mcp call switches into, including client.org()', async () => {
     await flushPendingGuardrailAudits();
     const tripsInABefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
