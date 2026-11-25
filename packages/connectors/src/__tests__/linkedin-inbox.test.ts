@@ -975,22 +975,24 @@ describe("LinkedIn source adapter", () => {
       ],
     });
     const split = stream.lastIndexOf(headline) + 5;
-    const chunkScripts = [stream.slice(0, split), stream.slice(split)].map((chunk) => {
+    const literals = [stream.slice(0, split), stream.slice(split)].map((chunk) => {
       const literal = JSON.stringify(chunk)
         .slice(1, -1)
         .replace(/\\"/g, '"')
         .replace(/'/g, "\\'")
         .replace(/</g, "\\x3c");
-      return `<script>window.__como_rehydration__.push('${literal}');</script>`;
+      return `'${literal}'`;
     });
+    const bootstrap = attribute === "aria-labelledby"
+      ? `<script>window.__como_rehydration__ = [];</script>${literals.map((literal) => `<script>window.__como_rehydration__.push(${literal});</script>`).join("")}`
+      : `<script>window.__como_rehydration__ = [ ${literals.join(", ")} ];</script>`;
     let extraScript = "";
     const { dom, api } = adapter(async () => ({
       ok: true,
       json: async () => ({
         miniProfile: { entityUrn: "urn:li:fs_miniProfile:synthetic-self" },
       }),
-      text: async () =>
-        `<script>window.__como_rehydration__ = [];</script>${chunkScripts.join("")}${extraScript}`,
+      text: async () => bootstrap + extraScript,
     }));
     const read = () => api.read({ expected_account: "urn:li:fs_miniProfile:synthetic-self", feed: "notifications" });
     try {

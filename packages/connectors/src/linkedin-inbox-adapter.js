@@ -374,6 +374,35 @@ export function linkedInInboxProgram() {
       trackingIdsToDrop: value.trackingIdsToDrop,
     };
   }
+  function notificationLiterals(source) {
+    const input = source.trim();
+    const tokens = /\s*("(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*')\s*(?:,|$)/y;
+    const chunks = [];
+    while (tokens.lastIndex < input.length) {
+      const match = tokens.exec(input);
+      if (!match) fail("Invalid notification stream");
+      let literal = match[1];
+      if (literal.startsWith("'")) {
+        // Convert the provider's single-quoted and hex escapes to JSON escapes.
+        const content = literal.slice(1, -1).replace(
+          /\\(?:x[0-9a-fA-F]{2}|[\s\S])|"/g,
+          (token) => {
+            if (token === "\\'") return "'";
+            if (token === '"') return '\\"';
+            if (token.startsWith("\\x")) return "\\u00" + token.slice(2);
+            return token;
+          }
+        );
+        literal = '"' + content + '"';
+      }
+      try {
+        chunks.push(JSON.parse(literal));
+      } catch {
+        fail("Invalid notification stream");
+      }
+    }
+    return chunks;
+  }
   async function notificationsPage(payload) {
     let stream;
     if (payload) {
@@ -425,31 +454,21 @@ export function linkedInInboxProgram() {
     } else {
       const html = await (await request("/notifications/")).text();
       // Read the inline payload in document order as inert text. LinkedIn
-      // streams single-quoted literals after the initial JSON array.
+      // can put string literals in the bootstrap array or append them later.
       let chunks = null;
       for (const [, source] of html.matchAll(
         /<script\b(?:[^>"']|"[^"]*"|'[^']*')*>([\s\S]*?)<\/script\b[^>]*>/gi
       )) {
         const script = source.trim();
         if (!script.startsWith("window.__como_rehydration__")) continue;
-        const assignment = /^window\.__como_rehydration__\s*=\s*([\s\S]*?);?$/.exec(script);
+        const assignment = /^window\.__como_rehydration__\s*=\s*\[([\s\S]*?)\]\s*;?$/.exec(script);
         if (!chunks && assignment) {
-          const initial = JSON.parse(assignment[1]);
-          if (!Array.isArray(initial) || initial.some((chunk) => typeof chunk !== "string"))
-            fail("Invalid notification stream");
-          chunks = initial;
+          chunks = notificationLiterals(assignment[1]);
           continue;
         }
-        const push = /^window\.__como_rehydration__\.push\('((?:[^'\\]|\\[\s\S])*)'\);?$/.exec(script);
+        const push = /^window\.__como_rehydration__\.push\(([\s\S]*?)\)\s*;?$/.exec(script);
         if (!chunks || !push) fail("Invalid notification stream");
-        // Convert the provider's single-quoted and hex escapes to JSON escapes.
-        const literal = push[1].replace(/\\(?:x[0-9a-f]{2}|[\s\S])|"/gi, (token) => {
-          if (token === "\\'") return "'";
-          if (token === '"') return '\\"';
-          if (token.startsWith("\\x")) return "\\u00" + token.slice(2);
-          return token;
-        });
-        chunks.push(JSON.parse('"' + literal + '"'));
+        for (const chunk of notificationLiterals(push[1])) chunks.push(chunk);
       }
       if (!chunks)
         fail("Notification source is unavailable; check sign-in");
