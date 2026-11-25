@@ -1326,6 +1326,22 @@ export class MessageHandlerBridge {
       }
       const supportsIdentityLink = !!args.organizationId &&
         chatIdentityLinkKey(platform, args.teamId, args.userId) !== null;
+      // In a group served by another workspace's bot, an ordinary DM routes
+      // to the bot's home workspace. Carry the authorized group destination
+      // into the private offer, using only the sender authenticated by chat.
+      const foreignGroup = args.thread?.isDM === false &&
+        !!this.connection.organizationId && args.organizationId !== this.connection.organizationId;
+      if (foreignGroup && supportsIdentityLink && args.organizationId) {
+        const linkNotice = await limiter.consume(chatSenderLimitKey("link", sender), {
+          limit: 1,
+          windowSeconds: CHAT_IDENTITY_LINK_TTL_SECONDS,
+        });
+        if (!linkNotice.allowed) return true;
+        const offered = await this.offerForeignGroupIdentityLink(
+          args.organizationId, args.userId, args.teamId, args.senderDisplayName, actor.access,
+        );
+        if (offered) return true;
+      }
       const canLink = args.isDirect && supportsIdentityLink;
       // A group notice must not suppress the private link, and an expired
       // link must be replaceable on the sender's next DM.
@@ -1372,8 +1388,11 @@ export class MessageHandlerBridge {
             : null;
         const joinUrl = slug ? `${webOrigin}/${encodeURIComponent(slug)}` : null;
         try {
-          await args.thread.post(chatAccessNotice(actor.access, joinUrl, linkUrl,
-            !args.isDirect && supportsIdentityLink));
+          const noticeText = foreignGroup && supportsIdentityLink && actor.access === "reply_only"
+            ? "I can't use this workspace's tools for you yet. I couldn't send you a private account link. Ask a workspace admin for help."
+            : chatAccessNotice(actor.access, joinUrl, linkUrl,
+                !args.isDirect && supportsIdentityLink && !foreignGroup);
+          await args.thread.post(noticeText);
           logger.info(
             { platform, organizationId: args.organizationId, connectionId: this.connection.id, access: actor.access },
             "Posted the chat access notice to an unlinked sender"
@@ -1390,6 +1409,34 @@ export class MessageHandlerBridge {
       }
     }
     return true;
+  }
+
+  private async offerForeignGroupIdentityLink(
+    organizationId: string,
+    senderId: string,
+    teamId: string | undefined,
+    senderDisplayName: string | undefined,
+    access: "reply_only" | "public_visitor",
+  ): Promise<boolean> {
+    const { id: connectionId, platform } = this.connection;
+    try {
+      await this.manager.postDirectMessage(connectionId, senderId, async (replyTarget) => {
+        const token = await mintChatIdentityLink({
+          organizationId, connectionId, platform, teamId, senderId, senderDisplayName, replyTarget,
+        });
+        if (!token) throw new Error("Could not mint a private account link");
+        const webOrigin = webOriginFromGateway(this.publicGatewayUrl);
+        const linkUrl = `${webOrigin}/connect/chat-identity?token=${encodeURIComponent(token)}`;
+        const slug = await getOrganizationSlug(organizationId).catch(() => null);
+        return `${slug ? `Workspace ${slug}\n\n` : ""}${chatAccessNotice(access, null, linkUrl)}`;
+      });
+      return true;
+    } catch {
+      // Provider error bodies can echo the private link. Keep them out of logs.
+      // Keep the link window spent since a timed-out post may have been sent.
+      logger.warn({ platform, connectionId, organizationId }, "Could not offer a private account link for a foreign chat group");
+      return false;
+    }
   }
 
   /**
