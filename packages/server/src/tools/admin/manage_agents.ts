@@ -70,6 +70,7 @@ import {
   insertAgentConfig,
   persistAgentMetadataPatch,
   persistAgentSettingsPatch,
+  movedSettingError,
   validateAgentSettingsUpdate,
   agentConfigRevision,
   validateAgentConfigRevision,
@@ -504,7 +505,11 @@ async function assertSettingsValid(
   if (error) {
     throw new ToolUserError(
       error.error_description,
-      error.error === 'models_validation_failed' ? 503 : 400,
+      error.error === 'models_validation_failed'
+        ? 503
+        : error.error === 'setting_moved'
+          ? 422
+          : 400,
     );
   }
 }
@@ -928,6 +933,13 @@ const manageAgentsTool = defineActionTool('manage_agents', {
   create: action(CreateAgentAction, orgGated(requireOrgWriteAccess, dispatchAgentWrite)),
   update: action(UpdateAgentAction, orgGated(requireOrgWriteAccess, dispatchAgentWrite)),
   delete: action(DeleteAgentAction, orgGated(requireOrgWriteAccess, dispatchAgentWrite)),
+}, {
+  // A moved settings key would otherwise fail schema validation as an unknown
+  // property (400) without naming where the setting lives now.
+  beforeValidate: (args) => {
+    const moved = movedSettingError((args as { settings?: unknown } | null)?.settings);
+    if (moved) throw new ToolUserError(moved, 422);
+  },
 });
 
 export const manageAgents = manageAgentsTool.run;

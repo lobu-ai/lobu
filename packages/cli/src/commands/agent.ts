@@ -235,8 +235,6 @@ export async function agentScaffoldCommand(
     join(agentDir, "USER.md"),
     `# User Context\n\n<!-- Add user-specific preferences, timezone, environment details here -->\n`
   );
-  await mkdir(join(agentDir, "skills"), { recursive: true });
-  await writeFile(join(agentDir, "skills", ".gitkeep"), "");
   await mkdir(join(agentDir, "evals"), { recursive: true });
 
   const description = options.description ?? "";
@@ -258,7 +256,6 @@ export async function agentScaffoldCommand(
   console.log(chalk.dim(`  - agents/${agentId}/IDENTITY.md`));
   console.log(chalk.dim(`  - agents/${agentId}/SOUL.md`));
   console.log(chalk.dim(`  - agents/${agentId}/USER.md`));
-  console.log(chalk.dim(`  - agents/${agentId}/skills/`));
   console.log(chalk.dim(`  - agents/${agentId}/evals/`));
   console.log(chalk.cyan("\n  Add it to your lobu.config.ts:\n"));
   console.log(`${snippet}\n`);

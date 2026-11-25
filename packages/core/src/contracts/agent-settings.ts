@@ -99,29 +99,19 @@ export const AgentInlineGuardrailSchema = Type.Object({
 });
 export type AgentInlineGuardrail = Static<typeof AgentInlineGuardrailSchema>;
 
-const ThinkingLevelSchema = Type.Union([
-  Type.Literal("off"),
-  Type.Literal("low"),
-  Type.Literal("medium"),
-  Type.Literal("high"),
-]);
-export type ThinkingLevel = Static<typeof ThinkingLevelSchema>;
-
+/**
+ * A skill as `lobu.config.ts` declares it. Agent settings no longer carry
+ * skills: they live in the workspace skill library (`manage_skills`). A skill
+ * is its `content` body only; there is no `instructions` alternate and no
+ * per-skill model or thinking override.
+ */
 export const SkillConfigSchema = Type.Object({
   repo: Type.String(),
   name: Type.String(),
   description: Type.Optional(Type.String()),
-  instructions: Type.Optional(Type.String()),
   enabled: Type.Boolean(),
   system: Type.Optional(Type.Boolean()),
   content: Type.Optional(Type.String()),
-  // No `nixPackages`: a skill is instruction text, and generic tooling lives on
-  // the agent's `nixConfig` (issue #2320). Stored rows written before the field
-  // was dropped still validate — `Type.Object` admits unknown keys — and every
-  // reader has ignored the value since #2324, so a legacy entry simply stops
-  // round-tripping through the editor the first time an agent's skills are saved.
-  modelPreference: Type.Optional(Type.String()),
-  thinkingLevel: Type.Optional(ThinkingLevelSchema),
 });
 export type SkillConfig = Static<typeof SkillConfigSchema>;
 
@@ -160,7 +150,6 @@ export const AgentSettingsStoredSchema = Type.Object({
   soulMd: Type.Optional(Type.String()),
   userMd: Type.Optional(Type.String()),
   identityMd: Type.Optional(Type.String()),
-  skillsConfig: Type.Optional(SkillsConfigSchema),
   guardrails: Type.Optional(Type.Array(Type.String())),
   guardrailsInline: Type.Optional(Type.Array(AgentInlineGuardrailSchema)),
   sandboxId: Type.Optional(Type.String()),

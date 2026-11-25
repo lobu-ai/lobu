@@ -11,8 +11,14 @@
  * responses listAgents / listEntityTypes / etc. produce. The fixture dir lives
  * UNDER `import.meta.dir` so jiti resolves the externalized `@lobu/cli/config`.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { loadDesiredStateFromConfig } from "../../apply/desired-state.js";
 import { initFromOrg } from "../bootstrap.js";
@@ -97,18 +103,6 @@ function fullOrgRoutes(): Record<
       },
       guardrails: ["secret-scan"],
       nixConfig: { packages: ["jq", "ffmpeg"] },
-      skillsConfig: {
-        skills: [
-          {
-            repo: "local/account-brief",
-            name: "account-brief",
-            description: "Prepare an account brief.",
-            content: "Summarize the account.",
-            enabled: true,
-            nixPackages: ["legacy-skill-package"],
-          },
-        ],
-      },
       soulMd: "Be concise.",
       identityMd: "You are sales.",
       updatedAt: 0,
@@ -138,6 +132,8 @@ function fullOrgRoutes(): Record<
             {
               name: "account-brief",
               content: "Summarize the account.",
+              missing: false,
+              outdated: true,
             },
           ],
           schedule: "0 */12 * * *",
@@ -165,6 +161,49 @@ function fullOrgRoutes(): Record<
         },
       ],
     }),
+    manage_skills: (body) => {
+      if (body.action !== "list") {
+        throw new Error(
+          `unexpected manage_skills action: ${String(body.action)}`
+        );
+      }
+      // Two pages, so the export walks the cursor.
+      return body.cursor
+        ? {
+            items: [
+              {
+                id: "skill-2",
+                name: "triage",
+                description: "",
+                content: "Label every thread.\n",
+                applies_to: [{ principal_kind: null }],
+                enabled: false,
+                sort_order: 1,
+                revision: 1,
+                archived: false,
+              },
+            ],
+            next_cursor: null,
+          }
+        : {
+            items: [
+              {
+                id: "skill-1",
+                name: "account-brief",
+                description: 'Brief: "accounts", in one page',
+                content: "Summarize the account.",
+                applies_to: [
+                  { principal_kind: "agent", principal_id: "sales" },
+                ],
+                enabled: true,
+                sort_order: 0,
+                revision: 3,
+                archived: false,
+              },
+            ],
+            next_cursor: "page-2",
+          };
+    },
     manage_entity_schema: () => {
       // The mapper uses a single endpoint for both entity_type and
       // relationship_type list actions; return a body carrying both keys.
@@ -300,13 +339,24 @@ function fullOrgRoutes(): Record<
 describe("lobu init --from-org", () => {
   test("bootstraps a project that round-trips through loadDesiredStateFromConfig", async () => {
     const dir = mkFixtureDir();
-    await initFromOrg({
-      targetDir: dir,
-      projectName: "acme-local",
-      gatewayPort: "9876",
-      workerProxyPort: "9001",
-      fetchImpl: buildFetch(fullOrgRoutes()),
-    });
+    const stdout = spyOn(process.stdout, "write");
+    try {
+      await initFromOrg({
+        targetDir: dir,
+        projectName: "acme-local",
+        gatewayPort: "9876",
+        workerProxyPort: "9001",
+        fetchImpl: buildFetch(fullOrgRoutes()),
+      });
+      const printed = stdout.mock.calls.map((call) => String(call[0])).join("");
+      // The library changed since the version froze its copy.
+      expect(printed).toContain(
+        'Automation "account-health" pins an older body of skill "account-brief"'
+      );
+      expect(printed).toContain("Exported 2 workspace skill(s) to skills/");
+    } finally {
+      stdout.mockRestore();
+    }
 
     // The config file exists and references the org metadata.
     const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
@@ -329,12 +379,18 @@ describe("lobu init --from-org", () => {
         "utf-8"
       )
     ).toContain("client.knowledge.save");
-    const skillSource = readFileSync(
-      join(dir, "agents", "sales", "skills", "account-brief", "SKILL.md"),
-      "utf-8"
+    // Library skills export to the project root, never into an agent dir, and
+    // the config references none of them (apply cannot write the library).
+    expect(existsSync(join(dir, "agents", "sales", "skills"))).toBe(false);
+    expect(
+      readFileSync(join(dir, "skills", "account-brief", "SKILL.md"), "utf-8")
+    ).toBe(
+      '---\nname: account-brief\ndescription: "Brief: \\"accounts\\", in one page"\n---\nSummarize the account.\n'
     );
-    expect(skillSource).toContain("Summarize the account.");
-    expect(skillSource).not.toContain("nixPackages");
+    expect(
+      readFileSync(join(dir, "skills", "triage", "SKILL.md"), "utf-8")
+    ).toBe("---\nname: triage\n---\nLabel every thread.\n");
+    expect(source).not.toContain("skillFromFile");
     expect(readFileSync(join(dir, ".env.example"), "utf-8")).toContain(
       "ANTHROPIC_API_KEY="
     );
@@ -383,9 +439,7 @@ describe("lobu init --from-org", () => {
     });
     expect(agent?.settings.guardrails).toEqual(["secret-scan"]);
     expect(agent?.settings.nixConfig?.packages).toEqual(["jq", "ffmpeg"]);
-    expect(agent?.settings.skillsConfig?.skills[0]).not.toHaveProperty(
-      "nixPackages"
-    );
+    expect(agent?.settings).not.toHaveProperty("skillsConfig");
     expect(agent?.settings.soulMd).toBe("Be concise.");
     expect(agent?.settings.identityMd).toBe("You are sales.");
     // Secret resolves from env to the real value (write-only placeholder filled).
@@ -445,9 +499,6 @@ describe("lobu init --from-org", () => {
     // rehoming either one into the other.
     expect(w?.prompt).toBe("Poll CRM data.");
     expect(w?.skills).toEqual(["account-brief"]);
-    expect(w?.skillSnapshots).toEqual([
-      { name: "account-brief", content: "Summarize the account." },
-    ]);
     expect(w?.triggers?.[0]).toMatchObject({
       kind: "event",
       connector_key: "github",

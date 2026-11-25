@@ -126,7 +126,6 @@ export type {
   SkillConfig,
   SkillsConfig,
   SuggestedPrompt,
-  ThinkingLevel,
   ThreadResponsePayload,
 } from "./types";
 export { hasCredentialSource, isRefreshSuspended } from "./types";

@@ -27,6 +27,41 @@ export const TURN_INPUT_RUN_HEADER = "x-lobu-turn-input-run";
 
 export const SKILL_DIRECTORY_NAME_MAX_CHARS = 128;
 
+/**
+ * Skill delivery limits, the single source for every lane: the chat producer,
+ * the device poll envelope, the external claim, and Automation pin validation.
+ *
+ * - One skill body holds at most {@link SKILL_CONTENT_MAX_CHARS} characters,
+ *   the same bound as the workspace library's `content` column.
+ * - A chat turn delivers at most {@link RUN_SKILLS_MAX} library skills. There
+ *   is no aggregate size cap: chat delivery writes one file per skill.
+ * - An Automation version pins at most {@link AUTOMATION_PINNED_SKILLS_MAX}
+ *   skills whose bodies total at most
+ *   {@link AUTOMATION_PINNED_SKILLS_MAX_BYTES} UTF-8 bytes, because the device
+ *   poll concatenates pinned bodies into one prompt.
+ */
+export const SKILL_CONTENT_MAX_CHARS = 64_000;
+export const RUN_SKILLS_MAX = 64;
+export const AUTOMATION_PINNED_SKILLS_MAX = 16;
+export const AUTOMATION_PINNED_SKILLS_MAX_BYTES = 131_072;
+
+/** Longest workspace library skill name (Agent Skills `name`). */
+export const LIBRARY_SKILL_NAME_MAX_CHARS = 64;
+
+/**
+ * Whether `name` is a valid workspace library skill name under the Agent
+ * Skills grammar: 1-64 lowercase letters and digits, with single hyphens only
+ * between them. Mirrors the `workspace_skills.name` CHECK constraint, so a
+ * name this accepts is one the library can hold. Library-only: historical
+ * Automation pins keep their looser {@link skillDirectoryName} grammar.
+ */
+export function isLibrarySkillName(name: string): boolean {
+  return (
+    name.length <= LIBRARY_SKILL_NAME_MAX_CHARS &&
+    /^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)
+  );
+}
+
 /** Materialized skill directory; ordinary agent skills may use a path as their name. */
 export function skillDirectoryName(name: string): string | null {
   const segment = name.trim().split("/").filter(Boolean).pop();

@@ -178,6 +178,11 @@ describe("all agent MCP tools — registry-driven e2e (model-free)", () => {
 				coverage: "reachable",
 				note: "lists agents for the org",
 			},
+			manage_skills: {
+				args: { action: "list" },
+				coverage: "reachable",
+				note: "lists the org's workspace skill library",
+			},
 			manage_conversations: {
 				// `list` drives the read path model-free (send would enqueue a real
 				// turn, which needs a model). agent_id is the seeded fixture agent.

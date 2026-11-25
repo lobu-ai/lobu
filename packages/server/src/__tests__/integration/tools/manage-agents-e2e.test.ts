@@ -51,6 +51,7 @@ import {
 	createTestOAuthClient,
 	createTestOrganization,
 	createTestUser,
+	createTestWorkspaceSkill,
 } from "../../setup/test-fixtures";
 
 const TEST_ENV: Env = {
@@ -234,14 +235,14 @@ describe("manage_agents — builder gate e2e", () => {
   it("SDK settings and identity round-trip through canonical storage; concurrent patches retain omitted fields", async () => {
     const sdk = buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV);
     await sdk.create({ agent_id: "settings-bot", name: "Settings" });
-    const skillsConfig = { skills: [{ repo: "example/skills", name: "triage", enabled: true, content: "Read the queue before acting." }] };
-    await sdk.update({ agent_id: "settings-bot", identity_md: "You triage.", settings: { skillsConfig } });
+    await sdk.update({ agent_id: "settings-bot", identity_md: "You triage." });
     await Promise.all([
       sdk.update({ agent_id: "settings-bot", settings: { soulMd: "Be concise." } }),
       sdk.update({ agent_id: "settings-bot", settings: { userMd: "Prefer evidence." } }),
     ]);
     const got = await sdk.get("settings-bot");
-    expect(got.settings).toMatchObject({ skillsConfig, identityMd: "You triage.", soulMd: "Be concise.", userMd: "Prefer evidence." });
+    expect(got.settings).not.toHaveProperty("skillsConfig");
+    expect(got.settings).toMatchObject({ identityMd: "You triage.", soulMd: "Be concise.", userMd: "Prefer evidence." });
     expect(got.settings.updatedAt).toBeTypeOf("number");
     const sql = getTestDb();
     const audit = await sql`SELECT payload_data FROM events WHERE organization_id = ${orgId}
@@ -255,7 +256,6 @@ describe("manage_agents — builder gate e2e", () => {
     const before = await sdk.get("invalid-settings-bot");
     for (const settings of [
       { invented: true }, { identityMd: "duplicate" }, { updatedAt: 0 },
-      { skillsConfig: { skills: [{ repo: "example", name: "bad", enabled: "yes" }] } },
       { networkConfig: { allowedDomains: ["invalid host"] } },
       { guardrailsInline: [{ name: "bad", enabled: true, stage: "input" }] },
       { models: ["unconnected/model"] },
@@ -263,6 +263,10 @@ describe("manage_agents — builder gate e2e", () => {
       await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", name: "Changed", settings }, TEST_ENV, ownerCtx)).rejects.toThrow();
     }
     await expect(sdk.update({ agent_id: "invalid-settings-bot", default_model: "", settings: { models: [] } })).rejects.toThrow(/either/);
+    // Skills moved to the workspace library: the retired key is a 422 that names the reader.
+    await expect(executeTool("manage_agents", {
+      action: "update", agent_id: "invalid-settings-bot", settings: { skillsConfig: { skills: [] } },
+    }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/manage_skills/) });
     await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", settings: { soulMd: "Denied" } }, TEST_ENV, memberCtx)).rejects.toThrow();
     expect(await sdk.get("invalid-settings-bot")).toEqual(before);
   });
@@ -301,21 +305,18 @@ describe("manage_agents — builder gate e2e", () => {
     const agentSdk = buildAgentsNamespace(toToolContext(agentCtx), TEST_ENV);
     await sdk.create({ agent_id: "approved-settings-bot", name: "Settings" });
     await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "Original", userMd: "Original preference", networkConfig: { allowedDomains: ["example.com"] } } });
-    const proposedSkills = { skills: [{ repo: "example/skills", name: "proposed", enabled: true, content: "Proposed skill." }] };
-    const humanSkills = { skills: [{ repo: "example/skills", name: "human", enabled: true, content: "New human skill." }] };
-    const pending = await agentSdk.update({ agent_id: "approved-settings-bot", identity_md: "Approved identity", settings: { soulMd: "Proposed", userMd: "Approved preference", skillsConfig: proposedSkills } });
+    const pending = await agentSdk.update({ agent_id: "approved-settings-bot", identity_md: "Approved identity", settings: { soulMd: "Proposed", userMd: "Approved preference" } });
     if (!("status" in pending) || pending.status !== "pending_approval") throw new Error("Expected approval");
     const sql = getTestDb();
     const [approval] = await sql`SELECT metadata FROM events WHERE organization_id = ${orgId}
       AND run_id = ${pending.run_id} AND interaction_type = 'approval'`;
-    expect(approval.metadata.current.settings).toEqual({ soulMd: "Original", userMd: "Original preference", skillsConfig: { skills: [] } });
+    expect(approval.metadata.current.settings).toEqual({ soulMd: "Original", userMd: "Original preference" });
     expect((await sdk.get("approved-settings-bot")).settings.soulMd).not.toBe("Proposed");
-    await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "New human edit", skillsConfig: humanSkills } });
+    await sdk.update({ agent_id: "approved-settings-bot", settings: { soulMd: "New human edit" } });
     await executeTool("manage_operations", { action: "approve", run_id: pending.run_id }, TEST_ENV, ownerCtx);
-    expect((await sdk.get("approved-settings-bot")).settings).toMatchObject({ identityMd: "Approved identity", soulMd: "New human edit", userMd: "Approved preference", skillsConfig: humanSkills });
+    expect((await sdk.get("approved-settings-bot")).settings).toMatchObject({ identityMd: "Approved identity", soulMd: "New human edit", userMd: "Approved preference" });
     const [run] = await sql`SELECT action_output FROM runs WHERE id = ${pending.run_id}`;
     expect(run.action_output.skipped_fields).toContain("settings.soulMd");
-    expect(run.action_output.skipped_fields).toContain("settings.skillsConfig");
     expect(run.action_output.updated_fields).toContain("settings.userMd");
   });
 
@@ -873,12 +874,9 @@ describe("manage_agents — builder gate e2e", () => {
 		)) as { agent?: { id: string } };
 		expect(got.agent?.id).toBe("visible-bot");
 
-		const skillsConfig = { skills: [{ repo: "synthetic/private", name: "private-rubric", enabled: true, description: "Hidden agent metadata", content: "Hidden instructions" }] };
-		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
-			agent_id: "hidden-bot", settings: { skillsConfig },
-		});
-		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
-			agent_id: "visible-bot", settings: { skillsConfig },
+		await createTestWorkspaceSkill({
+			organizationId: orgId, name: "private-rubric", description: "Hidden agent metadata", content: "Hidden instructions",
+			appliesTo: [{ kind: "agent", id: "hidden-bot" }, { kind: "agent", id: "visible-bot" }],
 		});
 		const catalog = buildCatalogNamespace(toToolContext(agentCtx), TEST_ENV);
 		const denied = await Promise.allSettled([
@@ -910,8 +908,9 @@ describe("manage_agents — builder gate e2e", () => {
 		expect(workerRest.status).toBe(401);
 		const foreignOrg = await createTestOrganization({ name: "Catalog isolation fixture" });
 		await createTestAgent({ organizationId: foreignOrg.id, ownerUserId: ownerId, agentId: "foreign-only" });
-		await sql`UPDATE agents SET skills_config = ${sql.json(skillsConfig)}
-			WHERE organization_id = ${foreignOrg.id} AND id = 'foreign-only'`;
+		await createTestWorkspaceSkill({
+			organizationId: foreignOrg.id, name: "private-rubric", appliesTo: [{ kind: "agent", id: "foreign-only" }],
+		});
 		expect(await catalog.listInstalled({ agent_id: "foreign-only", kinds: ["skills"] })).toEqual({ action: "list_installed", installed: {} });
 		const foreignRest = await get(`/api/${org.slug}/installed/agents/foreign-only/installed?kinds=skills`, { token });
 		expect(foreignRest.status).toBe(200);

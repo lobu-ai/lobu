@@ -219,7 +219,7 @@ describe("PATCH /config — a judged domain must not be allow-granted", () => {
       guardrailsInline: [JUDGE],
       networkConfig: { allowedDomains: ["example.com"] },
     });
-    const res = await patchConfig({ skillsConfig: { skills: [] } });
+    const res = await patchConfig({ soulMd: "An unrelated edit." });
     expect(res.status).toBe(200);
   });
 });

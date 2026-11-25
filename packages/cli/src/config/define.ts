@@ -807,12 +807,12 @@ export interface Automation {
    */
   prompt?: string;
   /**
-   * Ordered skill names from the owning agent's skill library
-   * ({@link Agent.skills}). `lobu apply` resolves each name to its body and
-   * pins the pair onto the Automation's version, so a run gets the text as it
-   * stood at apply time. Editing the library later does not reach an existing
-   * Automation until the next `lobu apply`; re-applying is the explicit upgrade
-   * action for a declarative project.
+   * Ordered skill names from the workspace skill library (`lobu skills list`).
+   * On save the server freezes each named skill's current body onto the
+   * Automation's version, so a run gets the text as it stood at apply time; an
+   * unknown name fails the apply. Editing the library later does not reach an
+   * existing Automation until the next `lobu apply`; re-applying is the
+   * explicit upgrade action for a declarative project.
    *
    * Supply {@link Automation.prompt}, `skills`, a {@link Automation.reaction}
    * script. Any one is required for schedule triggers, event
@@ -1035,14 +1035,14 @@ export interface Agent {
   settings?: AgentSettingsPatch;
   /**
    * Agent directory holding `SOUL.md` / `IDENTITY.md` / `USER.md`. Relative to
-   * the config file; defaults to `./agents/<id>`. (Skills are referenced
-   * explicitly via {@link Agent.skills}, not auto-discovered from this dir.)
+   * the config file; defaults to `./agents/<id>`.
    */
   dir?: string;
   /**
-   * Skills this agent can use — built inline with {@link defineSkill} or loaded
-   * from a `SKILL.md` with {@link skillFromFile}. Explicit list, no directory
-   * auto-discovery; deduped by name.
+   * Skills declared for this agent — built inline with {@link defineSkill} or
+   * loaded from a `SKILL.md` with {@link skillFromFile}. Skills now live in the
+   * workspace skill library, which `lobu apply` does not write yet: apply
+   * validates these and warns that it skips them.
    */
   skills?: Skill[];
   providers?: ProviderConfig[];

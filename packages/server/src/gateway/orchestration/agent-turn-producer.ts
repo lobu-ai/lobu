@@ -47,6 +47,7 @@ import { SettingsManager } from "@mariozechner/pi-coding-agent";
 import { getDb } from "../../db/client.js";
 import { insertAgentTurnResponse, lockAgentTurnConversation, lockAgentTurnRun, releaseNextAgentTurn } from "../../runs/agent-turn-inputs.js";
 import { resolveRunSkills } from "../../skills/run-skills.js";
+import { resolveLibrarySkillsFor } from "../../skills/workspace-skills.js";
 import { resolveRunInitiator } from "../../tools/initiator.js";
 import { isHeadlessSource, resolveAutomationRunContext } from "../automation-run-session.js";
 import { getPlatformDescriptor } from "../connections/platforms/index.js";
@@ -1121,16 +1122,23 @@ export async function enqueueAgentTurn(
     // library here would let a skill edited after approval change what a
     // frozen Automation does, and would pull unrelated live skills into the
     // run — the fixed job text alone does not freeze the skill library.
-    // `resolveAutomationRunContext` scopes its query by org + agent + automation
-    // + run (all derived from the canonical conversation id) and throws on a
+    // `resolveAutomationRunContext` scopes its query by org + automation + run
+    // (derived from the token org and the canonical conversation id) and throws on a
     // missing version, so a pinned run fails rather than silently falling back
     // to live skills.
     // Pinned snapshots were already resolved from the version by the same
     // resolver; never rename or drop any of their instructions through the
     // live-library filter.
+    // A chat turn reads the workspace library: the enabled skills that apply to
+    // this agent, resolved once here at admission and carried on the run, so a
+    // retry replays the same set (D7).
     const skills = automationContext?.skills ?? resolveRunSkills({
-      kind: "agent_library",
-      skills: settings?.skillsConfig?.skills,
+      kind: "workspace_library",
+      skills: await resolveLibrarySkillsFor(sql, data.organizationId, {
+        kind: "agent",
+        id: data.agentId,
+        ownerAgentId: null,
+      }),
     });
 
     // The platform's identity block, from the same provider the platform

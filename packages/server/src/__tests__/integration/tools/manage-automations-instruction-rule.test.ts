@@ -15,7 +15,6 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../../../index";
 import type { AuthContext } from "../../../tools/execute";
 import { executeTool, toToolContext } from "../../../tools/execute";
-import { buildAgentsNamespace } from "../../../sandbox/namespaces/agents";
 import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase } from "../../setup/test-db";
 import {
@@ -24,6 +23,7 @@ import {
 	createTestEntity,
 	createTestOrganization,
 	createTestUser,
+	createTestWorkspaceSkill,
 } from "../../setup/test-fixtures";
 import { getTestDb } from "../../setup/test-db";
 
@@ -48,6 +48,7 @@ describe("manage_automations — instruction-presence rule", () => {
 	let orgId: string;
 	let ownerCtx: AuthContext;
 	let agentId: string;
+	let runbook: { id: string; name: string; content: string };
 
 	beforeAll(async () => {
 		await cleanupTestDatabase();
@@ -78,67 +79,86 @@ describe("manage_automations — instruction-presence rule", () => {
 			ownerUserId: owner.id,
 		});
 		agentId = agent.agentId;
-		const sql = getTestDb();
-		await sql`
-			UPDATE agents
-			SET skills_config = ${sql.json({
-				skills: [
-					{
-						repo: "file/ir-runbook",
-						name: "ir-runbook",
-						enabled: true,
-						content: "Run the instruction-rule workflow.",
-					},
-				],
-			})}
-			WHERE id = ${agentId} AND organization_id = ${orgId}
-		`;
+		runbook = await createTestWorkspaceSkill({
+			organizationId: orgId,
+			name: "ir-runbook",
+			content: "Run the instruction-rule workflow.",
+		});
 	});
 
-	it.each(["rubric", "x".repeat(128), ".", "..", "x".repeat(129)])("accepts only pinned skill names that can become worker files: %s", async (name) => {
-		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
-			agent_id: agentId,
-			settings: { skillsConfig: { skills: [
-				{ repo: "synthetic/unsafe-name", name, enabled: true, content: "Required instructions" },
-				{ repo: "file/ir-runbook", name: "ir-runbook", enabled: true, content: "Run the instruction-rule workflow." },
-			] } },
-		});
-		const create = executeTool("manage_automations", {
-			action: "create", slug: `unsafe-skill-${name.length}`, managed_agent_id: agentId,
-			skills: [{ name, content: "Required instructions" }],
+	it("pins library skills by name and rejects names the library does not hold", async () => {
+		const unknown = executeTool("manage_automations", {
+			action: "create", slug: "unknown-skill", skills: ["IR Runbook"],
 		}, TEST_ENV, ownerCtx);
-		if (name === "." || name === ".." || name.length > 128) {
-			await expect(create).rejects.toMatchObject({ httpStatus: 422 });
-		} else {
-			await expect(create).resolves.toMatchObject({ action: "create", version: 1 });
-		}
+		await expect(unknown).rejects.toMatchObject({ httpStatus: 422 });
+		await expect(unknown).rejects.toThrow(/No workspace skill named "IR Runbook".*Did you mean "ir-runbook"/s);
+
+		const duplicate = executeTool("manage_automations", {
+			action: "create", slug: "duplicate-skill", skills: ["ir-runbook", "ir-runbook"],
+		}, TEST_ENV, ownerCtx);
+		await expect(duplicate).rejects.toMatchObject({ httpStatus: 422 });
+
+		// Naming a skill is the opt-in: no runner agent, and no requirement that
+		// the skill applies to one.
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "agentless-skill", skills: ["ir-runbook"],
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const [version] = await getTestDb()`
+			SELECT version.skills FROM automations automation
+			JOIN automation_versions version ON version.id = automation.current_version_id
+			WHERE automation.id = ${Number(created.automation_id)}
+		`;
+		expect(version.skills).toEqual([
+			{ name: "ir-runbook", content: runbook.content, skill_id: runbook.id, revision: 1 },
+		]);
 	});
 
 	it.each([
-		{ label: "UTF-8 boundary", skills: [{ name: "utf8", content: "é".repeat(16_384) }], valid: true },
-		{ label: "UTF-8 overflow", skills: [{ name: "utf8", content: "é".repeat(16_385) }], valid: false },
-		{ label: "maximum count and bytes", skills: Array.from({ length: 5 }, (_, i) => ({ name: `pin-${i}`, content: i === 0 ? "é".repeat(16_382) : "x" })), valid: true },
-		{ label: "duplicate", skills: [{ name: "utf8", content: "First." }, { name: "utf8", content: "Second." }], valid: false },
-	])("validates saved snapshots with the dispatch constraints: $label", async ({ skills, valid }) => {
-		await buildAgentsNamespace(toToolContext(ownerCtx), TEST_ENV).update({
-			agent_id: agentId,
-			settings: { skillsConfig: { skills: [
-				...skills.filter((skill, i) => skills.findIndex((other) => other.name === skill.name) === i)
-					.map((skill) => ({ ...skill, repo: `synthetic/${skill.name}`, enabled: true })),
-				{ repo: "file/ir-runbook", name: "ir-runbook", enabled: true, content: "Run the instruction-rule workflow." },
-			] } },
-		});
+		// Four 32 KiB bodies of two-byte characters fill the 128 KiB cap exactly.
+		{ label: "UTF-8 boundary", bodies: Array.from({ length: 4 }, () => "é".repeat(16_384)), valid: true },
+		{ label: "UTF-8 overflow", bodies: [...Array.from({ length: 3 }, () => "é".repeat(16_384)), "é".repeat(16_385)], valid: false },
+	])("bounds the frozen copies with the dispatch constraints: $label", async ({ label, bodies, valid }) => {
+		const prefix = label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+		const names: string[] = [];
+		for (const [index, content] of bodies.entries()) {
+			const skill = await createTestWorkspaceSkill({ organizationId: orgId, name: `${prefix}-${index}`, content });
+			names.push(skill.name);
+		}
 		const create = executeTool("manage_automations", {
-			action: "create", slug: `snapshot-bounds-${valid}-${skills.length}`, managed_agent_id: agentId, skills,
+			action: "create", slug: `snapshot-bounds-${prefix}`, skills: names,
 		}, TEST_ENV, ownerCtx);
 		if (valid) {
-			const saved = await create as { automation_id: string };
-			const sql = getTestDb();
-			const [version] = await sql`SELECT skills FROM automation_versions WHERE automation_id = ${Number(saved.automation_id)}`;
-			expect(version.skills).toEqual(skills);
+			await expect(create).resolves.toMatchObject({ action: "create", version: 1 });
 		} else {
 			await expect(create).rejects.toMatchObject({ httpStatus: 422 });
+			await expect(create).rejects.toThrow(/131072 bytes/);
 		}
+	});
+
+	it("flags frozen copies missing or outdated against the library", async () => {
+		const drift = await createTestWorkspaceSkill({ organizationId: orgId, name: "ir-drift", content: "Version one." });
+		const gone = await createTestWorkspaceSkill({ organizationId: orgId, name: "ir-gone", content: "Soon archived." });
+		const created = await executeTool("manage_automations", {
+			action: "create", slug: "ir-flags", skills: ["ir-runbook", "ir-drift", "ir-gone"],
+		}, TEST_ENV, ownerCtx) as { automation_id: string };
+		const sql = getTestDb();
+		await sql`UPDATE workspace_skills SET content = 'Version two.', revision = revision + 1 WHERE id = ${drift.id}`;
+		await sql`UPDATE workspace_skills SET archived_at = now() WHERE id = ${gone.id}`;
+		const expected = [
+			expect.objectContaining({ name: "ir-runbook", missing: false, outdated: false }),
+			expect.objectContaining({ name: "ir-drift", content: "Version one.", missing: false, outdated: true }),
+			expect.objectContaining({ name: "ir-gone", missing: true, outdated: false }),
+		];
+
+		const details = await executeTool("manage_automations", {
+			action: "get_version_details", automation_id: created.automation_id,
+		}, TEST_ENV, ownerCtx) as { skills: unknown };
+		expect(details.skills).toEqual(expected);
+
+		const listed = await executeTool("manage_automations", {
+			action: "list", automation_id: created.automation_id, include_details: true,
+		}, TEST_ENV, ownerCtx) as { automations: Array<{ skills: unknown }> };
+		expect(listed.automations[0]?.skills).toEqual(expected);
 	});
 
 	it("creates an event-turn Automation with NO prompt (built-in default applies)", async () => {
@@ -190,12 +210,7 @@ describe("manage_automations — instruction-presence rule", () => {
 				action: "create",
 				slug: "ir-skills-only",
 				managed_agent_id: agentId,
-				skills: [
-					{
-						name: "ir-runbook",
-						content: "Run the instruction-rule workflow.",
-					},
-				],
+				skills: ["ir-runbook"],
 				triggers: [{ kind: "schedule", cron: "0 9 * * *" }],
 			},
 			TEST_ENV,
@@ -215,6 +230,8 @@ describe("manage_automations — instruction-presence rule", () => {
 			{
 				name: "ir-runbook",
 				content: "Run the instruction-rule workflow.",
+				skill_id: runbook.id,
+				revision: 1,
 			},
 		]);
 		const [before] = await sql`SELECT current_version_id FROM automations WHERE id = ${Number(created.automation_id)}`;

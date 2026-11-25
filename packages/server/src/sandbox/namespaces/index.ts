@@ -20,4 +20,5 @@ export { buildNotificationsNamespace } from "./notifications";
 export { buildOperationsNamespace } from "./operations";
 export { buildOrganizationsNamespace } from "./organizations";
 export { buildSchedulesNamespace } from "./schedules";
+export { buildSkillsNamespace } from "./skills";
 export { buildViewsNamespace } from "./views";

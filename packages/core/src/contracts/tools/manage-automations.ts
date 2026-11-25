@@ -1,4 +1,9 @@
 import { type Static, Type } from "@sinclair/typebox";
+import {
+  AUTOMATION_PINNED_SKILLS_MAX,
+  AUTOMATION_PINNED_SKILLS_MAX_BYTES,
+  LIBRARY_SKILL_NAME_MAX_CHARS,
+} from "../../agent-tooling";
 
 const AutomationTriggerMatchValueSchema = Type.Union([
   Type.String(),
@@ -493,30 +498,21 @@ export const SourceSchema = Type.Object({
 });
 
 /**
- * One agent skill pinned into an Automation version.
+ * One workspace library skill named by an Automation version.
  *
- * The `content` is a SNAPSHOT taken when the version was saved, not a live
- * reference. Editing the agent's skill library afterwards does not reach an
- * existing version; a caller must publish a new version, and `lobu apply`
- * re-resolves every reference on each run. Storing the body (rather than the
- * name alone) also lets a device-pinned Automation dispatch the frozen text to a
- * CLI with no channel back to the skill library.
+ * Callers pass names; the server resolves each against the workspace skill
+ * library when the version is saved and freezes the body into the version.
+ * Editing the library afterwards does not reach an existing version: a caller
+ * must publish a new version (`lobu apply` re-resolves on every run). Storing
+ * the body also lets a device-pinned Automation dispatch the frozen text to a
+ * CLI with no channel back to the library.
  */
-export const AutomationSkillSchema = Type.Object({
-  name: Type.String({
-    minLength: 1,
-    pattern: "^[a-zA-Z0-9._-]+$",
-    description:
-      "Skill name, matching an entry in the owning agent's skill library. Identifies the skill for diffing a pinned snapshot against the library's current body.",
-  }),
-  content: Type.String({
-    minLength: 1,
-    description:
-      "The skill body, frozen as of this version. Server-side agents receive it as `.skills/<name>/SKILL.md`; device executors receive the same frozen text in their per-run task.",
-  }),
+export const AutomationSkillNameSchema = Type.String({
+  minLength: 1,
+  maxLength: LIBRARY_SKILL_NAME_MAX_CHARS,
+  description:
+    "Name of an unarchived skill in the workspace skill library (manage_skills list).",
 });
-
-export type AutomationSkill = Static<typeof AutomationSkillSchema>;
 
 // Flattened schema for MCP compatibility (MCP doesn't support top-level unions)
 export const ManageAutomationsSchema = Type.Object(
@@ -666,10 +662,9 @@ export const ManageAutomationsSchema = Type.Object(
       })
     ),
     skills: Type.Optional(
-      Type.Array(AutomationSkillSchema, {
-        maxItems: 5,
-        description:
-          "[create/create_version] Up to 5 ordered agent skills pinned into this version as {name, content} snapshots. Server-side agents receive `.skills/<name>/SKILL.md` files; device executors receive the same frozen text in their per-run task. Snapshots, not live references: editing the agent's library later does not change an existing version until a caller publishes a new one (`lobu apply` re-resolves on every run). FULL REPLACEMENT on create_version — passing it (even []) makes it the complete set, and OMITTING it keeps the stored snapshots unchanged. Every name must exist and be enabled in the owning agent's library, or the call is rejected rather than silently running under-instructed.",
+      Type.Array(AutomationSkillNameSchema, {
+        maxItems: AUTOMATION_PINNED_SKILLS_MAX,
+        description: `[create/create_version] Up to ${AUTOMATION_PINNED_SKILLS_MAX} ordered names of workspace library skills (manage_skills list). The server resolves each name when the version is saved and freezes its body into the version; server-side agents receive \`.skills/<name>/SKILL.md\` files and device executors the same frozen text in their per-run task. Frozen copies, not live references: editing the library later does not change an existing version until a caller publishes a new one (\`lobu apply\` re-resolves on every run); get and list flag each copy \`missing\` or \`outdated\` against the library. FULL REPLACEMENT on create_version: passing it (even []) makes it the complete set, and OMITTING it keeps the stored copies unchanged. An unknown or archived name is rejected rather than silently running under-instructed. At most ${AUTOMATION_PINNED_SKILLS_MAX_BYTES} UTF-8 bytes of skill bodies per version.`,
       })
     ),
     sources: Type.Optional(
@@ -1342,6 +1337,12 @@ export interface ManageAutomationsProposal {
   actingAgentId: string | null;
   /** Session `actingAutomationId` at queue time, if any. */
   actingAutomationId: string | null;
+  /**
+   * The library skills `args.skills` resolved to at queue time. Apply resolves
+   * the names again and refuses when any now points at a different skill or
+   * revision, so the approver never applies bodies they did not review.
+   */
+  skillPins?: Array<{ name: string; skill_id: string; revision: number }>;
 }
 // The REST/list helper is a projection of the canonical flattened tool schema,
 // not a second hand-maintained contract that can drift from manage_automations.

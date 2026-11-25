@@ -185,7 +185,7 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
-  test("loads agent-dir markdown + a file skill; frontmatter nix is ignored", async () => {
+  test("loads agent-dir markdown; a declared file skill is resolved but only warned about", async () => {
     dir = mkdtempSync(join(import.meta.dir, "agentdir-"));
     const agentDir = join(dir, "agents", "crm");
     mkdirSync(join(agentDir, "skills", "crm-ops"), { recursive: true });
@@ -219,16 +219,21 @@ describe("loadDesiredStateFromConfig", () => {
       ].join("\n")
     );
 
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    const { state, warnings } = await loadDesiredStateFromConfig({ cwd: dir });
     const settings = state.agents[0]?.settings;
     expect(settings?.soulMd).toBe("You are the CRM agent.");
     expect(settings?.identityMd).toBe("CRM identity.");
-    expect(settings?.skillsConfig?.skills[0]?.name).toBe("crm-ops");
+    // Skills live in the workspace library, never in agent settings.
+    expect(settings).not.toHaveProperty("skillsConfig");
+    expect(warnings).toEqual([
+      expect.stringMatching(
+        /Agent "crm" declares skills \(crm-ops\).*workspace skill library/
+      ),
+    ]);
     // Skills contribute no network — only the agent's domains remain.
     expect(settings?.networkConfig?.allowedDomains).toEqual(["github.com"]);
     // A legacy `nixPackages:` frontmatter key is tolerated but ignored.
     expect(settings?.nixConfig).toBeUndefined();
-    expect(settings?.skillsConfig?.skills[0]).not.toHaveProperty("nixPackages");
   });
 
   test("an inline defineSkill carries content with no files", async () => {
@@ -249,11 +254,11 @@ describe("loadDesiredStateFromConfig", () => {
       ].join("\n")
     );
 
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    const skill = state.agents[0]?.settings.skillsConfig?.skills[0];
-    expect(skill?.name).toBe("greet");
-    expect(skill?.content).toBe("Generate a warm greeting.");
-    expect(skill?.description).toBe("Greet someone.");
+    const { state, warnings } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.agents[0]?.settings).not.toHaveProperty("skillsConfig");
+    expect(warnings).toEqual([
+      expect.stringContaining('Agent "a" declares skills (greet)'),
+    ]);
   });
 
   test("two agents: custom + default dirs keep index alignment", async () => {
@@ -285,7 +290,7 @@ describe("loadDesiredStateFromConfig", () => {
     expect(state.agents[1]?.settings.soulMd).toBe("Agent B soul.");
   });
 
-  test("a skill shared by two agents via skillFromFile lands on both", async () => {
+  test("a skill shared by two agents via skillFromFile is warned about on both", async () => {
     dir = mkdtempSync(join(import.meta.dir, "shared-"));
     mkdirSync(join(dir, "skills", "shared"), { recursive: true });
     writeFileSync(
@@ -307,13 +312,11 @@ describe("loadDesiredStateFromConfig", () => {
       ].join("\n")
     );
 
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    expect(state.agents[0]?.settings.skillsConfig?.skills[0]?.name).toBe(
-      "shared"
-    );
-    expect(state.agents[1]?.settings.skillsConfig?.skills[0]?.name).toBe(
-      "shared"
-    );
+    const { warnings } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect([...warnings].sort()).toEqual([
+      expect.stringContaining('Agent "a" declares skills (shared)'),
+      expect.stringContaining('Agent "b" declares skills (shared)'),
+    ]);
   });
 
   test("rejects duplicate skill names within an agent", async () => {
@@ -542,133 +545,53 @@ describe("loadDesiredStateFromConfig", () => {
     );
   });
 
-  test("pins Automation skills[] as ordered {name, content} snapshots, leaving prompt alone", async () => {
+  test("carries Automation skills[] as ordered library names, leaving prompt alone", async () => {
     dir = mkdtempSync(join(import.meta.dir, "compile-"));
     writeFileSync(
       join(dir, "lobu.config.ts"),
       [
-        `import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";`,
-        `const a = defineAgent({ id: "a", skills: [`,
-        `  defineSkill({ name: "triage", description: "d1", content: "Triage rules." }),`,
-        `  defineSkill({ name: "style", description: "d2", content: "Style rules." }),`,
-        `] });`,
+        `import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";`,
+        `const a = defineAgent({ id: "a" });`,
         `export default defineConfig({ agents: [a], automations: [`,
         `  defineAutomation({ agent: a, slug: "w", prompt: "Do the thing.", skills: ["style", "triage"] }),`,
+        `  defineAutomation({ agent: a, slug: "skills-only", skills: ["triage"] }),`,
         `] });`,
         ``,
       ].join("\n")
     );
+    // The names need not be declared in config: they name workspace library
+    // skills, and the server resolves and freezes them when the version saves.
     const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    // Order follows the Automation's list, not the library's. Descriptions are
-    // not part of the snapshot, so a description-only skill edit must not churn
-    // versions.
-    expect(state.automations[0]?.skillSnapshots).toEqual([
-      { name: "style", content: "Style rules." },
-      { name: "triage", content: "Triage rules." },
-    ]);
-    // The task statement is the author's and is NOT overwritten by the skill
-    // bodies — that conflation is what #2320's follow-up removed.
+    expect(state.automations[0]?.skills).toEqual(["style", "triage"]);
     expect(state.automations[0]?.prompt).toBe("Do the thing.");
-  });
-
-  test("a skills-only Automation keeps an empty prompt rather than inheriting skill text", async () => {
-    dir = mkdtempSync(join(import.meta.dir, "skillsonly-"));
-    writeFileSync(
-      join(dir, "lobu.config.ts"),
-      [
-        `import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";`,
-        `const a = defineAgent({ id: "a", skills: [`,
-        `  defineSkill({ name: "triage", content: "Triage rules." }),`,
-        `] });`,
-        `export default defineConfig({ agents: [a], automations: [`,
-        `  defineAutomation({ agent: a, slug: "w", skills: ["triage"] }),`,
-        `] });`,
-        ``,
-      ].join("\n")
-    );
-    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
-    expect(state.automations[0]?.prompt).toBe("");
-    expect(state.automations[0]?.skillSnapshots).toEqual([
-      { name: "triage", content: "Triage rules." },
-    ]);
-  });
-
-  test("rejects an Automation skill that is missing or has an empty body", async () => {
-    const write = (skills: string, automationSkills: string) => {
-      dir = mkdtempSync(join(import.meta.dir, "badskill-"));
-      writeFileSync(
-        join(dir, "lobu.config.ts"),
-        [
-          `import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";`,
-          `const a = defineAgent({ id: "a", skills: [${skills}] });`,
-          `export default defineConfig({ agents: [a], automations: [`,
-          `  defineAutomation({ agent: a, slug: "w", skills: [${automationSkills}] }),`,
-          `] });`,
-          ``,
-        ].join("\n")
-      );
-      return loadDesiredStateFromConfig({ cwd: dir });
-    };
-    await expect(
-      write(`defineSkill({ name: "real", content: "x" })`, `"ghost"`)
-    ).rejects.toThrow(/no skill with that name/);
-    rmSync(dir, { recursive: true, force: true });
-    await expect(
-      write(`defineSkill({ name: "empty", content: "  " })`, `"empty"`)
-    ).rejects.toThrow(/body is empty/);
-    rmSync(dir, { recursive: true, force: true });
-    await expect(
-      write(
-        `defineSkill({ name: "unsafe/name", content: "x" })`,
-        `"unsafe/name"`
-      )
-    ).rejects.toThrow(/names may contain only/);
+    // A skills-only Automation keeps an empty prompt rather than skill text.
+    expect(state.automations[1]?.prompt).toBe("");
+    expect(state.automations[1]?.skills).toEqual(["triage"]);
   });
 
   test.each([
-    "rubric",
-    "x".repeat(128),
-    ".",
-    "..",
-    "x".repeat(129),
-  ])("preflights Automation skill directory names: %s", async (name) => {
+    ["rubric", true],
+    ["x".repeat(64), true],
+    ["x".repeat(65), false],
+    ["Deploy Helper", false],
+    ["rubric.v2", false],
+    ["unsafe/name", false],
+  ] as const)("preflights Automation skill names against the library grammar: %s", async (name, ok) => {
     dir = mkdtempSync(join(import.meta.dir, "skill-name-"));
     writeFileSync(
       join(dir, "lobu.config.ts"),
       `
-import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";
-const name = ${JSON.stringify(name)};
-const a = defineAgent({ id: "a", skills: [defineSkill({ name, content: "Required instructions" })] });
-export default defineConfig({ agents: [a], automations: [defineAutomation({ agent: a, slug: "w", skills: [name] })] });
+import { defineAgent, defineConfig, defineAutomation } from "@lobu/cli/config";
+const a = defineAgent({ id: "a" });
+export default defineConfig({ agents: [a], automations: [defineAutomation({ agent: a, slug: "w", skills: [${JSON.stringify(name)}] })] });
 `
     );
     const load = loadDesiredStateFromConfig({ cwd: dir });
-    if (name === "." || name === ".." || name.length > 128) {
-      await expect(load).rejects.toThrow(/cannot pin skill/);
+    if (ok) {
+      expect((await load).state.automations[0]?.skills).toEqual([name]);
     } else {
-      expect((await load).state.automations[0]?.skillSnapshots).toEqual([
-        { name, content: "Required instructions" },
-      ]);
+      await expect(load).rejects.toThrow(/library skill names/);
     }
-  });
-
-  test("rejects pinned skill text over the 32KB cap", async () => {
-    dir = mkdtempSync(join(import.meta.dir, "cap-"));
-    writeFileSync(
-      join(dir, "lobu.config.ts"),
-      [
-        `import { defineAgent, defineConfig, defineAutomation, defineSkill } from "@lobu/cli/config";`,
-        `const big = "x".repeat(33 * 1024);`,
-        `const a = defineAgent({ id: "a", skills: [defineSkill({ name: "big", content: big })] });`,
-        `export default defineConfig({ agents: [a], automations: [`,
-        `  defineAutomation({ agent: a, slug: "w", skills: ["big"] }),`,
-        `] });`,
-        ``,
-      ].join("\n")
-    );
-    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
-      /maximum is 32768/
-    );
   });
 
   test("no connectors/ dir → no definitions", async () => {

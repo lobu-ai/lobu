@@ -497,7 +497,7 @@ export type SearchSdkData = {
      */
     title?: string;
     /**
-     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, views.
+     * SDK method or runtime-helper discovery query. Use a namespace (e.g. 'automations'), one or more dotted paths separated by whitespace (e.g. 'automations.create ctx.sleep'), an optional client. prefix, or free text. Pass mode='read' for query_sdk-safe methods only; omit mode for your full run_sdk tier. Namespaces: agents, authProfiles, automations, catalog, classifiers, connections, conversations, ctx, devices, entities, entitySchema, feeds, inferenceProviders, knowledge, metrics, notifications, operations, organizations, schedules, skills, views.
      */
     query: string;
     /**
@@ -3898,19 +3898,6 @@ export type ManageAgentsData = {
           };
           soulMd?: string;
           userMd?: string;
-          skillsConfig?: {
-            skills: Array<{
-              repo: string;
-              name: string;
-              description?: string;
-              instructions?: string;
-              enabled: boolean;
-              system?: boolean;
-              content?: string;
-              modelPreference?: string;
-              thinkingLevel?: "off" | "low" | "medium" | "high";
-            }>;
-          };
           guardrails?: Array<string>;
           guardrailsInline?: Array<{
             name: string;
@@ -4030,19 +4017,6 @@ export type ManageAgentsResponses = {
           soulMd?: string;
           userMd?: string;
           identityMd?: string;
-          skillsConfig?: {
-            skills: Array<{
-              repo: string;
-              name: string;
-              description?: string;
-              instructions?: string;
-              enabled: boolean;
-              system?: boolean;
-              content?: string;
-              modelPreference?: string;
-              thinkingLevel?: "off" | "low" | "medium" | "high";
-            }>;
-          };
           guardrails?: Array<string>;
           guardrailsInline?: Array<{
             name: string;
@@ -4160,19 +4134,6 @@ export type ManageAgentsResponses = {
             };
             soulMd?: string;
             userMd?: string;
-            skillsConfig?: {
-              skills: Array<{
-                repo: string;
-                name: string;
-                description?: string;
-                instructions?: string;
-                enabled: boolean;
-                system?: boolean;
-                content?: string;
-                modelPreference?: string;
-                thinkingLevel?: "off" | "low" | "medium" | "high";
-              }>;
-            };
             guardrails?: Array<string>;
             guardrailsInline?: Array<{
               name: string;
@@ -4210,19 +4171,6 @@ export type ManageAgentsResponses = {
               } | null;
               soulMd?: string | null;
               userMd?: string | null;
-              skillsConfig?: {
-                skills: Array<{
-                  repo: string;
-                  name: string;
-                  description?: string;
-                  instructions?: string;
-                  enabled: boolean;
-                  system?: boolean;
-                  content?: string;
-                  modelPreference?: string;
-                  thinkingLevel?: "off" | "low" | "medium" | "high";
-                }>;
-              } | null;
               guardrails?: Array<string> | null;
               guardrailsInline?: Array<{
                 name: string;
@@ -4265,19 +4213,6 @@ export type ManageAgentsResponses = {
             } | null;
             soulMd?: string | null;
             userMd?: string | null;
-            skillsConfig?: {
-              skills: Array<{
-                repo: string;
-                name: string;
-                description?: string;
-                instructions?: string;
-                enabled: boolean;
-                system?: boolean;
-                content?: string;
-                modelPreference?: string;
-                thinkingLevel?: "off" | "low" | "medium" | "high";
-              }>;
-            } | null;
             guardrails?: Array<string> | null;
             guardrailsInline?: Array<{
               name: string;
@@ -6198,18 +6133,9 @@ export type ManageAutomationsData = {
      */
     prompt?: string;
     /**
-     * [create/create_version] Up to 5 ordered agent skills pinned into this version as {name, content} snapshots. Server-side agents receive `.skills/<name>/SKILL.md` files; device executors receive the same frozen text in their per-run task. Snapshots, not live references: editing the agent's library later does not change an existing version until a caller publishes a new one (`lobu apply` re-resolves on every run). FULL REPLACEMENT on create_version — passing it (even []) makes it the complete set, and OMITTING it keeps the stored snapshots unchanged. Every name must exist and be enabled in the owning agent's library, or the call is rejected rather than silently running under-instructed.
+     * [create/create_version] Up to 16 ordered names of workspace library skills (manage_skills list). The server resolves each name when the version is saved and freezes its body into the version; server-side agents receive `.skills/<name>/SKILL.md` files and device executors the same frozen text in their per-run task. Frozen copies, not live references: editing the library later does not change an existing version until a caller publishes a new one (`lobu apply` re-resolves on every run); get and list flag each copy `missing` or `outdated` against the library. FULL REPLACEMENT on create_version: passing it (even []) makes it the complete set, and OMITTING it keeps the stored copies unchanged. An unknown or archived name is rejected rather than silently running under-instructed. At most 131072 UTF-8 bytes of skill bodies per version.
      */
-    skills?: Array<{
-      /**
-       * Skill name, matching an entry in the owning agent's skill library. Identifies the skill for diffing a pinned snapshot against the library's current body.
-       */
-      name: string;
-      /**
-       * The skill body, frozen as of this version. Server-side agents receive it as `.skills/<name>/SKILL.md`; device executors receive the same frozen text in their per-run task.
-       */
-      content: string;
-    }>;
+    skills?: Array<string>;
     /**
      * [create/create_version] Array of SQL data sources. Each source is { name, query }. To change them on an existing Automation, publish a new version with action: 'create_version'. On create_version this array is the ONLY way to change them and is a FULL REPLACEMENT: passing it (even []) makes it the complete source set, [] clears everything, and OMITTING it keeps the stored sources unchanged. Instruction text is never an input: @-mention chips in an inherited prompt neither add nor remove sources. (On create only, chips in the prompt still seed the initial list, which is how the web composer authors them.) The response returns source_count and removed_sources so you can see what a replacement dropped.
      */
@@ -7683,6 +7609,152 @@ export type ManageClassifiersResponses = {
 
 export type ManageClassifiersResponse =
   ManageClassifiersResponses[keyof ManageClassifiersResponses];
+
+export type ManageSkillsData = {
+  body:
+    | {
+        /**
+         * List the workspace skill library, ordered by (sort_order, name).
+         */
+        action: "list";
+        /**
+         * Include archived skills (default false)
+         */
+        include_archived?: boolean;
+        /**
+         * next_cursor from the previous page
+         */
+        cursor?: string;
+        /**
+         * Page size (default: 50, max: 100)
+         */
+        limit?: number;
+      }
+    | {
+        /**
+         * Fetch one skill by id, or an unarchived skill by name. Pass exactly one.
+         */
+        action: "get";
+        /**
+         * Skill id
+         */
+        id?: string;
+        /**
+         * Name of an unarchived skill
+         */
+        name?: string;
+      };
+  path: {
+    /**
+     * Organization slug (workspace identifier)
+     */
+    orgSlug: string;
+  };
+  query?: never;
+  url: "/api/{orgSlug}/manage_skills";
+};
+
+export type ManageSkillsErrors = {
+  /**
+   * Bad request - invalid parameters
+   */
+  400: {
+    error?: string;
+  };
+  /**
+   * Forbidden - your role or token scope does not allow this action
+   */
+  403: {
+    error?: string;
+  };
+  /**
+   * Tool not found
+   */
+  404: {
+    error?: string;
+  };
+};
+
+export type ManageSkillsError = ManageSkillsErrors[keyof ManageSkillsErrors];
+
+export type ManageSkillsResponses = {
+  /**
+   * Successful response
+   */
+  200:
+    | {
+        items: Array<{
+          /**
+           * Stable skill id
+           */
+          id: string;
+          /**
+           * Unique among the workspace's unarchived skills: lowercase letters, digits and single inner hyphens, at most 64 characters
+           */
+          name: string;
+          description: string;
+          /**
+           * The SKILL.md body
+           */
+          content: string;
+          provenance?: string;
+          applies_to: Array<
+            | {
+                principal_kind: null;
+              }
+            | {
+                principal_kind: "agent" | "app";
+                principal_id: string | null;
+              }
+          >;
+          enabled: boolean;
+          /**
+           * Delivery order; ties order by name
+           */
+          sort_order: number;
+          revision: number;
+          archived: boolean;
+        }>;
+        next_cursor: string | null;
+      }
+    | {
+        skill: {
+          /**
+           * Stable skill id
+           */
+          id: string;
+          /**
+           * Unique among the workspace's unarchived skills: lowercase letters, digits and single inner hyphens, at most 64 characters
+           */
+          name: string;
+          description: string;
+          /**
+           * The SKILL.md body
+           */
+          content: string;
+          provenance?: string;
+          applies_to: Array<
+            | {
+                principal_kind: null;
+              }
+            | {
+                principal_kind: "agent" | "app";
+                principal_id: string | null;
+              }
+          >;
+          enabled: boolean;
+          /**
+           * Delivery order; ties order by name
+           */
+          sort_order: number;
+          revision: number;
+          archived: boolean;
+        };
+      };
+};
+
+export type ManageSkillsResponse =
+  ManageSkillsResponses[keyof ManageSkillsResponses];
 
 export type ManageViewsData = {
   body:

@@ -46,6 +46,11 @@ import {
 	manageClassifiers,
 } from "./manage_classifiers";
 import {
+	ManageSkillsResultSchema,
+	ManageSkillsSchema,
+	manageSkills,
+} from "./manage_skills";
+import {
 	ManageConnectionsResultSchema,
 	ManageConnectionsSchema,
 	manageConnections,
@@ -279,6 +284,15 @@ const ENTRIES: AdminToolEntry[] = [
 		resultSchema: ManageClassifiersResultSchema,
 		handler: manageClassifiers,
 		annotations: DESTRUCTIVE_WITH_TITLE("Manage classifiers"),
+	},
+	{
+		name: "manage_skills",
+		description:
+			"Workspace skill library (read). SDK alternative: client.skills.",
+		schema: ManageSkillsSchema,
+		resultSchema: ManageSkillsResultSchema,
+		handler: manageSkills,
+		annotations: READ_ONLY_WITH_TITLE("Read skills"),
 	},
 	{
 		name: "manage_views",

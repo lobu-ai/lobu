@@ -612,7 +612,6 @@ function diffAgent(
 const SETTINGS_FIELDS: Array<keyof AgentSettings> = [
   "networkConfig",
   "nixConfig",
-  "skillsConfig",
   "guardrails",
   "models",
   "soulMd",
@@ -1530,6 +1529,10 @@ function remoteOnlyDefinitionRow(
 // every apply that leaves remote-only sources/skills/tags intact look like
 // remote-moved drift and permanently block re-apply.
 
+/** The skill names a remote Automation's current version froze, in order. */
+const remoteSkillNames = (remote?: RemoteAutomation): string[] =>
+  (remote?.skills ?? []).map((copy) => copy.name);
+
 interface AutomationProjection {
   executionConfig?: RemoteAutomation["execution_config"];
   agent?: string | null;
@@ -1537,7 +1540,7 @@ interface AutomationProjection {
   description?: string | null;
   triggers?: DesiredAutomationTrigger[];
   prompt?: string | null;
-  skills?: Array<{ name: string; content: string }> | null;
+  skills?: string[] | null;
   sources?: AutomationSource[] | null;
   reactionsGuidance?: string | null;
   deviceWorkerId?: string | null;
@@ -1574,8 +1577,7 @@ export const projectDesiredAutomation = (
       : (remote?.description ?? null),
   triggers: d.triggers ?? [],
   prompt: d.prompt ?? "",
-  skills:
-    d.skillSnapshots !== undefined ? d.skillSnapshots : (remote?.skills ?? []),
+  skills: d.skills !== undefined ? d.skills : remoteSkillNames(remote),
   sources: d.sources !== undefined ? d.sources : (remote?.sources ?? []),
   reactionsGuidance:
     d.reactionsGuidance !== undefined
@@ -1616,7 +1618,7 @@ const projectRemoteAutomation = (
   description: w.description ?? null,
   triggers: w.triggers ?? [],
   prompt: w.prompt ?? "",
-  skills: w.skills ?? [],
+  skills: remoteSkillNames(w),
   sources: w.sources ?? [],
   reactionsGuidance: w.reactions_guidance ?? null,
   deviceWorkerId: w.device_worker_id ?? null,
@@ -1811,13 +1813,14 @@ function diffAutomation(
   if (desired.prompt !== (remote.prompt ?? "")) {
     versionBound.push("prompt");
   }
-  // Compare the resolved snapshots, not the config's name list. Editing a
-  // SKILL.md changes no name, so a name-level diff would report "no changes"
-  // and leave every Automation pinned to the old body — re-apply is how a config
-  // project takes a skill update, and this comparison is what makes it land.
+  // A version freezes each library skill's body at save time. Editing the
+  // library changes no name, so the name list alone would leave the Automation
+  // on the old body; the server flags such a copy `outdated` (or `missing`),
+  // and re-saving the version is how apply takes the library's current text.
   if (
-    desired.skillSnapshots !== undefined &&
-    !deepEqual(desired.skillSnapshots, remote.skills ?? [])
+    desired.skills !== undefined &&
+    (!deepEqual(desired.skills, remoteSkillNames(remote)) ||
+      (remote.skills ?? []).some((copy) => copy.missing || copy.outdated))
   ) {
     versionBound.push("skills");
   }

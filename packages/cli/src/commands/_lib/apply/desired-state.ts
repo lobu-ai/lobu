@@ -10,7 +10,6 @@ import type {
   FeedDefinition,
 } from "@lobu/connector-sdk";
 import type { AgentSettings } from "@lobu/core";
-import { skillDirectoryName } from "@lobu/core/agent-tooling";
 import { createAjv } from "@lobu/core/ajv";
 import { hasWorkspaceAttachment } from "@lobu/core/contracts/tools/view-attach";
 import {
@@ -137,17 +136,11 @@ export interface DesiredAutomation {
    */
   prompt: string;
   /**
-   * Ordered skill names as written in config — the authoring input, resolved
-   * into {@link DesiredAutomation.skillSnapshots} at load time.
+   * Ordered names of workspace library skills. The server freezes each body
+   * into the version at save time; the diff compares names and re-saves when
+   * the server flags a frozen copy `missing` or `outdated`.
    */
   skills?: string[];
-  /**
-   * The resolved `{name, content}` pairs actually sent to the server and pinned
-   * onto the version. Separate from `skills` because the diff must compare
-   * BODIES, not names: editing a skill's text changes nothing about the name
-   * list, and a name-only diff would let a re-apply silently skip the update.
-   */
-  skillSnapshots?: Array<{ name: string; content: string }>;
   /** Optional SQL data sources; server applies a default when omitted. */
   sources?: AutomationSource[];
   /**
@@ -309,7 +302,7 @@ export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
    * Settings payload destined for `PATCH /:agentId/config`. Built by the mapper
-   * + agent-dir loader: networkConfig, skillsConfig,
+   * + agent-dir loader: networkConfig,
    * guardrails, nixConfig,
    * models (ordered `<provider>/<model>` refs),
    * identityMd/soulMd/userMd.
@@ -423,30 +416,23 @@ async function parseSkillFrontmatter(raw: string): Promise<{
   };
 }
 
-type SkillConfigEntry = NonNullable<
-  AgentSettings["skillsConfig"]
->["skills"][number];
-
-/**
- * Map a resolved skill (inline `defineSkill` or file-loaded `skillFromFile`)
- * into a `SkillConfig` entry — the shape stored on agent settings and synced to
- * the worker's `.skills/`. Skills are instruction text only — they declare no
- * nix, network, or MCP config.
- */
-function skillToConfig(args: {
+/** A skill declared in config: inline `defineSkill` or file-loaded `skillFromFile`. */
+interface LocalSkill {
   name: string;
   content: string;
-  source: "inline" | "file";
   description?: string;
-}): SkillConfigEntry {
-  const skill: SkillConfigEntry = {
-    repo: `${args.source}/${args.name}`,
+}
+
+function localSkill(args: {
+  name: string;
+  content: string;
+  description?: string;
+}): LocalSkill {
+  return {
     name: args.name,
     content: args.content,
-    enabled: true,
+    ...(args.description ? { description: args.description } : {}),
   };
-  if (args.description) skill.description = args.description;
-  return skill;
 }
 
 /** Read a `SKILL.md` (a dir holding one, or a `.md` path) for `skillFromFile`. */
@@ -477,95 +463,35 @@ async function readSkillFile(
 }
 
 /** Resolve one declared skill (inline `defineSkill` or `skillFromFile`). */
-async function resolveSkill(
-  skill: Skill,
-  cwd: string
-): Promise<SkillConfigEntry> {
+async function resolveSkill(skill: Skill, cwd: string): Promise<LocalSkill> {
   if (skill.path !== undefined) {
     const { name, content, fm } = await readSkillFile(
       cwd,
       skill.path,
       skill.name
     );
-    return skillToConfig({
-      name,
-      content,
-      source: "file",
-      description: fm?.description,
-    });
+    return localSkill({ name, content, description: fm?.description });
   }
   if (!skill.name) {
     throw new ValidationError("defineSkill requires a `name`.");
   }
-  return skillToConfig({
+  return localSkill({
     name: skill.name,
     content: skill.content ?? "",
-    source: "inline",
     description: skill.description,
   });
 }
 
-/** Byte cap on the skill snapshots pinned to one Automation version (issue #2320). */
-const MAX_COMPILED_INSTRUCTIONS_BYTES = 32 * 1024;
-
 /**
- * Resolve an Automation's ordered `skills[]` into frozen `{name, content}`
- * snapshots. Fails loud on a name the owning agent's library does not declare,
- * a name the worker cannot materialize safely, an empty body, or a total payload
- * over {@link MAX_COMPILED_INSTRUCTIONS_BYTES}.
- */
-function resolveAutomationSkills(
-  automation: DesiredAutomation,
-  agentSkills: SkillConfigEntry[]
-): Array<{ name: string; content: string }> {
-  const names = automation.skills ?? [];
-  if (names.length === 0) return [];
-  const byName = new Map(agentSkills.map((skill) => [skill.name, skill]));
-  const resolved = names.map((name) => {
-    if (skillDirectoryName(name) !== name) {
-      throw new ValidationError(
-        `Automation "${automation.slug}" cannot pin skill "${name}" — names may contain only 1–128 letters, numbers, ".", "_", and "-", excluding "." and ".."`
-      );
-    }
-    const skill = byName.get(name);
-    if (!skill) {
-      throw new ValidationError(
-        `Automation "${automation.slug}" references skill "${name}", but agent "${automation.agent}" declares no skill with that name in its skills library`
-      );
-    }
-    const body = skill.content?.trim();
-    if (!body) {
-      throw new ValidationError(
-        `Automation "${automation.slug}" references skill "${name}", but its body is empty — a pinned skill needs text`
-      );
-    }
-    return { name, content: body };
-  });
-  // The cap is on total pinned text, not on any one skill: the whole set is
-  // written into the worker's `.skills/` tree and, for a device-pinned Automation,
-  // shipped in the dispatch payload.
-  const bytes = resolved.reduce(
-    (total, skill) => total + Buffer.byteLength(skill.content, "utf8"),
-    0
-  );
-  if (bytes > MAX_COMPILED_INSTRUCTIONS_BYTES) {
-    throw new ValidationError(
-      `Automation "${automation.slug}" pins ${bytes} bytes of skill text — the maximum is ${MAX_COMPILED_INSTRUCTIONS_BYTES} (${MAX_COMPILED_INSTRUCTIONS_BYTES / 1024}KB)`
-    );
-  }
-  return resolved;
-}
-
-/**
- * Resolve an agent's declared `skills` into `SkillConfig` entries, deduped by
- * name (a duplicate is an authoring error — explicit lists shouldn't collide).
+ * Resolve an agent's declared `skills`, deduped by name (a duplicate is an
+ * authoring error — explicit lists shouldn't collide).
  */
 async function resolveAgentSkills(
   skills: Skill[],
   cwd: string
-): Promise<SkillConfigEntry[]> {
+): Promise<LocalSkill[]> {
   const resolved = await Promise.all(skills.map((s) => resolveSkill(s, cwd)));
-  const byName = new Map<string, SkillConfigEntry>();
+  const byName = new Map<string, LocalSkill>();
   for (const skill of resolved) {
     if (byName.has(skill.name)) {
       throw new ValidationError(
@@ -1332,39 +1258,24 @@ export async function loadDesiredStateFromConfig(
   );
   const state = mapProjectToDesiredState(typedProject, env, opts.only);
 
-  // Agent artifacts: SOUL/IDENTITY/USER.md (convention, from the agent dir) +
-  // skills (explicit `defineAgent({ skills })`, inline or `skillFromFile`). The
-  // mapper stays pure (no file IO); we read the files here and merge them in.
-  const skillsByAgentId = new Map<string, SkillConfigEntry[]>();
+  // Agent artifacts: SOUL/IDENTITY/USER.md (convention, from the agent dir).
+  // The mapper stays pure (no file IO); we read the files here and merge them in.
+  // Skills declared on an agent are still resolved, so a broken SKILL.md fails
+  // the load, but apply does not write the workspace skill library yet.
+  const warnings: string[] = [];
   await Promise.all(
     typedProject.agents.map(async (agent, i) => {
       const settings = state.agents[i]?.settings;
       if (!settings) return;
       const agentDir = resolve(opts.cwd, agent.dir ?? join("agents", agent.id));
-      const markdown = await readMarkdown(agentDir);
-      const localSkills =
-        agent.skills === undefined
-          ? undefined
-          : await resolveAgentSkills(agent.skills, opts.cwd);
-      mergeAgentDirArtifacts(settings, markdown, localSkills);
-      skillsByAgentId.set(agent.id, settings.skillsConfig?.skills ?? []);
+      mergeAgentDirArtifacts(settings, await readMarkdown(agentDir));
+      if (agent.skills === undefined || agent.skills.length === 0) return;
+      const declared = await resolveAgentSkills(agent.skills, opts.cwd);
+      warnings.push(
+        `Agent "${agent.id}" declares skills (${declared.map((skill) => skill.name).join(", ")}) that lobu apply does not write: skills live in the workspace skill library and apply cannot edit the library yet.`
+      );
     })
   );
-
-  // Resolve each Automation's `skills[]` to {name, content} snapshots against the
-  // owning agent's library. This happens BEFORE the diff reads them, so a change
-  // to a referenced skill's BODY still drives version churn — re-applying is how
-  // a config project takes a skill update, and the diff is what notices.
-  //
-  // The bodies are no longer folded into `prompt`: the prompt is the author's
-  // task statement (or empty), and skills ride alongside as pinned files.
-  for (const automation of state.automations) {
-    if (automation.skills === undefined) continue;
-    automation.skillSnapshots = resolveAutomationSkills(
-      automation,
-      automation.agent ? (skillsByAgentId.get(automation.agent) ?? []) : []
-    );
-  }
 
   // Automation lifecycle modules: sibling `.ts` files referenced
   // by path. The mapper stays pure; resolve + read each raw source here for the
@@ -1441,10 +1352,6 @@ export async function loadDesiredStateFromConfig(
       )
     );
   }
-  // Surface load-time warnings to `lobu apply` (which prints them). #1010's
-  // "ignored connectors because [memory] is disabled" case is obsolete here —
-  // lobu.config.ts has no `[memory].enabled` gate, so connectors always load —
-  // but the channel is kept so future TS-loader warnings flow to the operator.
-  const warnings: string[] = [];
+  // Surface load-time warnings to `lobu apply` (which prints them).
   return { state, configPath, warnings };
 }

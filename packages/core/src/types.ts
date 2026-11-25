@@ -75,7 +75,7 @@ export interface DeclaredCredential {
 }
 
 // Agent-settings nested types (NetworkConfig, NixConfig,
-// SkillConfig, SkillsConfig, AgentInlineGuardrail, ThinkingLevel) now live in
+// SkillConfig, SkillsConfig, AgentInlineGuardrail) now live in
 // ./contracts/agent-settings.ts as the single TypeBox-schema source (Static<typeof ...>). They are re-exported
 // from there at the bottom of this file so the @lobu/core public surface and
 // core-internal imports keep resolving. The hand-written duplicates that
@@ -359,5 +359,4 @@ export type {
   NixConfig,
   SkillConfig,
   SkillsConfig,
-  ThinkingLevel,
 } from "./contracts/agent-settings";

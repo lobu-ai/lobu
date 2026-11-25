@@ -1023,7 +1023,7 @@ export async function executePlan(
           name: w.name,
           description: w.description,
           prompt: w.prompt,
-          ...(w.skillSnapshots?.length ? { skills: w.skillSnapshots } : {}),
+          ...(w.skills?.length ? { skills: w.skills } : {}),
           ...(w.reactionScript
             ? { reaction_script: w.reactionScript.sourceCode }
             : {}),
@@ -1133,9 +1133,7 @@ export async function executePlan(
               ? { description: w.description ?? "" }
               : {}),
             ...(versionBound.has("prompt") ? { prompt: w.prompt } : {}),
-            ...(versionBound.has("skills")
-              ? { skills: w.skillSnapshots ?? [] }
-              : {}),
+            ...(versionBound.has("skills") ? { skills: w.skills ?? [] } : {}),
             ...(versionBound.has("sources") && w.sources !== undefined
               ? { sources: w.sources }
               : {}),

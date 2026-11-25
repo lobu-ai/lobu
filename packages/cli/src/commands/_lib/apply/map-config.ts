@@ -19,6 +19,11 @@ import {
   normalizeEntityTypeSlug,
 } from "@lobu/core";
 import { AgentSettingsPatchSchema } from "@lobu/core/contracts/agent-settings";
+import {
+  AUTOMATION_PINNED_SKILLS_MAX,
+  isLibrarySkillName,
+  LIBRARY_SKILL_NAME_MAX_CHARS,
+} from "@lobu/core/agent-tooling";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
   RECORD_KEY_ANNOTATION,
@@ -238,9 +243,6 @@ function resolveConnectionConfigValue(
     : value;
 }
 
-/** Skill entries resolved from `defineAgent({ skills })` (inline + file). */
-type LocalSkills = NonNullable<AgentSettings["skillsConfig"]>["skills"];
-
 /** Agent-dir prompt markdown (read by the loader from SOUL/IDENTITY/USER.md). */
 export interface AgentMarkdown {
   soulMd?: string;
@@ -249,19 +251,14 @@ export interface AgentMarkdown {
 }
 
 /**
- * Merge an agent's file-resolved artifacts (prompt markdown from its dir +
- * skills declared via `defineAgent({ skills })`) into the already-mapped agent
- * settings. Pure (no file IO — the loader reads the files and passes the
- * results in) so it can be unit-tested directly.
- *
- * Skills are instruction text only — they contribute no nix, network, or MCP
- * config. Packages come from the agent (`nixConfig`, already in `settings`) or
- * connector `agentTooling`, never from skills.
+ * Merge an agent's prompt markdown (read from its dir) into the already-mapped
+ * agent settings. Pure (no file IO — the loader reads the files and passes the
+ * results in) so it can be unit-tested directly. Skills are not agent settings:
+ * they live in the workspace skill library.
  */
 export function mergeAgentDirArtifacts(
   settings: Partial<AgentSettings>,
-  markdown: AgentMarkdown,
-  localSkills?: LocalSkills
+  markdown: AgentMarkdown
 ): void {
   for (const key of ["soulMd", "identityMd", "userMd"] as const) {
     if (markdown[key] === undefined) continue;
@@ -271,14 +268,6 @@ export function mergeAgentDirArtifacts(
       );
     }
     settings[key] = markdown[key];
-  }
-  if (localSkills !== undefined) {
-    if (settings.skillsConfig !== undefined) {
-      throw new ValidationError(
-        "Declare either skills or settings.skillsConfig, not both"
-      );
-    }
-    settings.skillsConfig = { skills: localSkills };
   }
 }
 
@@ -306,7 +295,6 @@ function mapAgent(
     ["nixPackages", "nixConfig"],
     ["guardrails", "guardrails"],
     ["starters", "starters"],
-    ["skills", "skillsConfig"],
   ] as const) {
     if (agent[helper] !== undefined && settings[key] !== undefined) {
       throw new ValidationError(
@@ -543,9 +531,6 @@ function mapAutomationOutputs(
   );
 }
 
-/** Max skills an Automation may pin on one version (issue #2320 cap). */
-const MAX_AUTOMATION_SKILLS = 5;
-
 /**
  * Instruction-presence rule. An event trigger executing as "turn" carries its own
  * content (the incoming message/event), so it may run with zero instructions on
@@ -563,15 +548,23 @@ function assertAutomationSkills(
   instructionSourceDeclared: boolean
 ): void {
   const skills = automation.skills ?? [];
+  // Names only: whether each exists in the workspace library is the server's
+  // check when the version is saved.
+  const malformed = skills.filter((name) => !isLibrarySkillName(name));
+  if (malformed.length > 0) {
+    throw new ValidationError(
+      `Automation "${automation.slug}" cannot pin skill(s) ${malformed.map((name) => `"${name}"`).join(", ")} — library skill names are lowercase letters, digits and single hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters`
+    );
+  }
   const duplicates = skills.filter((name, i) => skills.indexOf(name) !== i);
   if (duplicates.length > 0) {
     throw new ValidationError(
       `Automation "${automation.slug}" lists duplicate skill(s): ${[...new Set(duplicates)].join(", ")} — each skill may appear once (the compile is ordered, not repeated)`
     );
   }
-  if (skills.length > MAX_AUTOMATION_SKILLS) {
+  if (skills.length > AUTOMATION_PINNED_SKILLS_MAX) {
     throw new ValidationError(
-      `Automation "${automation.slug}" references ${skills.length} skills — the maximum is ${MAX_AUTOMATION_SKILLS}`
+      `Automation "${automation.slug}" references ${skills.length} skills — the maximum is ${AUTOMATION_PINNED_SKILLS_MAX}`
     );
   }
   const triggers = automation.triggers ?? [];
@@ -733,11 +726,10 @@ function mapAutomation(automation: Automation): DesiredAutomation {
   return {
     slug: automation.slug,
     agent: automation.agent == null ? null : agentId(automation.agent),
-    // The author's task statement, carried straight through. Skill BODIES are
-    // no longer folded in here — the loader resolves them into `skillSnapshots`
-    // (see `resolveAutomationSkills` in desired-state.ts), because the mapper is
-    // pure and cannot read skill files. "" is legitimate for an Automation whose
-    // whole job is its skills, and for event-turn Automations with neither.
+    // The author's task statement, carried straight through. Skills are
+    // library names the server freezes at save time. "" is legitimate for an
+    // Automation whose whole job is its skills, and for event-turn Automations
+    // with neither.
     prompt: automation.prompt ?? "",
     ...(automation.skills !== undefined ? { skills: automation.skills } : {}),
     ...(automation.outputs !== undefined

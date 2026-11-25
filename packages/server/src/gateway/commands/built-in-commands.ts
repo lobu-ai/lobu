@@ -12,6 +12,8 @@ import {
   resolveEffectiveModelRef,
 } from "../auth/settings/model-selection.js";
 import { formatChatCommand } from "./command-spelling.js";
+import { getDb } from "../../db/client.js";
+import { resolveLibrarySkillsFor } from "../../skills/workspace-skills.js";
 
 const LINK_AUTHORITY_REVOKED_MESSAGE = "The existing chat link no longer has access to both workspaces. Retire its Automation in Lobu, then link this chat again.";
 
@@ -76,14 +78,21 @@ export function registerBuiltInCommands(
             ctx.connectionId, ctx.channelId, ctx.organizationId, { teamId: ctx.teamId },
           )
         : null;
+      const organizationId = subscription?.organizationId ?? ctx.organizationId;
       const settings = await deps.agentSettingsStore.getSettings(ctx.agentId, {
-        organizationId: subscription?.organizationId ?? ctx.organizationId,
+        organizationId,
       });
 
       const effectiveModel = resolveEffectiveModelRef(settings);
       const model = effectiveModel || "(org default)";
-      const skillsCount = settings?.skillsConfig?.skills
-        ? Object.keys(settings.skillsConfig.skills).length
+      const skillsCount = organizationId
+        ? (
+            await resolveLibrarySkillsFor(getDb(), organizationId, {
+              kind: "agent",
+              id: ctx.agentId,
+              ownerAgentId: null,
+            })
+          ).length
         : 0;
 
       const parts = [

@@ -75,6 +75,7 @@ import {
   createTestOrganization,
   createTestPAT,
   createTestUser,
+  createTestWorkspaceSkill,
   insertChatConnectionRow,
   linkChatIdentityInGraph,
   seedSystemEntityTypes,
@@ -1230,10 +1231,9 @@ describe('agent turn producer', () => {
     expect(JSON.stringify(envelope.turn)).not.toContain('lobu_secret_');
   });
 
-  it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
+  it('seeds the enabled library skills that apply to the agent, in (sort_order, name) order', async () => {
     const org = await createTestOrganization();
     const content = 'x'.repeat(64_000);
-    const extras = Array.from({ length: 64 }, (_, i) => ({ name: `extra-${i}`, content: `Extra ${i}.` }));
     const owner = await createTestUser();
     await addUserToOrganization(owner.id, org.id, 'owner');
     const sdk = buildAgentsNamespace({
@@ -1243,19 +1243,25 @@ describe('agent turn producer', () => {
       directSearchFederation: false, scopes: ["mcp:read", "mcp:write", "mcp:admin"],
     }, {});
     await sdk.create({ agent_id: AGENT_ID, name: 'Skill execution' });
-    await sdk.update({ agent_id: AGENT_ID, settings: {
-      skillsConfig: { skills: [
-        { repo: 'owner', name: 'owner/triage', enabled: true, content },
-        { repo: 'owner', name: 'bad skill', enabled: true, content: 'skip' },
-        { repo: 'owner', name: '..', enabled: true, content: 'skip' },
-        { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
-        { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
-        { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
-        // 64 more valid skills behind the skipped ones: the 64-skill cap
-        // counts only skills that survive the filter, so `extra-63` is cut.
-        ...extras.map((skill) => ({ repo: 'owner', enabled: true, ...skill })),
-      ] },
-    } });
+    await sdk.create({ agent_id: 'other-agent', name: 'Other agent' });
+    const skill = (name: string, extra: Partial<Parameters<typeof createTestWorkspaceSkill>[0]> = {}) =>
+      createTestWorkspaceSkill({ organizationId: org.id, name, ...extra });
+    // Sort order wins over name; ties break by name.
+    await skill('triage', { content, sortOrder: 0, appliesTo: [{ kind: 'agent', id: AGENT_ID }] });
+    await skill('alpha-everyone', { content: 'Everyone.', sortOrder: 0 });
+    await skill('kind-wide', { content: 'Every agent.', sortOrder: 0, appliesTo: [{ kind: 'agent', id: null }] });
+    // Not delivered: disabled, archived, another agent's, an app's.
+    await skill('disabled', { enabled: false, sortOrder: 0 });
+    const archived = await skill('archived', { sortOrder: 0 });
+    await getTestDb()`UPDATE workspace_skills SET archived_at = now() WHERE id = ${archived.id}`;
+    await skill('other-agents', { sortOrder: 0, appliesTo: [{ kind: 'agent', id: 'other-agent' }] });
+    await skill('apps-only', { sortOrder: 0, appliesTo: [{ kind: 'app', id: null }] });
+    // 64 more behind them: the 64-skill cap cuts the tail.
+    const extras = Array.from({ length: 64 }, (_, i) => ({
+      name: `extra-${String(i).padStart(2, '0')}`, content: `Extra ${i}.`,
+    }));
+    for (const extra of extras) await skill(extra.name, { content: extra.content, sortOrder: 1 });
+
     const agentSettings = new AgentSettingsStore(createPostgresAgentConfigStore());
     await enqueueMessage(messageFor(org.id), {
       agentSettings,
@@ -1265,7 +1271,12 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
-    expect(turn.skills).toEqual([{ name: 'triage', content }, ...extras.slice(0, 63)]);
+    expect(turn.skills).toEqual([
+      { name: 'alpha-everyone', content: 'Everyone.' },
+      { name: 'kind-wide', content: 'Every agent.' },
+      { name: 'triage', content },
+      ...extras.slice(0, 61),
+    ]);
     expect(turn.system_prompt).toContain('/workspace/.skills');
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
   });
@@ -1277,9 +1288,10 @@ describe('agent turn producer', () => {
     { label: 'dot', skills: [{ name: '.', content: 'Frozen instructions.' }], readable: false },
     { label: 'parent', skills: [{ name: '..', content: 'Frozen instructions.' }], readable: false },
     { label: 'long name', skills: [{ name: 'x'.repeat(129), content: 'Frozen instructions.' }], readable: false },
-    { label: 'maximum UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_384) }], readable: true },
-    { label: 'maximum count and bytes', skills: Array.from({ length: 5 }, (_, i) => ({ name: `pin-${i}`, content: i === 0 ? 'é'.repeat(16_382) : 'x' })), readable: true },
-    { label: 'excess UTF-8 bytes', skills: [{ name: 'utf8', content: 'é'.repeat(16_385) }], readable: false },
+    { label: 'maximum UTF-8 bytes', skills: [{ name: 'utf8-a', content: 'é'.repeat(32_768) }, { name: 'utf8-b', content: 'é'.repeat(32_768) }], readable: true },
+    { label: 'maximum count and bytes', skills: Array.from({ length: 16 }, (_, i) => ({ name: `pin-${i}`, content: 'x'.repeat(8_192) })), readable: true },
+    { label: 'excess UTF-8 bytes', skills: [{ name: 'utf8-a', content: 'é'.repeat(32_768) }, { name: 'utf8-b', content: 'é'.repeat(32_769) }], readable: false },
+    { label: 'excess count', skills: Array.from({ length: 17 }, (_, i) => ({ name: `pin-${i}`, content: 'Frozen instructions.' })), readable: false },
     { label: 'legacy oversized body', skills: [{ name: 'oversized', content: 'x'.repeat(64_001) }], readable: false },
     { label: 'legacy excess count', skills: Array.from({ length: 65 }, (_, i) => ({ name: `pin-${i}`, content: 'Frozen instructions.' })), readable: false },
     { label: 'duplicate names', skills: [{ name: 'same', content: 'First.' }, { name: 'same', content: 'Second.' }], readable: false },
@@ -1287,7 +1299,7 @@ describe('agent turn producer', () => {
     // The live library must not re-enter a frozen Automation: editing or
     // disabling a skill after approval would change the instructions an
     // already-approved Automation runs, and unrelated live skills would join
-    // the run. The isolate producer read `agentSettings.skillsConfig`
+    // the run. The isolate producer once read the agent's live skills
     // unconditionally, so both happened.
     const sql = getTestDb();
     const org = await createTestOrganization();
@@ -1312,12 +1324,10 @@ describe('agent turn producer', () => {
       RETURNING id
     `;
 
-    // The live library holds a DIFFERENT skill, which must not appear.
+    // The live library holds a DIFFERENT skill that applies to everyone; it must not appear.
+    await createTestWorkspaceSkill({ organizationId: org.id, name: 'edited-after-approval', content: 'Live drift.' });
     const liveSettings = {
-      getSettings: async () => ({
-        identityMd: '', soulMd: '', userMd: '',
-        skillsConfig: { skills: [{ repo: 'o', name: 'edited-after-approval', enabled: true, content: 'Live drift.' }] },
-      }),
+      getSettings: async () => ({ identityMd: '', soulMd: '', userMd: '' }),
     } as unknown as AgentSettingsStore;
 
     const message = {

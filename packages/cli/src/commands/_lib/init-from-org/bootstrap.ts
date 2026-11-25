@@ -20,6 +20,7 @@ import { basename, join, resolve } from "node:path";
 import type { AgentSettings } from "@lobu/core";
 import { RECORD_KEY_ANNOTATION } from "@lobu/core/contracts/entity-reference";
 import { resolvedEventExecution } from "@lobu/core/contracts/tools/manage-automations";
+import type { WorkspaceSkill } from "@lobu/core/contracts/tools/manage-skills";
 import chalk from "chalk";
 import { UNRESOLVED_MODEL_SUFFIX } from "../../../config/index.js";
 import { printText } from "../../../internal/output.js";
@@ -379,36 +380,18 @@ function emitAgent(
     });
   }
 
-  // Local skills → skills/<name>/SKILL.md (frontmatter is name/description
-  // only — skills are instruction text), referenced explicitly via
-  // `skillFromFile` so the apply loader picks them up (there is no directory
-  // auto-discovery). System/runtime skills are skipped.
-  const skillRefs: string[] = [];
-  for (const skill of settings?.skillsConfig?.skills ?? []) {
-    if (skill.system) continue;
-    files.push({
-      relPath: `${dir}/skills/${skill.name}/SKILL.md`,
-      body: emitSkillFile(skill),
-    });
-    skillRefs.push(`skillFromFile(${str(`./${dir}/skills/${skill.name}`)})`);
-  }
-  if (skillRefs.length > 0) {
-    imports.use("skillFromFile");
-    fields.push(`skills: [\n    ${skillRefs.join(",\n    ")},\n  ]`);
-  }
-
   const handleName = minter.mint(agent.agentId, "Agent");
   const decl = `const ${handleName} = defineAgent(${objectLiteral(fields, 0)});`;
   return { handle: { name: handleName, decl }, files };
 }
 
-function emitSkillFile(
-  skill: NonNullable<AgentSettings["skillsConfig"]>["skills"][number]
-): string {
-  const fm: string[] = [`name: ${skill.name}`];
-  if (skill.description) fm.push(`description: ${skill.description}`);
-  const body = skill.content ?? "";
-  return `---\n${fm.join("\n")}\n---\n${body}\n`;
+/** A library skill as SKILL.md: name/description frontmatter, then the body. */
+function emitSkillFile(skill: WorkspaceSkill): string {
+  const fm = [`name: ${skill.name}`];
+  // A JSON string is a valid YAML double-quoted scalar, so any description
+  // (colons, quotes, newlines) parses back unchanged.
+  if (skill.description) fm.push(`description: ${str(skill.description)}`);
+  return `---\n${fm.join("\n")}\n---\n${ensureTrailingNewline(skill.content)}`;
 }
 
 function ensureTrailingNewline(s: string): string {
@@ -554,9 +537,8 @@ function emitAutomation(
     fields.push(`triggers: ${emitValue(triggers, 1)}`);
   }
   // Emit the author-facing prompt verbatim and preserve the pinned skill names.
-  // The generated agent library carries its CURRENT bodies; generateProject
-  // warns when those differ from this version's snapshots because the next
-  // apply will then publish an explicit skill upgrade.
+  // generateProject warns when the library flags a frozen copy, because the
+  // next apply then re-freezes the library's current body.
   if (w.prompt?.trim()) fields.push(`prompt: ${str(w.prompt)}`);
   if (w.skills?.length) {
     fields.push(`skills: [${w.skills.map((s) => str(s.name)).join(", ")}]`);
@@ -810,6 +792,8 @@ interface FetchedState {
   /** The stored navigation document; null when the workspace uses defaults
    *  or this login is not a navigation editor. */
   navigation: NavigationConfig | null;
+  /** The unarchived workspace skill library, or why it could not be read. */
+  skillLibrary: { skills: WorkspaceSkill[] } | { error: string };
 }
 
 async function fetchOrgState(
@@ -846,6 +830,14 @@ async function fetchOrgState(
     .getNavigation()
     .then((state) => state.config)
     .catch(() => null);
+  // A login without the skill read check still bootstraps everything else;
+  // generateProject says the library was not exported.
+  const skillLibrary = await client
+    .listSkills()
+    .then((skills) => ({ skills }))
+    .catch((error: unknown) => ({
+      error: error instanceof Error ? error.message : String(error),
+    }));
 
   // The relationship-type `list` action omits rules, so hydrate each type's
   // rules (list_rules) before emitting — otherwise the generated config drops
@@ -935,6 +927,7 @@ async function fetchOrgState(
     connections,
     connectorDefinitions,
     navigation,
+    skillLibrary,
   };
 }
 
@@ -960,13 +953,9 @@ function generateProject(
   const files: Array<{ relPath: string; body: string }> = [];
   const warnings: string[] = [];
 
-  // Prompt text round-trips directly. Skill references resolve through the
-  // generated agent library, whose bodies are the library's current state, not
-  // necessarily the older snapshots pinned on each Automation version. Surface
-  // that drift honestly: the generated config is an upgrade when bodies differ.
-  const agentsById = new Map(
-    state.agents.map(({ agent, settings }) => [agent.agentId, settings])
-  );
+  // Prompt text and skill names round-trip directly. Skill bodies live in the
+  // workspace library; the server flags a version's frozen copy that no longer
+  // matches it, and the next `lobu apply` re-freezes the library's current body.
   for (const { automation, reactionScript } of state.automations) {
     if (
       !automation.prompt?.trim() &&
@@ -978,36 +967,36 @@ function generateProject(
         `Automation "${automation.slug}" has no stored instructions but is not event-turn-only — give it a prompt, attach at least one skill, or set a reaction script before the next \`lobu apply\`.`
       );
     }
-    const library =
-      agentsById.get(automation.managed_agent_id ?? "")?.skillsConfig?.skills ??
-      [];
-    for (const snapshot of automation.skills ?? []) {
-      const current = library.find(
-        (skill) => !skill.system && skill.name === snapshot.name
-      );
-      if (!current) {
+    for (const copy of automation.skills ?? []) {
+      if (copy.missing) {
         warnings.push(
-          `Automation "${automation.slug}" pins skill "${snapshot.name}", but that skill is absent from agent "${automation.managed_agent_id ?? ""}"'s current library — restore it or remove the Automation reference before \`lobu apply\`.`
+          `Automation "${automation.slug}" pins skill "${copy.name}", which the workspace skill library no longer has — restore it in the library or remove the reference before \`lobu apply\`.`
         );
-        continue;
-      }
-      if (!current.content?.trim()) {
+      } else if (copy.outdated) {
         warnings.push(
-          `Automation "${automation.slug}" pins skill "${snapshot.name}", but its current agent-library body is empty — restore the body or remove the Automation reference before \`lobu apply\`.`
-        );
-        continue;
-      }
-      if (current.enabled === false) {
-        warnings.push(
-          `Automation "${automation.slug}" pins disabled skill "${snapshot.name}" — the generated config declares it as enabled, so the next \`lobu apply\` will re-enable it and publish the current body.`
-        );
-      }
-      if (current.content.trim() !== snapshot.content.trim()) {
-        warnings.push(
-          `Automation "${automation.slug}" pins an older body of skill "${snapshot.name}" — the generated config uses the agent library's current body, so the next \`lobu apply\` will publish that upgrade.`
+          `Automation "${automation.slug}" pins an older body of skill "${copy.name}" — the next \`lobu apply\` re-freezes the library's current body.`
         );
       }
     }
+  }
+
+  // The workspace skill library exports as skills/<name>/SKILL.md so the bodies
+  // live in the project. Apply cannot write the library yet, so the config
+  // references none of them; Automations keep naming skills directly.
+  if ("error" in state.skillLibrary) {
+    warnings.push(
+      `Could not read the workspace skill library (${state.skillLibrary.error}) — skills were not exported.`
+    );
+  } else if (state.skillLibrary.skills.length > 0) {
+    for (const skill of state.skillLibrary.skills) {
+      files.push({
+        relPath: `skills/${skill.name}/SKILL.md`,
+        body: emitSkillFile(skill),
+      });
+    }
+    warnings.push(
+      `Exported ${state.skillLibrary.skills.length} workspace skill(s) to skills/ for reference. lobu apply does not write the skill library yet, so lobu.config.ts does not reference them; who each skill applies to and whether it is enabled stay in the workspace (see \`lobu skills list\`).`
+    );
   }
 
   // Agents first (automations reference their handles).

@@ -939,10 +939,6 @@ describe("apply diff — automations", () => {
         ],
       })
     );
-    // The loader compiles skills[] into prompt before diffing; this test maps
-    // directly, so stand in for the compile step.
-    if (desired.automations[0])
-      desired.automations[0].prompt = "Produce a digest.";
     const remote: RemoteSnapshot = {
       ...emptyRemote(),
       agents: [{ agentId: "triage", name: "triage" }],
@@ -951,7 +947,15 @@ describe("apply diff — automations", () => {
         {
           slug: "minimal-schedule",
           managed_agent_id: "triage",
-          prompt: "Produce a digest.",
+          prompt: "",
+          skills: [
+            {
+              name: "digest",
+              content: "Produce a digest.",
+              missing: false,
+              outdated: false,
+            },
+          ],
           triggers: [
             {
               kind: "schedule",

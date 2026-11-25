@@ -116,7 +116,7 @@ export async function generateSkillsManifest(): Promise<CatalogManifest> {
 			version: "1.0.0",
 			description: description ?? null,
 			detail: {
-				instructions: body,
+				content: body,
 				hidden: name === "lobu-operator",
 			},
 		});

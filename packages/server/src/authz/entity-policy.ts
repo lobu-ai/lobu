@@ -56,7 +56,8 @@ export type EntityMutationAction = "read" | "create" | "update" | "delete";
 /**
  * Which class of write a policy row governs. `entity` is the original class;
  * `agent_config` gates manage_agents read/list/get + create/update/delete;
- * `connector_action` gates connector operation execution. All three share this
+ * `connector_action` gates connector operation execution; `skill_config` gates
+ * the workspace skill library (manage_skills). All share this
  * table + resolver so a new class is a value, not a schema change (see
  * docs/plans/write-gate-generalization.md).
  */
@@ -64,7 +65,8 @@ export type WriteResourceClass =
 	| "entity"
 	| "agent_config"
 	| "connector_action"
-	| "entity_schema";
+	| "entity_schema"
+	| "skill_config";
 
 export function isWriteResourceClass(
 	value: unknown,
@@ -73,7 +75,8 @@ export function isWriteResourceClass(
 		value === "entity" ||
 		value === "agent_config" ||
 		value === "connector_action" ||
-		value === "entity_schema"
+		value === "entity_schema" ||
+		value === "skill_config"
 	);
 }
 

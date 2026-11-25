@@ -306,13 +306,14 @@ export function assertAutomationOutputsUseWindowExecution(
 export function assertAutomationInstructions(
 	triggers: AutomationTrigger[],
 	instructions: string | null | undefined,
-	skills?: ReadonlyArray<{ name: string; content: string }> | null,
+	// Frozen copies, or the library names a queued proposal will resolve.
+	skills?: ReadonlyArray<{ content: string } | string> | null,
 	reactionScript?: string | null,
 	executorSource?: string | null,
 ): void {
 	if (!automationRequiresInstructions(triggers)) return;
 	if (instructions?.trim()) return;
-	if (skills?.some((skill) => skill.content.trim())) return;
+	if (skills?.some((skill) => (typeof skill === "string" ? skill : skill.content).trim())) return;
 	if (reactionScript?.trim()) return;
 	if (executorSource?.trim()) return;
 	throw new ToolUserError(

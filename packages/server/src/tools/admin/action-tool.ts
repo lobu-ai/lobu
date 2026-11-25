@@ -78,7 +78,8 @@ function runActions<T extends AnyActions>(
  */
 export function defineActionTool<T extends AnyActions>(
   toolName: string,
-  actions: T
+  actions: T,
+  options?: { beforeValidate?: (args: unknown) => void }
 ): {
   schema: TUnion<Array<T[keyof T]['schema']>>;
   run: (args: ArgsOf<T>, env: Env, ctx: ToolContext) => Promise<ResultOf<T>>;
@@ -88,8 +89,11 @@ export function defineActionTool<T extends AnyActions>(
   >;
   return {
     schema,
-    run: withValidatedArgs(toolName, schema, (args: ArgsOf<T>, env: Env, ctx: ToolContext) =>
-      runActions(toolName, actions, args, env, ctx)
+    run: withValidatedArgs(
+      toolName,
+      schema,
+      (args: ArgsOf<T>, env: Env, ctx: ToolContext) => runActions(toolName, actions, args, env, ctx),
+      options?.beforeValidate
     ),
   };
 }

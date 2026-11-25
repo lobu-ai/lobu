@@ -101,6 +101,9 @@ import type {
   ManageSchedulesData,
   ManageSchedulesErrors,
   ManageSchedulesResponses,
+  ManageSkillsData,
+  ManageSkillsErrors,
+  ManageSkillsResponses,
   ManageViewsData,
   ManageViewsErrors,
   ManageViewsResponses,
@@ -680,6 +683,27 @@ export const manageClassifiers = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: "/api/{orgSlug}/manage_classifiers",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Workspace skill library (read)
+ *
+ * Workspace skill library (read). SDK alternative: client.skills.
+ */
+export const manageSkills = <ThrowOnError extends boolean = false>(
+  options: Options<ManageSkillsData, ThrowOnError>,
+): RequestResult<ManageSkillsResponses, ManageSkillsErrors, ThrowOnError> =>
+  (options.client ?? client).post<
+    ManageSkillsResponses,
+    ManageSkillsErrors,
+    ThrowOnError
+  >({
+    url: "/api/{orgSlug}/manage_skills",
     ...options,
     headers: {
       "Content-Type": "application/json",
