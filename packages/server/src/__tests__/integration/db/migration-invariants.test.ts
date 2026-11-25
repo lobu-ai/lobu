@@ -230,6 +230,15 @@ describe('migration invariants', () => {
       expect(rows).toHaveLength(0);
     });
 
+    it('user_model_preferences is dropped: model choice lives on the agent and its providers', async () => {
+      const sql = getTestDb();
+      const rows = await sql<{ table_name: string }[]>`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'user_model_preferences'
+      `;
+      expect(rows).toHaveLength(0);
+    });
+
     it('environments.scope + owner_user_id are dropped (contract phase of the #1914 env→provider unification)', async () => {
       const sql = getTestDb();
       const rows = await sql<{ column_name: string }[]>`
