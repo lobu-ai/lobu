@@ -5,7 +5,7 @@ import {
   startCliUpdateNotifier,
 } from "../internal/cli-update-check";
 
-function distTags(body: unknown, status = 200): typeof fetch {
+function manifest(body: unknown, status = 200): typeof fetch {
   return (async () =>
     new Response(JSON.stringify(body), {
       status,
@@ -35,10 +35,15 @@ describe("lobu daemon update check", () => {
   test("prints one line naming both versions and the update steps", async () => {
     const line = await checkForCliUpdate(
       "19.2.0",
-      distTags({ latest: "24.3.0", canary: "24.4.0-canary.1" })
+      manifest({ version: "24.3.0", engines: { node: ">=26 <27" } }),
+      undefined,
+      "22.20.0"
     );
     expect(line).toContain("Lobu CLI 24.3.0 is available");
     expect(line).toContain("runs 19.2.0");
+    // The release's Node requirement and this machine's Node, side by side.
+    expect(line).toContain("24.3.0 needs Node >=26 <27");
+    expect(line).toContain("runs Node 22.20.0");
     expect(line).toContain("npx -y @lobu/cli@latest daemon");
     expect(line).toContain("LOBU_NO_UPDATE_CHECK=1");
     expect(line).not.toContain("\n");
@@ -46,15 +51,15 @@ describe("lobu daemon update check", () => {
 
   test("an up-to-date daemon prints nothing", async () => {
     expect(
-      await checkForCliUpdate("24.3.0", distTags({ latest: "24.3.0" }))
+      await checkForCliUpdate("24.3.0", manifest({ version: "24.3.0" }))
     ).toBeNull();
   });
 
   test("registry failures never surface", async () => {
     expect(
-      await checkForCliUpdate("19.2.0", distTags({ error: "nope" }, 503))
+      await checkForCliUpdate("19.2.0", manifest({ error: "nope" }, 503))
     ).toBeNull();
-    expect(await checkForCliUpdate("19.2.0", distTags(null))).toBeNull();
+    expect(await checkForCliUpdate("19.2.0", manifest(null))).toBeNull();
     expect(
       await checkForCliUpdate("19.2.0", (async () => {
         throw new Error("offline");
@@ -67,7 +72,7 @@ describe("lobu daemon update check", () => {
     let calls = 0;
     const fetchImpl = (async () => {
       calls++;
-      return new Response(JSON.stringify({ latest: "24.3.0" }));
+      return new Response(JSON.stringify({ version: "24.3.0" }));
     }) as unknown as typeof fetch;
     const stop = startCliUpdateNotifier({
       currentVersion: "19.2.0",
@@ -91,7 +96,7 @@ describe("lobu daemon update check", () => {
     let calls = 0;
     const fetchImpl = (async () => {
       calls++;
-      return new Response(JSON.stringify({ latest: "24.3.0" }));
+      return new Response(JSON.stringify({ version: "24.3.0" }));
     }) as unknown as typeof fetch;
     startCliUpdateNotifier({
       currentVersion: "19.2.0",
@@ -116,7 +121,7 @@ describe("lobu daemon update check", () => {
       print: (line) => printed.push(line),
     });
     stop();
-    finish(new Response(JSON.stringify({ latest: "24.3.0" })));
+    finish(new Response(JSON.stringify({ version: "24.3.0" })));
     await flush();
     expect(printed).toEqual([]);
   });

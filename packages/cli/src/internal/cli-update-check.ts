@@ -3,13 +3,12 @@
  *
  * A headless daemon runs for weeks on whatever version started it, and nothing
  * else tells its owner that it is outdated. The check reads the public
- * `@lobu/cli` dist-tags once at start and about once a day after that. It
- * never blocks the daemon and never fails it: any network, parse or version
- * problem is a silent skip. `LOBU_NO_UPDATE_CHECK=1` turns it off.
+ * manifest of the latest `@lobu/cli` once at start and about once a day after
+ * that. It never blocks the daemon and never fails it: any network, parse or
+ * version problem is a silent skip. `LOBU_NO_UPDATE_CHECK=1` turns it off.
  */
 
-const DIST_TAGS_URL =
-  "https://registry.npmjs.org/-/package/@lobu/cli/dist-tags";
+const LATEST_MANIFEST_URL = "https://registry.npmjs.org/@lobu/cli/latest";
 const CHECK_TIMEOUT_MS = 5_000;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const OPT_OUT_ENV = "LOBU_NO_UPDATE_CHECK";
@@ -56,18 +55,31 @@ export function isNewerCliRelease(current: string, latest: string): boolean {
 export async function checkForCliUpdate(
   currentVersion: string,
   fetchImpl: typeof fetch = fetch,
-  stopSignal?: AbortSignal
+  stopSignal?: AbortSignal,
+  nodeVersion: string = process.versions.node
 ): Promise<string | null> {
   try {
     const timeout = AbortSignal.timeout(CHECK_TIMEOUT_MS);
-    const response = await fetchImpl(DIST_TAGS_URL, {
+    const response = await fetchImpl(LATEST_MANIFEST_URL, {
       signal: stopSignal ? AbortSignal.any([stopSignal, timeout]) : timeout,
     });
     if (!response.ok) return null;
-    const tags = (await response.json()) as { latest?: unknown } | null;
-    const latest = typeof tags?.latest === "string" ? tags.latest : null;
+    const manifest = (await response.json()) as {
+      version?: unknown;
+      engines?: { node?: unknown };
+    } | null;
+    const latest =
+      typeof manifest?.version === "string" ? manifest.version : null;
     if (!latest || !isNewerCliRelease(currentVersion, latest)) return null;
-    return `Lobu CLI ${latest} is available (this daemon runs ${currentVersion}). To update, ${CLI_DAEMON_UPGRADE_STEPS}. Set ${OPT_OUT_ENV}=1 to silence this check.`;
+    // A release can raise its Node requirement, and the CLI refuses to start
+    // on any other Node. Name both, so nobody installs a CLI this machine's
+    // Node can't run and takes the daemon down with it.
+    const engine = manifest?.engines?.node;
+    const node =
+      typeof engine === "string"
+        ? `; ${latest} needs Node ${engine} and this machine runs Node ${nodeVersion}`
+        : "";
+    return `Lobu CLI ${latest} is available (this daemon runs ${currentVersion}${node}). To update, ${CLI_DAEMON_UPGRADE_STEPS}. Set ${OPT_OUT_ENV}=1 to silence this check.`;
   } catch {
     return null;
   }
