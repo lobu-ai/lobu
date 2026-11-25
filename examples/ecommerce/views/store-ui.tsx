@@ -64,7 +64,7 @@ export function Grid({
       style={{
         display: "grid",
         gap: 12,
-        gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
+        gridTemplateColumns: `repeat(auto-fit, minmax(min(${min}px, 100%), 1fr))`,
       }}
     >
       {children}
