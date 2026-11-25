@@ -1233,6 +1233,7 @@ describe('agent turn producer', () => {
   it('seeds only valid bounded skill files and names their directory in the prompt', async () => {
     const org = await createTestOrganization();
     const content = 'x'.repeat(64_000);
+    const extras = Array.from({ length: 64 }, (_, i) => ({ name: `extra-${i}`, content: `Extra ${i}.` }));
     const owner = await createTestUser();
     await addUserToOrganization(owner.id, org.id, 'owner');
     const sdk = buildAgentsNamespace({
@@ -1250,6 +1251,9 @@ describe('agent turn producer', () => {
         { repo: 'owner', name: 'x'.repeat(129), enabled: true, content: 'skip' },
         { repo: 'owner', name: 'oversized', enabled: true, content: 'x'.repeat(64_001) },
         { repo: 'owner', name: 'disabled', enabled: false, content: 'skip' },
+        // 64 more valid skills behind the skipped ones: the 64-skill cap
+        // counts only skills that survive the filter, so `extra-63` is cut.
+        ...extras.map((skill) => ({ repo: 'owner', enabled: true, ...skill })),
       ] },
     } });
     const agentSettings = new AgentSettingsStore(createPostgresAgentConfigStore());
@@ -1261,7 +1265,7 @@ describe('agent turn producer', () => {
 
     const [run] = await agentTurnRuns();
     const turn = run.action_input.turn;
-    expect(turn.skills).toEqual([{ name: 'triage', content }]);
+    expect(turn.skills).toEqual([{ name: 'triage', content }, ...extras.slice(0, 63)]);
     expect(turn.system_prompt).toContain('/workspace/.skills');
     expect(Value.Check(AgentTurnPollPayloadSchema, { turn })).toBe(true);
   });

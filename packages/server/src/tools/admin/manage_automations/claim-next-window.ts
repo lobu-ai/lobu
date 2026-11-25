@@ -19,7 +19,7 @@ import {
 } from '../../../utils/window-utils';
 import { isAdminOrOwnerRole, memberReadRole } from '../../access-control';
 import { handleAutomationMode } from '../../get_content/automation-mode';
-import { parseAutomationSkillSnapshots } from '../../../automations/skill-snapshots';
+import { resolveRunSkills } from '../../../skills/run-skills';
 import type { ToolContext } from '../../registry';
 import type { ManageAutomationsArgs } from '../manage_automations';
 import { resolveAutomationExecutor } from './executors';
@@ -546,7 +546,7 @@ async function readPinnedInstructions(
   return {
     version_id: versionId,
     prompt: version.prompt?.trim() ? version.prompt : null,
-    skills: parseAutomationSkillSnapshots(version.skills),
+    skills: resolveRunSkills({ kind: 'automation_version', skills: version.skills }),
   };
 }
 

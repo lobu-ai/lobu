@@ -513,4 +513,35 @@ describe('POST /api/workers/me/automations/:automation_id/trigger', () => {
     expect(job.payload?.automation?.prompt).toContain('Follow the frozen v1 runbook.');
     expect(job.payload?.automation?.prompt).not.toContain('EDITED-AFTER-QUEUE');
   });
+
+  it('poll fails a run whose pinned skills no longer read, never dispatching it without them', async () => {
+    const ctx = await setupDevicePinnedAutomation({ workerId: 'mac-poll-bad-skills' });
+    const { token } = await createWorkerBoundPat(
+      ctx.workspace.users.owner.id,
+      ctx.workspace.org.id,
+      'mac-poll-bad-skills'
+    );
+    // A frozen copy is never renamed or dropped the way a live library is: a
+    // snapshot that fails the pin constraints fails the run.
+    await ctx.sql`
+      UPDATE automation_versions
+      SET skills = ${ctx.sql.json([{ name: '..', content: 'Unreadable pin.' }])}
+      WHERE id = (
+        SELECT current_version_id FROM automations WHERE id = ${ctx.automationId}
+      )
+    `;
+    const trig = await post(`/api/workers/me/automations/${ctx.automationId}/trigger`, { token });
+    expect(trig.status).toBe(200);
+
+    const pollRes = await post('/api/workers/poll', {
+      token,
+      body: { worker_id: 'mac-poll-bad-skills', capabilities: {} },
+    });
+    expect(pollRes.status).toBe(200);
+    const body = (await pollRes.json()) as { run_id?: number; skipped_run_id?: number; error?: string };
+    expect(body.run_id).toBeUndefined();
+    expect(body.error).toContain('malformed pinned skills');
+    const [run] = await ctx.sql`SELECT status FROM runs WHERE id = ${body.skipped_run_id ?? null}`;
+    expect(run).toMatchObject({ status: 'failed' });
+  });
 });

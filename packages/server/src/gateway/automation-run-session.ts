@@ -24,10 +24,8 @@
 
 import type { DbClient } from "../db/client.js";
 import { getDb } from "../db/client.js";
-import {
-	type AutomationSkillSnapshot,
-	parseAutomationSkillSnapshots,
-} from "../automations/skill-snapshots.js";
+import type { AutomationSkillSnapshot } from "../automations/skill-snapshots.js";
+import { resolveRunSkills } from "../skills/run-skills.js";
 import { parseAutomationRunConversationId } from "./permissions/automation-run-intent.js";
 import { AUTOMATION_RUN_TYPES_PG } from "../runs/run-types.js";
 
@@ -108,7 +106,7 @@ export async function resolveAutomationRunContext(
 		throw new Error("Automation run's pinned version was not found");
 	}
 	return {
-		skills: parseAutomationSkillSnapshots(rows[0]?.skills),
+		skills: resolveRunSkills({ kind: "automation_version", skills: rows[0]?.skills }),
 		requiresWindowCompletion: rows[0]?.trigger_execution !== "turn",
 	};
 }

@@ -47,7 +47,7 @@ import { notifyThreadResponse } from '../gateway/orchestration/turn-liveness';
 import type { Env } from '../index';
 import { supportsExactPageActivation } from '../runs/page-activation';
 import { claimPendingAutomationRun } from '../runs/queue-service';
-import { parseAutomationSkillSnapshots } from '../automations/skill-snapshots';
+import { resolveRunSkills } from '../skills/run-skills';
 import {
   type MaterializedDueFeedRun,
   materializeDueFeeds,
@@ -230,7 +230,7 @@ function formatDeviceAutomationInstructions(
   prompt: string | null,
   rawSkills: unknown
 ): string | null {
-  const skills = parseAutomationSkillSnapshots(rawSkills);
+  const skills = resolveRunSkills({ kind: 'automation_version', skills: rawSkills });
   if (skills.length === 0) return prompt;
   const skillSections = skills.map(
     (skill) => `### ${skill.name}\n\n${skill.content}`
