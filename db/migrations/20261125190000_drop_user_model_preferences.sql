@@ -10,6 +10,7 @@
 -- lock wait.
 SET LOCAL lock_timeout = '5s';
 
+-- squawk-ignore ban-drop-table
 DROP TABLE IF EXISTS public.user_model_preferences;
 
 -- migrate:down
