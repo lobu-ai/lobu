@@ -152,6 +152,31 @@ describe('login upgrade links', () => {
     expect(await refused.json()).toMatchObject({ error: 'single_workspace_login' });
   });
 
+  it('refuses a raise that would push a pending code past the workspace limit', async () => {
+    const { sql, home, other, owner, client, cookie } = await seedLogin();
+    const provider = new OAuthProvider(sql, 'https://lobu.test');
+    const code = await provider.createAuthorizationCode({
+      client_id: client.client_id,
+      redirect_uri: 'https://app.example.com/callback',
+      response_type: 'code',
+      code_challenge: createHash('sha256').update('synthetic-pending-code-verifier').digest('base64url'),
+      code_challenge_method: 'S256',
+      scope: 'mcp:read mcp:write',
+    }, owner.id, null, [other.id]);
+
+    const refused = await post(`/api/me/logins/${client.client_id}/grant`, {
+      cookie,
+      body: { workspace: home.slug, level: 'admin' },
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: 'single_workspace_login' });
+    const [pending] = await sql`
+      SELECT scope, granted_organization_ids FROM oauth_authorization_codes WHERE code = ${code}
+    `;
+    expect(pending.scope).toBe('mcp:read mcp:write');
+    expect(parsePgTextArray(pending.granted_organization_ids)).toEqual([other.id]);
+  });
+
   it.each([null, ''])('never lowers a login whose stored scope %j is the default grant', async (scope) => {
     const { sql, home, client, cookie } = await seedLogin();
     await sql`UPDATE oauth_tokens SET scope = ${scope} WHERE client_id = ${client.client_id}`;

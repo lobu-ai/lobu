@@ -491,8 +491,29 @@ export class OAuthClientsStore {
       `;
       if (live.length === 0) return { status: 'not_found' as const };
 
+      // A code still in flight must not mint a narrower token afterwards, so it
+      // is widened too. That includes a code already claimed whose exchange is
+      // waiting on this lock: the exchange re-reads the code's grant and scope
+      // once it holds it.
+      const authorizationCodes = await tx`
+        SELECT code, scope, granted_organization_ids FROM oauth_authorization_codes
+        WHERE client_id = ${clientId}
+          AND user_id = ${userId}
+          AND expires_at > NOW()
+          AND granted_organization_ids IS NOT NULL
+      `;
+      const deviceCodes = await tx`
+        SELECT device_code, scope, granted_organization_ids FROM oauth_device_codes
+        WHERE client_id = ${clientId}
+          AND user_id = ${userId}
+          AND expires_at > NOW()
+          AND granted_organization_ids IS NOT NULL
+      `;
+
+      // Every grant this widens must stay within the limit, or a pending code
+      // would be widened into a grant its exchange then rejects.
       const workspaces = new Set<string>([organizationId]);
-      for (const row of live) {
+      for (const row of [...live, ...authorizationCodes, ...deviceCodes]) {
         for (const id of parsePgTextArray(row.granted_organization_ids as string | null)) workspaces.add(id);
       }
       if (workspaces.size > maxWorkspaces) {
@@ -517,16 +538,6 @@ export class OAuthClientsStore {
         updatedTokens += updated.length;
       }
 
-      // A code still in flight must not mint a narrower token afterwards. That
-      // includes a code already claimed whose exchange is waiting on this lock:
-      // the exchange re-reads the code's grant and scope once it holds it.
-      const authorizationCodes = await tx`
-        SELECT code, scope FROM oauth_authorization_codes
-        WHERE client_id = ${clientId}
-          AND user_id = ${userId}
-          AND expires_at > NOW()
-          AND granted_organization_ids IS NOT NULL
-      `;
       for (const code of authorizationCodes) {
         await tx`
           UPDATE oauth_authorization_codes
@@ -540,13 +551,6 @@ export class OAuthClientsStore {
           WHERE code = ${code.code as string}
         `;
       }
-      const deviceCodes = await tx`
-        SELECT device_code, scope FROM oauth_device_codes
-        WHERE client_id = ${clientId}
-          AND user_id = ${userId}
-          AND expires_at > NOW()
-          AND granted_organization_ids IS NOT NULL
-      `;
       for (const code of deviceCodes) {
         await tx`
           UPDATE oauth_device_codes
