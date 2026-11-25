@@ -884,6 +884,16 @@ export async function dispatchChromeActionToExtension(params: {
     await sql`UPDATE runs SET run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${sql.json({ browser_verified: {
       device_worker_id: browserResource.deviceWorkerId, auth_profile_id: browserResource.authProfileId, account_id: accountId,
     } })} WHERE id = ${parentRunId} AND organization_id = ${organizationId} AND status = 'running'`;
+    // A source's plain persistent navigation to the account probe page is
+    // already complete if the probe loaded that exact URL and verified the
+    // account on it. Preserve navigation after redirects or with other options.
+    if (sourceRead && !sourceLease && parent.activation_kind !== 'page_visit'
+      && !abortSignal?.aborted && actionKey === 'navigate'
+      && scopedInput.url === probe.url && nav.output?.current_url === probe.url
+      && scopedInput.persistent === true && scopedInput.wait_for_load === true
+      && Object.keys(scopedInput).every((key) => ['url', 'persistent', 'wait_for_load', 'allowed_origins'].includes(key))) {
+      return nav;
+    }
     // The probe may have saved the first exact tab; reload so the source step
     // below shares that target instead of opening another.
     if (sourceLease) sourceLease = await sourceBrowserLease(organizationId, parentRunId);
