@@ -412,6 +412,7 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
   });
 
   test("guardrail-blocked completion posts the block and no answer", async () => {
+    await seedSecretScan();
     const { target, plainPosts } = createStreamingTarget();
     const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
     const { manager } = createHarness(target, "slack", slackPost, {
@@ -420,24 +421,18 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
       publicGatewayUrl: "https://app.lobu.com/lobu",
     });
     const bridge = new ChatResponseBridge(manager as any);
-    const scanner = (bridge as any).outputGuardrail;
-    scanner.hasOutputGuardrails = async () => true;
-    scanner.scanFinal = async () => ({
-      guardrail: "test-output",
-      reason: "unsafe output",
-    });
 
     await bridge.handleCompletion(
       {
         ...slackPayload,
-        finalText: "unsafe answer",
+        finalText: "Use AKIAIOSFODNN7EXAMPLE",
         processedMessageIds: ["m1"],
       },
       "s"
     );
 
     expect(slackPost).not.toHaveBeenCalled();
-    expect(plainPosts).toEqual(["Message blocked by guardrail: unsafe output"]);
+    expect(plainPosts).toEqual(["Message blocked by guardrail: secret-scan"]);
   });
 
   test("in-band reply suppresses the terminal Slack post", async () => {
