@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { ToolErrorCode } from "../../connector-query-errors";
 import type { ActionInput } from "./action-input";
 import { MAX_TOOL_PAGE_OFFSET, MAX_TOOL_PAGE_SIZE } from "./pagination";
 
@@ -146,10 +147,16 @@ export function isConnectorOperationRequest(
 ): value is ConnectorOperationRequest {
   return Value.Check(ConnectorOperationRequestSchema, value);
 }
-export type ConnectorOperationResult = Extract<
+type ConnectorOperationReceipt = Extract<
   ManageOperationsResult,
   { action: "execute" } | { error: string }
 >;
+export type ConnectorOperationResult =
+  | Exclude<ConnectorOperationReceipt, { status: "failed" }>
+  | (Extract<ConnectorOperationReceipt, { status: "failed" }> & {
+      /** The failed child run's own recorded code; absent when it recorded none. */
+      error_code?: ToolErrorCode;
+    });
 
 /**
  * Run types excluded from `list_runs` when the caller does not name run types

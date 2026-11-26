@@ -349,7 +349,9 @@ The host reconstructs the original requester and applies the target connection's
 visibility and connector policy. This does not inherit the parent action's
 approval. The result is the normal operation receipt: check `status` and surface
 a held receipt (`pending_approval` with its `approval_url`, or `pending_check`)
-rather than reporting the effect as completed. `background: true` returns a durable `run_id`; use the public
+rather than reporting the effect as completed. A `failed` receipt carries the
+child run's recorded `error_code` when it recorded one; pass it on instead of
+re-deriving it from the output. `background: true` returns a durable `run_id`; use the public
 `operations.getRun` and `operations.cancel` methods to inspect or stop it.
 
 The required idempotency key is scoped to the parent run. Reusing it with the

@@ -575,7 +575,6 @@ describe('iMessage connector over the existing shell operation', () => {
       }),
     });
     expect(result.success).toBe(false);
-    expect(result.error_code).toBe('ACTION_FAILED');
     expect(JSON.parse(String(result.error))).toMatchObject({
       run_id: 789,
       exit_code: 1,
@@ -584,20 +583,24 @@ describe('iMessage connector over the existing shell operation', () => {
   });
 
   it.each([
-    ['a shell run that timed out', completed({ exit_code: -1, stdout: '', stderr: '', timed_out: true }), 'UPSTREAM_TIMEOUT'],
     [
       'a failed shell run that exited non-zero',
-      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command exited with code 1', output: { exit_code: 1, stdout: '', stderr: 'boom', timed_out: false } },
+      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command exited with code 1', error_code: 'ACTION_FAILED', output: { exit_code: 1, stdout: '', stderr: 'boom', timed_out: false } },
       'ACTION_FAILED',
+    ],
+    [
+      'a shell run that ran out of its budget',
+      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command timed out after 1000ms', error_code: 'UPSTREAM_TIMEOUT', output: { exit_code: -1, stdout: '', stderr: '', timed_out: true } },
+      'UPSTREAM_TIMEOUT',
     ],
     ['a shell run the caller stopped waiting for', { action: 'execute', status: 'timeout', run_id: 789, error_message: 'Run 789 timed out' }, 'UPSTREAM_TIMEOUT'],
     [
-      'a shell run that never started',
-      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command failed to start', output: { exit_code: -1, process_error: 'spawn ENOENT', timed_out: false } },
+      'a failed shell run that recorded no code',
+      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command exited with code 1', output: { exit_code: 1, stdout: '', stderr: 'boom', timed_out: false } },
       undefined,
     ],
     ['a delegation refusal', { error: 'Connection 123 is not available' }, undefined],
-  ] as const)('codes %s from its structure', async (_label, receipt, code) => {
+  ] as const)('carries the code of %s from the receipt', async (_label, receipt, code) => {
     const { result } = await invoke('list_chats', {}, { receipt });
     expect(result.success).toBe(false);
     expect(result.error_code).toBe(code);

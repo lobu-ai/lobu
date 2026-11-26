@@ -1,3 +1,4 @@
+import { toToolErrorCode } from '@lobu/core';
 import type { ConnectorOperationRequest, ConnectorOperationResult } from '@lobu/core/contracts/tools/manage-operations';
 import { resolveStoredActingPrincipal } from '../authz/entity-policy';
 import { resolveRunConnectorPolicy, storedPolicyPatPrincipal } from '../authz/operation-run-policy';
@@ -62,7 +63,14 @@ export async function executeConnectorOperation(params: Delegation, execute: typ
     ...params.request, action: 'execute',
     idempotency_key: `connector:${params.parentRunId}:${params.request.idempotency_key}`,
   }, ctx, {} as Env, {actor, assertActive: async (tx) => { await loadParent(tx, true); }});
-  if ('error' in result || ('action' in result && result.action === 'execute')) return result;
+  if ('error' in result) return result;
+  if ('action' in result && result.action === 'execute') {
+    if (result.status !== 'failed') return result;
+    // The handler attaches the child run's recorded code non-enumerably, so
+    // the JSON hop back to the isolate would drop it. Carry it explicitly.
+    const errorCode = toToolErrorCode((result as { error_code?: unknown }).error_code);
+    return errorCode ? { ...result, error_code: errorCode } : result;
+  }
   throw new Error('Unexpected connector operation result');
 }
 
