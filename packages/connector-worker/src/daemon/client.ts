@@ -138,7 +138,7 @@ import type {
   PollResponse,
   StreamBatch,
 } from "@lobu/core/contracts/worker/protocol";
-import { traceparentHeader } from "@lobu/core";
+import { browserStepFailure, traceparentHeader } from "@lobu/core";
 import {
   defaultBackendCapacity,
   EXECUTION_BACKENDS,
@@ -619,7 +619,8 @@ export class WorkerClient implements ExecutorClient {
   /**
    * Forward a chrome connector action call to the gateway. Blocks until the
    * paired Owletto extension completes the run or the gateway-side budget
-   * times out. Throws on failure/timeout with the gateway's error message.
+   * times out. Throws on failure/timeout with the gateway's error message and
+   * the step's own error code.
    */
   async dispatchChromeAction(req: DispatchChromeActionRequest): Promise<Record<string, unknown>> {
     const result = await this.requestJson<DispatchChromeActionResponse>(
@@ -629,9 +630,9 @@ export class WorkerClient implements ExecutorClient {
     if (result.status === 'completed') {
       return result.output ?? {};
     }
-    throw new Error(
-      result.error_message ??
-        `Chrome action '${req.action_key}' ${result.status === 'timeout' ? 'timed out' : 'failed'}`
+    throw browserStepFailure(
+      result,
+      `Chrome action '${req.action_key}' ${result.status === 'timeout' ? 'timed out' : 'failed'}`
     );
   }
 

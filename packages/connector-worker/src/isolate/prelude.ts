@@ -308,11 +308,17 @@ var exports = module.exports;
 
   var STANDARD_ERRORS = { TypeError: TypeError, RangeError: RangeError, SyntaxError: SyntaxError, ReferenceError: ReferenceError };
 
+  // The code a host capability failed with, keyed by the error the guest
+  // received. A connector that lets that error propagate reports the host's
+  // code with it; a code a connector sets on an error of its own never travels.
+  var hostFailureCodes = new WeakMap();
+
   function makeError(desc) {
     var Ctor = STANDARD_ERRORS[desc && desc.name] || Error;
     var err = new Ctor(desc && desc.message ? String(desc.message) : 'host call failed');
     if (Ctor === Error && desc && desc.name) err.name = String(desc.name);
     if (desc && desc.code !== undefined) err.code = desc.code;
+    if (desc && typeof desc.code === 'string') hostFailureCodes.set(err, desc.code);
     if (desc && typeof desc.httpStatus === 'number') err.status = desc.httpStatus;
     return err;
   }
@@ -344,6 +350,7 @@ var exports = module.exports;
       // be mistaken for a connector outcome. Ambiguous E-prefixed errnos stay opaque.
       if (Object.prototype.hasOwnProperty.call(error, 'code') && error.code === 'withheld') desc.code = 'withheld';
       if (Object.prototype.hasOwnProperty.call(error, 'code') && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && error.code.charAt(0) !== 'E') desc.pgCode = error.code;
+      if (hostFailureCodes.has(error)) desc.hostCode = hostFailureCodes.get(error);
       return desc;
     }
     var text;

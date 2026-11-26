@@ -20,7 +20,7 @@
  * can land on any replica and finalize the run row.
  */
 
-import { BrowserInterruptionError, browserPageInterruption, type BrowserInterruptionReason } from '@lobu/core';
+import { BrowserInterruptionError, browserPageInterruption, type BrowserInterruptionReason, type ToolErrorCode } from '@lobu/core';
 import { browserAccountHeldByOtherRun, browserRecoveryControl, saveSourceBrowserTab, sourceBrowserLease } from '../lib/browser-recovery';
 import { BROWSER_VERIFY_OPERATION, constrainBrowserInput } from '@lobu/connector-sdk';
 import { BROWSER_ACCOUNT_PROBE_METADATA_KEY, BROWSER_EXTENSION_UPDATE_REQUIRED, browserBindingSnapshot, connectionBrowserResource } from '../connectors/browser-resource';
@@ -93,6 +93,8 @@ export interface ChromeActionDispatchResult {
   status: 'completed' | 'failed' | 'timeout';
   output?: Record<string, unknown>;
   error_message?: string;
+  /** Why the step failed, as its own completion reported it. */
+  error_code?: ToolErrorCode;
   interruption?: { reason: BrowserInterruptionReason; message: string };
 }
 

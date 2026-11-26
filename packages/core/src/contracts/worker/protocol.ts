@@ -1415,6 +1415,8 @@ export const DispatchChromeActionResponseSchema = Type.Object({
   ]),
   output: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   error_message: Type.Optional(Type.String()),
+  /** The `error_code` the step's own `/complete-action` reported, relayed as is. */
+  error_code: Type.Optional(Type.Unsafe<ToolErrorCode>(Type.String())),
 });
 
 export type RunType = Static<typeof RunTypeSchema>;

@@ -155,6 +155,8 @@ interface GuestErrorDescription {
   httpStatus?: number;
   pgCode?: string;
   code?: ConnectorErrorCode;
+  /** The code a host capability failed with, when the connector let that failure propagate. */
+  hostCode?: string;
 }
 
 type GuestOutcome =
@@ -1371,7 +1373,7 @@ export class IsolateExecutor implements SyncExecutor {
         typeof description.httpStatus === 'number' && description.httpStatus >= 100 && description.httpStatus < 600
           ? description.httpStatus
           : undefined,
-      code: description.code === 'withheld' ? description.code : undefined,
+      code: description.code === 'withheld' ? description.code : toToolErrorCode(description.hostCode),
       pgCode:
         typeof description.pgCode === 'string' && /^[0-9A-Z]{5}$/.test(description.pgCode) && !description.pgCode.startsWith('E')
           ? description.pgCode
