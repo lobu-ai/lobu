@@ -128,17 +128,24 @@ describe('operation policy at durable dispatch', () => {
       AND action_input->'payload'->>'eventId' = ${String(notifications[0].id)}`).toHaveLength(1);
   });
 
-  it('retains the operation display name after a fallback late-approval card transitions', async () => {
+  it('retains the operation display name and Automation after a fallback late-approval card transitions', async () => {
+    const agent = await createTestAgent({ organizationId, agentId: 'fallback-card-agent', ownerUserId: ownerId });
+    const automationId = 7011;
+    await sql`INSERT INTO automations (id, automation_group_id, organization_id, managed_agent_id, created_by, name, slug)
+      VALUES (${automationId}, ${automationId}, ${organizationId}, ${agent.agentId}, ${ownerId}, 'Fallback card fixture', 'fallback-card-fixture')`;
     const id = await run();
+    await sql`UPDATE runs SET automation_id = ${automationId} WHERE id = ${id}`;
     await rule('approval');
     expect(await admit(id)).toBe(false);
-    const [pending] = await sql`SELECT title, metadata FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
+    const [pending] = await sql`SELECT title, metadata, automation_id FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
     expect(pending.title).toBe('Perform — pending approval');
     expect(pending.metadata.operation_name).toBe('Perform');
+    expect(Number(pending.automation_id)).toBe(automationId);
     await supersedeActionEvent(id, organizationId, 'confirmed', label => `${label} — approved`, 'Approved');
-    const [approved] = await sql`SELECT title, metadata FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
+    const [approved] = await sql`SELECT title, metadata, automation_id FROM current_event_records WHERE run_id = ${id} AND semantic_type = 'operation'`;
     expect(approved.title).toBe('Perform — approved');
     expect(approved.metadata.operation_name).toBe('Perform');
+    expect(Number(approved.automation_id)).toBe(automationId);
   });
 
   it.each([

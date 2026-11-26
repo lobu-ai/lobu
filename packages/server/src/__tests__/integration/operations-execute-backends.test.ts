@@ -848,6 +848,35 @@ describe("operations.execute backend lifecycle", () => {
 		`;
 		expect(reactions).toHaveLength(1);
 		expect(Number(reactions[0]?.run_id)).toBe(result.run_id);
+
+		// The ledger cards name the same Automation the run row records: the
+		// dispatch card and the terminal card that supersedes it.
+		const cardAutomations = async (runId: number) =>
+			(await sql`
+				SELECT title, automation_id FROM events
+				WHERE organization_id = ${orgId} AND run_id = ${runId}
+				  AND semantic_type = 'operation'
+				ORDER BY id
+			`).map((card) => [card.title, card.automation_id == null ? null : Number(card.automation_id)]);
+		expect(await cardAutomations(result.run_id)).toEqual([
+			["Echo — dispatched", automationId],
+			["Echo — completed", automationId],
+		]);
+		// So does the pending card of an operation the window queued for approval.
+		const queued = (await manageOperations(
+			{
+				action: "execute",
+				connection_id: localConnectionId,
+				operation_key: "needs_approval",
+				input: {},
+			},
+			{} as Env,
+			{ ...ctx, actingAutomationId: automationId, actingRunId: sourceRunId },
+		)) as { run_id: number; status: string };
+		expect(queued.status).toBe("pending_approval");
+		expect(await cardAutomations(queued.run_id)).toEqual([
+			["Needs approval — pending approval", automationId],
+		]);
 	});
 
 	it("lets a headless Automation execute through its author's private connection", async () => {

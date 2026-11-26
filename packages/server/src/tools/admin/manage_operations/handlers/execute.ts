@@ -697,6 +697,11 @@ export async function insertDispatchCard(
 		principal: ConnectorPolicyPrincipal;
 		/** Set when the run was born failed. */
 		failedMessage: string | null;
+		/**
+		 * The Automation the run row records (`runs.automation_id`). Supersedes
+		 * inherit it, so the whole card chain names the Automation that acted.
+		 */
+		automationId: number | null;
 	},
 ): Promise<number> {
 	const { ctx, connection, operation, input, runId } = p;
@@ -718,6 +723,7 @@ export async function insertDispatchCard(
 			connectorKey: connection.connector_key,
 			connectionId: connection.id,
 			runId,
+			automationId: p.automationId,
 			interactionType: "approval",
 			// Pre-approved by the organization policy: it granted this
 			// operation standing approval, which is the same fact
@@ -1229,6 +1235,7 @@ export async function handleExecute(
 				connectorKey: connection.connector_key,
 				connectionId: args.connection_id,
 				runId: createdRunId,
+				automationId: ctx.actingAutomationId ?? null,
 				interactionType: "approval",
 				interactionStatus: "pending",
 				interactionInputSchema:
@@ -1377,6 +1384,7 @@ export async function handleExecute(
 			ctx, connection, operation, input, cardEntityIds, policy, principal,
 			runId: createdRunId,
 			failedMessage: createdRun.status === "failed" ? createdRun.errorMessage ?? "" : null,
+			automationId: ctx.actingAutomationId ?? null,
 		});
 		return createdRun;
 	});
