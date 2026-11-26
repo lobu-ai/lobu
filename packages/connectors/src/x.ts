@@ -148,6 +148,8 @@ interface XTweet {
 	username: string;
 	authorId?: string;
 	authorDisplayName?: string;
+	/** Profile photo URL (pbs.twimg.com) as X rendered it for this tweet. */
+	authorAvatarUrl?: string;
 	likes: number;
 	retweets: number;
 	replies: number;
@@ -536,6 +538,7 @@ interface HomeFeedRow {
 	id?: string;
 	body?: string;
 	author?: string;
+	avatar_url?: string;
 	status_path?: string;
 	published_at?: string;
 }
@@ -561,6 +564,13 @@ const HOME_FEED_SCRAPE_CONFIG = {
 			selector: '[data-testid="User-Name"]',
 			take: "text",
 			firstLine: true,
+		},
+		// X only loads avatar images once the tab is visible, so a background
+		// scrape can leave this empty. It is optional and never gates a row.
+		avatar_url: {
+			selector: '[data-testid="Tweet-User-Avatar"] img',
+			take: "attr",
+			attr: "src",
 		},
 		status_path: {
 			selector: 'a[href*="/status/"]',
@@ -609,6 +619,7 @@ export function buildHomeFeedTweets(rows: HomeFeedRow[]): XTweet[] {
 			id: row.id,
 			text: row.body,
 			username,
+			...(row.avatar_url ? { authorAvatarUrl: row.avatar_url } : {}),
 			likes: 0,
 			retweets: 0,
 			replies: 0,
@@ -807,6 +818,7 @@ interface XGraphqlUser {
 	/** X's organization/official verification, e.g. "Business" or "Government". */
 	verifiedType?: string;
 	profileImageShape?: string;
+	avatarUrl?: string;
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -839,6 +851,7 @@ function extractGraphqlUser(result: any): XGraphqlUser {
 			result?.verification?.verified_type ?? result?.legacy?.verified_type,
 		),
 		profileImageShape: optionalString(result?.profile_image_shape),
+		avatarUrl: optionalString(result?.avatar?.image_url),
 	};
 }
 
@@ -873,6 +886,7 @@ function extractTweetFromGraphqlResult(result: any): XTweet | null {
 		username: author.handle ?? "",
 		authorId: author.id,
 		authorDisplayName: author.name,
+		authorAvatarUrl: author.avatarUrl,
 		likes: legacy.favorite_count ?? 0,
 		retweets: legacy.retweet_count ?? 0,
 		replies: legacy.reply_count ?? 0,
@@ -1206,6 +1220,7 @@ export function followedAccountToEvent(
 			...(user.profileImageShape
 				? { profile_image_shape: user.profileImageShape }
 				: {}),
+			...(user.avatarUrl ? { followed_avatar_url: user.avatarUrl } : {}),
 			is_organization: X_ORGANIZATION_VERIFIED_TYPES.has(
 				user.verifiedType ?? "",
 			),
@@ -1251,6 +1266,9 @@ function tweetToEvent(tweet: XTweet, originType?: string): EventEnvelope {
 			...(tweet.authorDisplayName ||
 			(originType === "liked_tweet" && tweet.username)
 				? { author_name: tweet.authorDisplayName ?? `@${tweet.username}` }
+				: {}),
+			...(tweet.authorAvatarUrl
+				? { author_avatar_url: tweet.authorAvatarUrl }
 				: {}),
 			...(tweet.conversationId
 				? { conversation_id: tweet.conversationId }
@@ -3164,6 +3182,10 @@ const engagementMetadataSchema = {
 		author_id: { type: "string", description: "X numeric user id" },
 		author_handle: { type: "string", description: "X @handle without @" },
 		author_name: { type: "string", description: "Display name" },
+		author_avatar_url: {
+			type: "string",
+			description: "Author profile photo URL",
+		},
 		liked_by_id: { type: "string", description: "Connected X numeric user id" },
 		liked_by_handle: {
 			type: "string",
@@ -3876,7 +3898,7 @@ export default class XConnector extends ConnectorRuntime {
 		name: "X (Twitter)",
 		description:
 			"Fetches tweets, browser-visible like history, bookmarks, and DMs through the X API v2 or the paired Owletto Chrome extension, reads the chronological Following timeline live through the X API, captures notification references and the accounts you follow, reads and answers DMs live in the paired browser, and likes posts or follows accounts there. Links social actors into the person and company graph.",
-		version: "3.18.0",
+		version: "3.19.0",
 		faviconDomain: "x.com",
 		browser: {
 			origins: ["https://x.com", "https://twitter.com"],
