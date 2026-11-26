@@ -1,17 +1,17 @@
 -- migrate:up
--- lobu:no-quiesce -- old code keeps working: it reads condition-less rows unchanged and its inserts use ON CONFLICT DO NOTHING, which matches the rebuilt index; no conditional rule exists before this deploy (only the new PUT writes one and conditions have no UI)
+-- lobu:no-quiesce -- old code keeps working: it reads condition-less rows unchanged and its inserts use ON CONFLICT DO NOTHING, which matches the rebuilt index; this release accepts `when` only on guardrails, which old replicas read as stricter, never on grants
 
 -- A connector action rule may carry conditions on the operation input (`when`):
 -- a JSON array of 1-8 field or scan conditions that must all hold for the rule
 -- to apply. Null keeps today's rule, which always applies when its scope matches.
 --
 -- Rollout: zero-unavailable, so old replicas serve for the minutes of the
--- rollout. Old code ignores condition, so a conditional rule written in that
--- window is read there as unconditional: a restriction only gets stricter, a
--- conditional Auto would lift an Ask. Accepted: conditions have no UI and only
--- the new PUT writes one. Rolling the app image back below this version without the
--- down migration makes every conditional rule unconditional, a conditional Auto
--- included; the down migration refuses while one exists. Cost: one
+-- rollout and read every rule as unconditional. The policy PUT therefore takes
+-- `when` only on a guardrail in this release: read unconditionally, a guardrail
+-- only gets stricter. Conditional grants wait for a later release, when no
+-- replica predates this column. Rolling the app image back below this version
+-- without the down migration makes every conditional rule unconditional; the
+-- down migration refuses while one exists. Cost: one
 -- metadata-only ADD COLUMN, a CHECK validated over the bounded policy table, and
 -- the identity index rebuilt over that same small table.
 ALTER TABLE write_approval_policies

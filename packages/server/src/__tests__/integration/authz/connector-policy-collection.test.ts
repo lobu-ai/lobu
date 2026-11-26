@@ -851,15 +851,16 @@ describe("connected app caller identity", () => {
     // A missing field holds no comparison, so the Ask does not apply.
     expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
 
-    // A conditional Always allow lifts the Ask only for an input it holds on, and never in discovery.
-    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail" }]);
-    await setRules(appPath("web:example.com"), [{ ...exact, effect: "auto", when: [{ field: "/to", op: "ends_with", value: "@acme.example" }] }]);
-    expect(await explain()).toBe("approval");
-    const lifted = await execute(named.token, { to: "teammate@acme.example" });
-    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
-    expect(lifted.body.status).not.toBe("pending_approval");
-    expect((await execute(named.token, { to: "someone@outside.example" })).body.status).toBe("pending_approval");
-    await setRules(appPath("web:example.com"), []);
+    // A grant does not take `when` yet: a replica from before the column would allow outside it.
+    for (const effect of ["auto", "approval", "deny"]) {
+      const current = await request("GET", path());
+      const grant = await request("PUT", path(), {
+        revision: (await current.json()).revision,
+        rules: [{ ...exact, effect, when: [{ field: "/to", op: "ends_with", value: "@acme.example" }] }],
+      });
+      expect(grant.status, effect).toBe(400);
+      expect(await grant.json()).toMatchObject({ message: "rules[0].when is accepted only on a guardrail." });
+    }
 
     // A Block on a body that looks like it carries a secret.
     await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "deny", kind: "guardrail", note: "Never send credentials", when: [{ scan: "secrets", field: "/body" }] }]);

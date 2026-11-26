@@ -171,6 +171,11 @@ export async function replaceConnectorPolicyCollection(c: Context) {
       const checked = validatePolicyKindAndNote({ ...parsed, kind: kind as ConnectorPolicyKind | undefined, note: (note ?? null) as string | null });
       if (principal.principalKind !== null && checked.kind !== "guardrail") callerGrantProblem(principal, parsed);
       const condition = when == null ? null : parsePolicyConditions(when, `rules[${index}].when`);
+      // Replicas from before the condition column read every rule as unconditional, and
+      // they keep serving during a rolling deploy. A guardrail read that way only gets
+      // stricter; a grant would allow outside its condition. So grants take `when` only
+      // in a later release, once no replica predates the column.
+      if (condition && checked.kind === "grant") throw new Error(`rules[${index}].when is accepted only on a guardrail.`);
       const policy = { ...parsed, ...principal, kind: checked.kind, note: checked.note ?? null, condition };
       const key = scopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
