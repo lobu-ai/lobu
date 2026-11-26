@@ -418,7 +418,7 @@ describe('RedditConnector runtime', () => {
     connector.RATE_LIMIT_MS = 0;
     const result = await runSync(connector, {
       feedKey: 'home_feed',
-      config: {},
+      config: { reply_posts_per_sync: 0 },
       credentials: { accessToken: 'token' },
       checkpoint: {
         pagination_token: 't3_saved',
@@ -448,7 +448,7 @@ describe('RedditConnector runtime', () => {
     connector.RATE_LIMIT_MS = 0;
     const options = {
       feedKey: 'home_feed',
-      config: {},
+      config: { reply_posts_per_sync: 0 },
       credentials: { accessToken: 'token' },
     };
     const first = await runSync(connector, { ...options, checkpoint: null });
@@ -573,6 +573,209 @@ describe('RedditConnector runtime', () => {
       expect(result.events[0].metadata).not.toHaveProperty('media_url');
     }
   );
+
+  // home_feed stores a bounded slice of each busy thread, each reply exactly as
+  // the comments feed stores it (origin_parent_id = the post or the parent comment).
+  function thread(
+    id: string,
+    author: string,
+    body: string,
+    extra: Record<string, unknown> = {},
+    replies: ReturnType<typeof thread>[] = []
+  ): { kind: string; data: ReturnType<typeof redditComment>['data'] & Record<string, unknown> } {
+    return {
+      kind: 't1',
+      data: {
+        ...redditComment(id, 't3_busy').data,
+        author,
+        body,
+        link_id: 't3_busy',
+        permalink: `/r/lobu/comments/busy/post/${id}/`,
+        replies: replies.length
+          ? {
+              kind: 'Listing',
+              data: { children: replies.map((reply) => ({ ...reply, data: { ...reply.data, parent_id: `t1_${id}` } })), after: null },
+            }
+          : '',
+        ...extra,
+      },
+    };
+  }
+
+  function mockHomeFeedWithThreads(
+    posts: ReturnType<typeof redditPost>[],
+    threads: Record<string, unknown[] | number | 'stall'>
+  ) {
+    const commentUrls: URL[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input.toString());
+      if (url.pathname === '/best') return listing(posts);
+      commentUrls.push(url);
+      const id = url.pathname.split('/').at(-1)!;
+      const comments = threads[id];
+      if (typeof comments === 'number') return new Response('error', { status: comments });
+      // Never answers and ignores the abort signal.
+      if (comments === 'stall') return new Promise<Response>(() => {});
+      return Response.json([
+        { kind: 'Listing', data: { children: [], after: null } },
+        { kind: 'Listing', data: { children: comments ?? [], after: null } },
+      ]);
+    }) as typeof fetch;
+    return commentUrls;
+  }
+
+  function postWithComments(id: string, numComments: number) {
+    const post = redditPost(id);
+    post.data.num_comments = numComments;
+    return post;
+  }
+
+  const replyCaps = {
+    reply_posts_per_sync: 1,
+    max_top_level_replies: 2,
+    max_nested_replies: 1,
+    max_reply_depth: 2,
+    reply_refresh_min_new_comments: 50,
+  };
+
+  test('home_feed stores bounded replies of the most-commented post with comment lineage', async () => {
+    const commentUrls = mockHomeFeedWithThreads(
+      [postWithComments('quiet', 2), postWithComments('busy', 300), postWithComments('none', 0)],
+      {
+        busy: [
+          thread('mod', 'AutoModerator', 'Rules reminder', { stickied: true }),
+          thread('top', 'alice', 'Top reply & more', {}, [
+            thread('nested', 'bob', 'Nested reply'),
+            thread('nested2', 'carol', 'Over the nested cap'),
+          ]),
+          thread('gone', 'dave', '[removed]'),
+          thread('second', 'erin', 'Second reply'),
+          thread('third', 'frank', 'Over the top-level cap'),
+          { kind: 'more', data: { count: 290, children: ['x'] } },
+        ],
+      }
+    );
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const result = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: replyCaps,
+      credentials: { accessToken: 'token' },
+      checkpoint: null,
+    });
+
+    expect(commentUrls.map((url) => `${url.origin}${url.pathname}`)).toEqual([
+      'https://oauth.reddit.com/comments/busy',
+    ]);
+    expect(Object.fromEntries(commentUrls[0].searchParams)).toEqual({
+      sort: 'top',
+      depth: '2',
+      limit: '8',
+    });
+    const replies = result.events.filter((event) => event.origin_type === 'comment');
+    expect(replies.map((event) => event.origin_id)).toEqual([
+      'reddit_comment_t1_top',
+      'reddit_comment_t1_nested',
+      'reddit_comment_t1_second',
+    ]);
+    expect(replies.map((event) => event.origin_parent_id)).toEqual([
+      'reddit_post_t3_busy',
+      'reddit_comment_t1_top',
+      'reddit_post_t3_busy',
+    ]);
+    expect(replies[0]).toMatchObject({
+      author_name: 'alice',
+      payload_text: 'Top reply & more',
+      source_url: 'https://reddit.com/r/lobu/comments/busy/post/top/',
+      metadata: { subreddit: 'lobu', score: 3 },
+    });
+    expect(result.checkpoint?.reply_counts).toEqual({ reddit_post_t3_busy: 300 });
+
+    const kinds = Object.keys(new RedditConnector().definition.feeds.home_feed.eventKinds ?? {});
+    for (const event of result.events) expect(kinds).toContain(event.origin_type);
+  });
+
+  test('home_feed re-reads a stored thread only after it grows and survives a failed thread', async () => {
+    const commentUrls = mockHomeFeedWithThreads(
+      [postWithComments('busy', 320), postWithComments('grown', 200), postWithComments('fresh', 4)],
+      { fresh: 404, grown: [thread('late', 'gina', 'Late reply')] }
+    );
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const result = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: { ...replyCaps, reply_posts_per_sync: 3 },
+      credentials: { accessToken: 'token' },
+      checkpoint: { reply_counts: { reddit_post_t3_busy: 300, reddit_post_t3_grown: 100 } },
+    });
+
+    // busy grew by 20 (< 50): skipped. fresh failed: retried next sync.
+    expect(commentUrls.map((url) => url.pathname)).toEqual(['/comments/fresh', '/comments/grown']);
+    expect(result.events.map((event) => event.origin_id)).toContain('reddit_comment_t1_late');
+    expect(result.checkpoint?.reply_counts).toEqual({
+      reddit_post_t3_busy: 300,
+      reddit_post_t3_grown: 200,
+    });
+    expect(result.metadata).toMatchObject({ reply_fetch_failures: 1 });
+  });
+
+  test('a comment synced by home_feed and by the comments feed is the same row', async () => {
+    const nested = thread('nested', 'bob', 'Nested reply');
+    const top = thread('top', 'alice', 'Top reply', {}, [nested]);
+    mockHomeFeedWithThreads([postWithComments('busy', 300)], { busy: [top] });
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const homeFeed = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: replyCaps,
+      credentials: { accessToken: 'token' },
+      checkpoint: null,
+    });
+
+    // The same comments as a subreddit comments listing returns them.
+    const { replies: _topReplies, ...topData } = top.data;
+    const nestedData = { ...nested.data, parent_id: 't1_top' };
+    globalThis.fetch = (async () =>
+      listing([{ kind: 't1', data: topData }, { kind: 't1', data: nestedData }])) as unknown as typeof fetch;
+    const comments = await runSync(new RedditConnector(), {
+      feedKey: 'comments',
+      config: { subreddit: 'lobu' },
+      credentials: { accessToken: 'token' },
+      checkpoint: {},
+    });
+
+    for (const originId of ['reddit_comment_t1_top', 'reddit_comment_t1_nested']) {
+      const fromHomeFeed = homeFeed.events.find((event) => event.origin_id === originId);
+      const fromComments = comments.events.find((event) => event.origin_id === originId);
+      expect(fromHomeFeed).toBeDefined();
+      expect(fromHomeFeed).toEqual(fromComments);
+    }
+  });
+
+  test('home_feed skips a stalled thread and still commits its posts', async () => {
+    mockHomeFeedWithThreads(
+      [postWithComments('busy', 300), postWithComments('next', 100)],
+      { busy: 'stall', next: [thread('ok', 'gina', 'Answered')] }
+    );
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    (connector as unknown as { REPLY_PHASE_BUDGET_MS: number }).REPLY_PHASE_BUDGET_MS = 200;
+    const result = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: { ...replyCaps, reply_posts_per_sync: 2 },
+      credentials: { accessToken: 'token' },
+      checkpoint: null,
+    });
+
+    // The stall used the whole reply budget: no replies, posts committed,
+    // and neither thread is recorded, so the next sync retries both.
+    expect(result.events.map((event) => event.origin_id)).toEqual([
+      'reddit_post_t3_busy',
+      'reddit_post_t3_next',
+    ]);
+    expect(result.metadata).toMatchObject({ replies_found: 0, reply_fetch_failures: 1 });
+    expect(result.checkpoint?.reply_counts).toEqual({});
+  }, 5_000);
 
   test('names the subreddit in the error raised for a 404 listing', async () => {
     globalThis.fetch = (async () => new Response('not found', { status: 404 })) as typeof fetch;

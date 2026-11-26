@@ -16,6 +16,17 @@ import {
   type SyncResult,
   validatePublicUrl,
 } from '@lobu/connector-sdk';
+import {
+  boundedReplyTree,
+  type ReplyCounts,
+  readReplyCounts,
+  readReplySyncLimits,
+  replyCountsCheckpoint,
+  replyPhaseDeadline,
+  replySyncConfigProperties,
+  selectReplyPosts,
+  withinReplyBudget,
+} from './reply-sync';
 
 // ---------------------------------------------------------------------------
 // Algolia HN API types
@@ -37,6 +48,19 @@ interface AlgoliaHit {
   _tags: string[];
 }
 
+/** A node of the Algolia `/items/:id` tree: the story with its nested comments. */
+interface AlgoliaItem {
+  id: number;
+  type?: string;
+  author?: string | null;
+  text?: string | null;
+  created_at?: string;
+  created_at_i?: number;
+  story_id?: number | null;
+  parent_id?: number | null;
+  children?: AlgoliaItem[];
+}
+
 interface AlgoliaResponse {
   hits: AlgoliaHit[];
   nbHits: number;
@@ -56,16 +80,79 @@ const CONTENT_TYPE_TAG: Record<string, string> = {
   show_hn: 'show_hn',
 };
 
+/**
+ * HN serves comment and story text as a small HTML subset (`<p>`, `<a>`, `<i>`,
+ * `<pre><code>`, entities). Parse it with Turndown's DOM and emit plain text:
+ * paragraphs as blank-line breaks, links as their full `href` (HN truncates the
+ * visible URL), code verbatim, no Markdown markup or escaping.
+ */
+function createHnPlainTextConverter(): TurndownService {
+  const converter = new TurndownService();
+  converter.escape = (text: string) => text;
+  converter.addRule('plainLink', {
+    filter: 'a',
+    replacement: (content, node) => node.getAttribute('href') || content,
+  });
+  converter.addRule('plainInline', {
+    filter: ['i', 'em', 'b', 'strong', 'code'],
+    replacement: (content) => content,
+  });
+  converter.addRule('plainPre', {
+    filter: 'pre',
+    replacement: (_content, node) => `\n\n${node.textContent ?? ''}\n\n`,
+  });
+  converter.addRule('plainBreak', { filter: 'br', replacement: () => '\n' });
+  return converter;
+}
+
+/** Most-discussed first (largest reply subtree), then oldest first. */
+/**
+ * An `/items/:id` comment in the shape `/search?tags=comment` returns it (same
+ * text, ids and `_tags` order), so a front-page reply goes through the
+ * comments feed's `transformComment` and both feeds store the same row.
+ */
+function commentItemAsHit(node: AlgoliaItem, storyId: number): AlgoliaHit {
+  const story = node.story_id ?? storyId;
+  return {
+    objectID: String(node.id),
+    created_at: node.created_at ?? '',
+    created_at_i: node.created_at_i ?? 0,
+    author: node.author ?? '',
+    comment_text: node.text ?? undefined,
+    story_id: story,
+    parent_id: node.parent_id ?? undefined,
+    _tags: ['comment', `author_${node.author}`, `story_${story}`],
+  };
+}
+
+function rankByThreadSize(nodes: AlgoliaItem[] | undefined): AlgoliaItem[] {
+  if (!Array.isArray(nodes)) return [];
+  const sizes = new Map<AlgoliaItem, number>();
+  const size = (node: AlgoliaItem): number => {
+    const known = sizes.get(node);
+    if (known !== undefined) return known;
+    const total = (node.children ?? []).reduce((sum, child) => sum + 1 + size(child), 0);
+    sizes.set(node, total);
+    return total;
+  };
+  return [...nodes].sort(
+    (a, b) => size(b) - size(a) || (a.created_at_i ?? 0) - (b.created_at_i ?? 0)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Connector
 // ---------------------------------------------------------------------------
+
+/** Algolia answered a reply fetch with 429: stop fetching replies this sync. */
+class HnRateLimited extends Error {}
 
 export default class HackerNewsConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
     key: 'hackernews',
     name: 'Hacker News',
     description: 'Searches Hacker News stories and comments via Algolia API.',
-    version: '1.0.1',
+    version: '1.1.0',
     faviconDomain: 'news.ycombinator.com',
     authSchema: {
       methods: [{ type: 'none' }],
@@ -166,6 +253,12 @@ export default class HackerNewsConnector extends ConnectorRuntime {
               default: 0,
               description: 'Only include front-page stories with at least this many points.',
             },
+            // Replies are stored as `comment` events exactly as the comments
+            // feed stores them (origin_parent_id = the story or the comment
+            // answered). Defaults: 5 stories per sync, 10 top-level replies,
+            // 2 nested replies each, 2 levels, re-fetch after 50 new
+            // comments — at most 150 replies per sync.
+            ...replySyncConfigProperties,
           },
         },
         eventKinds: {
@@ -204,6 +297,17 @@ export default class HackerNewsConnector extends ConnectorRuntime {
                 external_url: { type: 'string', format: 'uri' },
                 score: { type: 'number' },
                 reply_count: { type: 'number' },
+              },
+            },
+          },
+          comment: {
+            description: 'A Hacker News comment on a front-page story',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                story_id: { type: 'number' },
+                parent_id: { type: 'number' },
+                tags: { type: 'array', items: { type: 'string' } },
               },
             },
           },
@@ -275,7 +379,10 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   // per-article fetches, and bail once egress is clearly down.
   private readonly MAX_CONTENT_FETCHES = 25;
   private readonly MAX_CONSECUTIVE_FETCH_FAILURES = 3;
+  // Pause between Algolia item (reply tree) requests.
+  private readonly REPLY_FETCH_DELAY_MS = 500;
   private turndownService: TurndownService;
+  private readonly plainTextConverter = createHnPlainTextConverter();
 
   constructor() {
     super();
@@ -307,6 +414,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     const tag = isFrontPage ? 'front_page' : (CONTENT_TYPE_TAG[contentType] ?? 'story');
 
     const events: EventEnvelope[] = [];
+    const frontPageHits: AlgoliaHit[] = [];
     let page = 0;
     let hasMore = true;
     const deadline = Date.now() + this.SYNC_BUDGET_MS;
@@ -359,6 +467,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
           if (event) events.push(event);
         } else {
           events.push(this.transformStory(hit));
+          if (isFrontPage) frontPageHits.push(hit);
         }
       }
 
@@ -370,14 +479,117 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       }
     }
 
+    // Replies first: they are capped per sync and cheaper than article fetches.
+    const replies = isFrontPage
+      ? await this.collectFrontPageReplies(ctx, frontPageHits, deadline)
+      : null;
+
     // Enrich high-engagement stories with external content (bounded by the
     // remaining time budget + a fetch cap; skipped entirely if it's exhausted).
     if (contentType !== 'comment') {
       await this.enrichStoriesWithExternalContent(events, deadline);
     }
 
-    await ctx.commit(events, { last_sync_at: new Date().toISOString() });
-    return { status: 'complete', metadata: { items_found: events.length } };
+    await ctx.commit([...events, ...(replies?.events ?? [])], {
+      last_sync_at: new Date().toISOString(),
+      ...(replies?.checkpoint ?? {}),
+    });
+    return {
+      status: 'complete',
+      metadata: {
+        items_found: events.length + (replies?.events.length ?? 0),
+        ...(replies?.metadata ?? {}),
+      },
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Front-page replies
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch the reply trees of a bounded set of front-page stories (one Algolia
+   * `/items/:id` request each) and keep a capped, ranked slice of each tree.
+   * Best-effort and bounded: each request (fetch and body) is cut off by
+   * `withinReplyBudget`, a failed or slow tree is skipped and retried next
+   * sync, a rate limit stops reply fetching, and nothing here throws, so the
+   * stories always commit.
+   */
+  private async collectFrontPageReplies(
+    ctx: SyncContext,
+    hits: AlgoliaHit[],
+    deadline: number
+  ): Promise<{
+    events: EventEnvelope[];
+    checkpoint: Record<string, ReplyCounts>;
+    metadata: Record<string, number>;
+  }> {
+    const limits = readReplySyncLimits(ctx.config);
+    const stored = readReplyCounts(ctx.checkpoint);
+    const candidates = hits.map((hit) => ({
+      hit,
+      originId: `hn_story_${hit.objectID}`,
+      commentCount: hit.num_comments ?? 0,
+    }));
+    const selected = selectReplyPosts(candidates, stored, limits);
+
+    const replyDeadline = replyPhaseDeadline({ syncDeadline: deadline });
+    const events: EventEnvelope[] = [];
+    const fetched: ReplyCounts = {};
+    let failures = 0;
+    for (const [index, { hit, originId, commentCount }] of selected.entries()) {
+      if (index > 0) await sleep(this.REPLY_FETCH_DELAY_MS);
+      if (Date.now() >= replyDeadline) break;
+
+      let item: AlgoliaItem;
+      try {
+        item = await withinReplyBudget(replyDeadline, async (signal) => {
+          const response = await fetch(
+            `${this.BASE_URL}/items/${encodeURIComponent(hit.objectID)}`,
+            { signal }
+          );
+          if (response.status === 429) throw new HnRateLimited();
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return (await response.json()) as AlgoliaItem;
+        });
+      } catch (error) {
+        failures++;
+        if (error instanceof HnRateLimited) break;
+        continue;
+      }
+
+      const storyId = Number(hit.objectID);
+      const kept = boundedReplyTree(
+        rankByThreadSize(item?.children),
+        limits,
+        (node) => rankByThreadSize(node.children),
+        (node) =>
+          node.type === 'comment' &&
+          !!node.author &&
+          !!node.text &&
+          typeof node.created_at_i === 'number' &&
+          Number.isFinite(node.created_at_i)
+      );
+      for (const node of kept) {
+        const event = this.transformComment(commentItemAsHit(node, storyId));
+        if (event) events.push(event);
+      }
+      fetched[originId] = commentCount;
+    }
+
+    return {
+      events,
+      checkpoint: replyCountsCheckpoint(
+        stored,
+        candidates.map((candidate) => candidate.originId),
+        fetched
+      ),
+      metadata: {
+        replies_found: events.length,
+        reply_posts_fetched: Object.keys(fetched).length,
+        ...(failures > 0 ? { reply_fetch_failures: failures } : {}),
+      },
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -386,6 +598,10 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   // -------------------------------------------------------------------------
   // Transform helpers
   // -------------------------------------------------------------------------
+
+  private plainText(html: string | null | undefined): string {
+    return html ? this.plainTextConverter.turndown(html) : '';
+  }
 
   private transformStory(hit: AlgoliaHit): EventEnvelope {
     const isAskHN = hit._tags.includes('ask_hn');
@@ -409,7 +625,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     return {
       origin_id: `hn_story_${hit.objectID}`,
       title: hit.title ?? '',
-      payload_text: (hit.story_text ?? '').trim(),
+      payload_text: this.plainText(hit.story_text),
       author_name: hit.author,
       source_url: `https://news.ycombinator.com/item?id=${hit.objectID}`,
       occurred_at: new Date(hit.created_at_i * 1000),
@@ -439,7 +655,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
 
     return {
       origin_id: `hn_comment_${hit.objectID}`,
-      payload_text: hit.comment_text,
+      payload_text: this.plainText(hit.comment_text),
       author_name: hit.author,
       source_url: `https://news.ycombinator.com/item?id=${hit.objectID}`,
       occurred_at: new Date(hit.created_at_i * 1000),

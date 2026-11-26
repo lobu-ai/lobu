@@ -21,6 +21,19 @@ import {
   type SyncResult,
 } from '@lobu/connector-sdk';
 import addFormats from 'ajv-formats';
+import {
+  boundedReplyTree,
+  maxRepliesPerPost,
+  type ReplyCounts,
+  type ReplySyncLimits,
+  readReplyCounts,
+  readReplySyncLimits,
+  replyCountsCheckpoint,
+  replyPhaseDeadline,
+  replySyncConfigProperties,
+  selectReplyPosts,
+  withinReplyBudget,
+} from './reply-sync';
 
 // ---------------------------------------------------------------------------
 // Reddit API types
@@ -58,6 +71,15 @@ interface RedditComment {
   parent_id: string;
   link_id: string;
   subreddit: string;
+  stickied?: boolean;
+}
+
+/** A node of a `/comments/:id` tree: a comment (t1) or a `more` stub. */
+interface RedditCommentNode {
+  kind: string;
+  data: RedditComment & {
+    replies?: '' | { data?: { children?: RedditCommentNode[] } };
+  };
 }
 
 interface RedditListingResponse {
@@ -75,6 +97,7 @@ interface RedditCheckpoint {
   pagination_token?: string;
   pagination_cutoff?: string;
   inbox_head?: string | null;
+  reply_counts?: ReplyCounts;
 }
 
 interface RedditInboxItem {
@@ -125,7 +148,7 @@ export default class RedditConnector extends ConnectorRuntime {
     name: 'Reddit',
     description:
       "Fetches posts and comments from Reddit subreddits or search queries, the connected user's home feed, and inbox notification references.",
-    version: '1.3.0',
+    version: '1.4.0',
     faviconDomain: 'reddit.com',
     authSchema: {
       methods: [
@@ -326,6 +349,12 @@ export default class RedditConnector extends ConnectorRuntime {
               default: 7,
               description: 'Skip home feed posts older than this many days.',
             },
+            // Replies are stored as `comment` events exactly as the comments
+            // feed stores them (origin_parent_id = the post or the comment
+            // answered). Defaults: 5 posts per sync, 10 top-level replies,
+            // 2 nested replies each, 2 levels, re-fetch after 50 new
+            // comments — at most 150 replies per sync.
+            ...replySyncConfigProperties,
           },
         },
         eventKinds: {
@@ -349,6 +378,16 @@ export default class RedditConnector extends ConnectorRuntime {
               },
             },
           },
+          comment: {
+            description: 'A Reddit comment on a home feed post',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                subreddit: { type: 'string' },
+                score: { type: 'number', description: 'Reddit score (upvotes - downvotes)' },
+              },
+            },
+          },
         },
       },
     },
@@ -356,6 +395,8 @@ export default class RedditConnector extends ConnectorRuntime {
 
   private readonly MAX_PAGES = 10;
   private readonly RATE_LIMIT_MS = 1000;
+  // Wall-clock budget for fetching home feed replies in one sync.
+  private readonly REPLY_PHASE_BUDGET_MS = 60_000;
   private readonly USER_AGENT = 'Lobu-Connector/1.0.0';
 
   private async inboxPage(
@@ -525,6 +566,7 @@ export default class RedditConnector extends ConnectorRuntime {
     });
 
     const events: EventEnvelope[] = [];
+    const homePosts: RedditPost[] = [];
     const seenItems = new Set<string>();
     const seenCursors = new Set<string>();
     let after: string | null = null;
@@ -609,6 +651,7 @@ export default class RedditConnector extends ConnectorRuntime {
           if (post.selftext === '[removed]' || post.selftext === '[deleted]') continue;
 
           events.push(this.transformPost(post));
+          if (isHomeFeed) homePosts.push(post);
         } else if (isComment) {
           const comment = itemData as RedditComment;
           if (!comment.body || comment.body === '[removed]' || comment.body === '[deleted]')
@@ -621,18 +664,139 @@ export default class RedditConnector extends ConnectorRuntime {
       if (reachedCutoff) break;
     }
 
+    const replies = isHomeFeed
+      ? await this.collectReplies({
+          http,
+          baseUrl,
+          isOAuth: !!accessToken,
+          posts: homePosts,
+          limits: readReplySyncLimits(ctx.config),
+          stored: readReplyCounts(ctx.checkpoint),
+        })
+      : null;
+
     const checkpoint: RedditCheckpoint = {
       last_timestamp: new Date().toISOString(),
       pagination_token: !reachedCutoff && !isHomeFeed ? (after ?? undefined) : undefined,
       pagination_cutoff:
         !reachedCutoff && !isHomeFeed && after ? cutoffDate.toISOString() : undefined,
+      ...(replies?.checkpoint ?? {}),
     };
 
-    await ctx.commit(events, checkpoint as Record<string, unknown>);
+    await ctx.commit([...events, ...(replies?.events ?? [])], checkpoint as Record<string, unknown>);
     return {
       status: 'complete',
       metadata: {
-        items_found: events.length,
+        items_found: events.length + (replies?.events.length ?? 0),
+        ...(replies?.metadata ?? {}),
+      },
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Post replies
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch the top-sorted comment trees of a bounded set of posts and keep a
+   * capped slice of each, mapped by the same `transformComment` as the
+   * comments and user_activity feeds so overlapping feeds store identical
+   * rows. Best-effort and bounded: each request (fetch and body) is cut off by
+   * `withinReplyBudget`; a missing, forbidden, malformed or slow thread is
+   * skipped and retried next sync, any other HTTP failure stops reply
+   * fetching, and nothing here throws, so the posts always commit.
+   */
+  private async collectReplies(args: {
+    http: ReturnType<typeof createHttpClient>;
+    baseUrl: string;
+    isOAuth: boolean;
+    posts: RedditPost[];
+    limits: ReplySyncLimits;
+    stored: ReplyCounts;
+  }): Promise<{
+    events: EventEnvelope[];
+    checkpoint: Record<string, ReplyCounts>;
+    metadata: Record<string, number>;
+  }> {
+    const { http, baseUrl, isOAuth, posts, limits, stored } = args;
+    const candidates = posts.map((post) => ({
+      post,
+      originId: `reddit_post_${post.name}`,
+      commentCount: post.num_comments ?? 0,
+    }));
+    const selected = selectReplyPosts(candidates, stored, limits);
+    // Ask for enough comments to fill nested slots after skipped ones.
+    const requestLimit = Math.min(200, 2 * maxRepliesPerPost(limits));
+
+    const replyDeadline = replyPhaseDeadline({ budgetMs: this.REPLY_PHASE_BUDGET_MS });
+    const events: EventEnvelope[] = [];
+    const fetched: ReplyCounts = {};
+    let failures = 0;
+    for (const { post, originId, commentCount } of selected) {
+      await sleep(this.RATE_LIMIT_MS);
+      if (Date.now() >= replyDeadline) break;
+      // No raw_json: the comments and user_activity listings are read without
+      // it, and the body must match theirs byte for byte.
+      const params = new URLSearchParams({
+        sort: 'top',
+        depth: String(limits.maxDepth),
+        limit: String(requestLimit),
+      });
+      const url = `${baseUrl}/comments/${encodeURIComponent(post.id)}${isOAuth ? '' : '.json'}?${params}`;
+
+      let response: unknown;
+      try {
+        response = await withinReplyBudget(replyDeadline, (signal) =>
+          http.get<unknown>(url, { signal })
+        );
+      } catch (error) {
+        failures++;
+        if (error instanceof HttpStatusError && ![403, 404].includes(error.status)) break;
+        continue;
+      }
+      const roots = Array.isArray(response)
+        ? (response[1] as { data?: { children?: unknown } } | undefined)?.data?.children
+        : undefined;
+      if (!Array.isArray(roots)) {
+        failures++;
+        continue;
+      }
+
+      const kept = boundedReplyTree(
+        roots as RedditCommentNode[],
+        limits,
+        (node) => {
+          const replies = node.data.replies;
+          return (replies && replies.data?.children) || [];
+        },
+        (node) => {
+          const { body, author, stickied } = node.data ?? {};
+          // Stickied comments are moderator/bot notices, not discussion.
+          return (
+            node.kind === 't1' &&
+            !stickied &&
+            !!body &&
+            body !== '[removed]' &&
+            body !== '[deleted]' &&
+            author !== '[deleted]'
+          );
+        }
+      );
+      for (const node of kept) events.push(this.transformComment(node.data));
+      fetched[originId] = commentCount;
+    }
+
+    return {
+      events,
+      checkpoint: replyCountsCheckpoint(
+        stored,
+        candidates.map((candidate) => candidate.originId),
+        fetched
+      ),
+      metadata: {
+        replies_found: events.length,
+        reply_posts_fetched: Object.keys(fetched).length,
+        ...(failures > 0 ? { reply_fetch_failures: failures } : {}),
       },
     };
   }
