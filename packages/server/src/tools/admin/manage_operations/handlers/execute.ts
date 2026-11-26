@@ -3,7 +3,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
-import { getErrorMessage, type ToolErrorCode } from "@lobu/core";
+import { executionFailureCode, getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
@@ -122,6 +122,7 @@ async function failRunInline(
 	deferTerminalWrite: boolean,
 	claimedBy: string,
 	output?: Record<string, unknown>,
+	errorCode?: ToolErrorCode,
 ): Promise<InlineExecutionResult> {
 	// Connector code, scraped pages and upstream MCP servers all reach here as
 	// raw text, so the message can carry NUL (0x00) that Postgres rejects (see
@@ -137,11 +138,21 @@ async function failRunInline(
 			runId,
 			organizationId,
 			claimedBy,
-			{ status: "failed", errorMessage: message, ...(reported ? { output: reported } : {}) },
+			{
+				status: "failed",
+				errorMessage: message,
+				...(reported ? { output: reported } : {}),
+				...(errorCode ? { errorCode } : {}),
+			},
 		);
 		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
-	return { status: "failed", error_message: message, ...(reported ? { output: reported } : {}) };
+	return {
+		status: "failed",
+		error_message: message,
+		...(reported ? { output: reported } : {}),
+		...(errorCode ? { error_code: errorCode } : {}),
+	};
 }
 
 // Update the run to completed status and return the output in one call.
@@ -244,6 +255,8 @@ async function executeLocalActionInline(
 			getErrorMessage(err),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(err),
 		);
 	}
 
@@ -353,6 +366,8 @@ async function executeLocalActionInline(
 			getErrorMessage(error),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(error),
 		);
 	}
 }
@@ -393,6 +408,8 @@ async function executeMcpToolInline(
 			getErrorMessage(error),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(error),
 		);
 	}
 
@@ -503,7 +520,7 @@ async function executeOperationInlineBackend(
 	try {
 		actionInput = await resolveOperationFiles(actionInput, options.runMetadata);
 	} catch (error) {
-		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy, undefined, executionFailureCode(error));
 	}
 	if (operation.backend === "local_action") {
 		return executeLocalActionInline(
@@ -530,7 +547,7 @@ async function executeOperationInlineBackend(
 				? completeRunInline(runId, organizationId, delivered.output, deferTerminalWrite, options.claimedBy, operation)
 				: failRunInline(runId, organizationId, delivered.error, deferTerminalWrite, options.claimedBy);
 		} catch (error) {
-			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy, undefined, executionFailureCode(error));
 		}
 	}
 	if (operation.backend === "mcp_tool") {
@@ -812,7 +829,7 @@ function failedExecuteResult(
 	connectorKey: string,
 	operation: OperationDescriptor,
 	recorded: boolean,
-	/** Why the run failed, when it recorded a typed code: an admission refusal or a device's report. */
+	/** Why the run failed, when it recorded a typed code: an admission refusal, a device's report or an inline failure's structure. */
 	errorCode?: ToolErrorCode | null,
 ): ManageOperationsResult {
 	const failed: ManageOperationsResult = {
@@ -1514,5 +1531,6 @@ export async function dispatchAdmittedRun(p: {
 		connection.connector_key,
 		operation,
 		true,
+		result.error_code,
 	);
 }

@@ -4,7 +4,7 @@
  * execution, then follows the shared completion and failure transitions.
  */
 
-import { deepRedactSecrets, isSecretKey, REDACTED_SENTINEL } from "@lobu/core";
+import { deepRedactSecrets, isSecretKey, REDACTED_SENTINEL, type ToolErrorCode } from "@lobu/core";
 import { getDb } from "../db/client";
 import { ApprovalKind, approvalContext, highApprovalImpact, normalApprovalImpact } from "../utils/approval-context";
 import type { OperationDescriptor } from "./types";
@@ -58,6 +58,8 @@ export type InlineOperationTerminal =
 			status: "failed";
 			errorMessage: string;
 			output?: Record<string, unknown> | null;
+			/** The typed cause, when the failure's structure names one. */
+			errorCode?: ToolErrorCode;
 	  };
 
 /**
@@ -86,6 +88,8 @@ export async function terminalizeInlineOperationRun(
 		const output = terminal.output ?? null;
 		const errorMessage =
 			terminal.status === "failed" ? terminal.errorMessage : null;
+		const errorCode =
+			terminal.status === "failed" ? terminal.errorCode : undefined;
 		// `action_output` is written only when this terminal carries one. A
 		// failure without output must leave the column alone rather than null
 		// out a payload an earlier phase of the same run already persisted.
@@ -99,6 +103,7 @@ export async function terminalizeInlineOperationRun(
 			    completed_at = NOW(),
 			    error_message = ${errorMessage}
 			    ${output === null ? tx`` : tx`, action_output = ${tx.json(output)}`}
+			    ${errorCode ? tx`, run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ error_code: errorCode })}::jsonb` : tx``}
 			WHERE id = ${runId}
 			  AND organization_id = ${organizationId}
 			  ${runLeaseFence(tx, claimedBy)}
@@ -133,6 +138,7 @@ export async function terminalizeInlineOperationRun(
 			connectorKey: failed.connector_key,
 			operationKey: failed.action_key,
 			errorMessage: terminal.errorMessage,
+			errorCode: terminal.errorCode,
 			parentRunId: failed.parent_run_id,
 		});
 	}

@@ -299,6 +299,39 @@ export function classifyToolError(signal: ToolErrorSignal): ToolErrorCode {
   return "INTERNAL";
 }
 
+/**
+ * The typed code a failed connector or operation execution names by its own
+ * structure: a typed `code` it carries, or the HTTP status, SQLSTATE or exit
+ * reason of a connector execution error. Undefined when the structure names no
+ * cause, so the failure stays unclassified instead of being guessed from its
+ * message.
+ */
+export function executionFailureCode(
+  error: unknown
+): ToolErrorCode | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const e = error as {
+    code?: unknown;
+    httpStatus?: unknown;
+    pgCode?: unknown;
+    exitReason?: unknown;
+  };
+  const exitReason =
+    e.exitReason === "timeout" ||
+    e.exitReason === "oom" ||
+    e.exitReason === "crash"
+      ? e.exitReason
+      : undefined;
+  const code =
+    toToolErrorCode(e.code) ??
+    classifyToolError({
+      httpStatus: typeof e.httpStatus === "number" ? e.httpStatus : undefined,
+      pgCode: typeof e.pgCode === "string" ? e.pgCode : undefined,
+      exitReason,
+    });
+  return code === "INTERNAL" ? undefined : code;
+}
+
 /** Produced at the connector's page boundary, never inferred from error prose. */
 const PAGE_INTERRUPTION_REASON_VALUES = [
   "challenge_required",

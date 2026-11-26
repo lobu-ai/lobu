@@ -155,15 +155,26 @@ class McpOAuthRequiredError extends Error {
   }
 }
 
+/** An upstream MCP server answered a request with a non-2xx HTTP status. */
+class McpUpstreamHttpError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number
+  ) {
+    super(message);
+    this.name = 'McpUpstreamHttpError';
+  }
+}
+
 /**
  * The upstream rejected the credentials we sent (HTTP 401). Unlike a session
  * rejection this MAY be a dead/revoked access token whose stored expiry still
  * looks valid, so the caller re-resolves against the exact rejected token and
  * retries once.
  */
-class McpAuthRejectedError extends Error {
+class McpAuthRejectedError extends McpUpstreamHttpError {
   constructor(message: string) {
-    super(message);
+    super(message, 401);
     this.name = 'McpAuthRejectedError';
   }
 }
@@ -276,12 +287,12 @@ async function sendRequest(
     const text = new TextDecoder().decode((await readResponseBody(response)).bytes);
     if (response.status === 404 && session) {
       sessions.delete(key);
-      throw new Error(`Upstream MCP returned 404: ${text}`);
+      throw new McpUpstreamHttpError(`Upstream MCP returned 404: ${text}`, 404);
     }
     if (response.status === 401) {
       throw new McpAuthRejectedError(`Upstream MCP returned 401: ${text}`);
     }
-    throw new Error(`Upstream MCP returned ${response.status}: ${text}`);
+    throw new McpUpstreamHttpError(`Upstream MCP returned ${response.status}: ${text}`, response.status);
   }
 
   const request = JSON.parse(body) as { id?: unknown };

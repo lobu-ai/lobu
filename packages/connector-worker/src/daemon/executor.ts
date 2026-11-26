@@ -7,7 +7,7 @@
 
 import { validateBrowserRequirement } from '@lobu/connector-sdk';
 import type { Env, EventEnvelope } from '@lobu/connector-sdk';
-import { classifyToolError, type ToolErrorCode } from '@lobu/core/connector-query-errors';
+import { executionFailureCode } from '@lobu/core/connector-query-errors';
 import { stableStringify } from '@lobu/core/contracts/tools/view-content-hash';
 import type { AgentKind } from '@lobu/core/contracts/worker/device-automation';
 import { executeAutomationRun } from './automation.js';
@@ -512,31 +512,6 @@ function partialFetchFailureMessage(
 }
 
 /**
- * The typed code a failed action reports, read off the execution error's
- * structure (its HTTP status, SQLSTATE or exit reason), never its message.
- * Omitted when the structure names no cause, so the gateway keeps reporting
- * the failure as unclassified instead of guessing.
- */
-function actionFailureCode(error: unknown): ToolErrorCode | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const e = error as {
-    httpStatus?: unknown;
-    pgCode?: unknown;
-    exitReason?: unknown;
-  };
-  const exitReason =
-    e.exitReason === 'timeout' || e.exitReason === 'oom' || e.exitReason === 'crash'
-      ? e.exitReason
-      : undefined;
-  const code = classifyToolError({
-    httpStatus: typeof e.httpStatus === 'number' ? e.httpStatus : undefined,
-    pgCode: typeof e.pgCode === 'string' ? e.pgCode : undefined,
-    exitReason,
-  });
-  return code === 'INTERNAL' ? undefined : code;
-}
-
-/**
  * Pull diagnostic fields off a ConnectorExecutionError-shaped error so the worker
  * can persist them on the failed run row. Returns `undefined` when the
  * thrown value isn't an execution failure (e.g. a stream/HTTP error).
@@ -683,7 +658,7 @@ async function executeActionRun(
     if (terminalPayloadStarted || monitor.revoked()) {
       return { itemsCollected: 0, error: errorMessage };
     }
-    const errorCode = actionFailureCode(error);
+    const errorCode = executionFailureCode(error);
     await completeActionOnce(client, {
       run_id,
       worker_id: client.id,

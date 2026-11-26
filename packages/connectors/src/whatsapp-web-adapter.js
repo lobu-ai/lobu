@@ -50,6 +50,17 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
   let readinessSignature = null;
   let readinessStableSince = 0;
 
+  // A refusal of the caller's own request, as opposed to a page or adapter
+  // fault: the named chat or message does not exist, or the input is not one
+  // WhatsApp can act on. `invoke` reports `state` in place of
+  // `operation_failed`, so the connector can tell the caller what to fix.
+  class RequestError extends Error {
+    constructor(state, message) {
+      super(message);
+      this.state = state;
+    }
+  }
+
   // A WhatsApp tab outlives any one connector version, so an adapter from an
   // earlier version can already be resident. Leave it alone when the versions
   // match and replace it otherwise, so newly advertised operations stop
@@ -1006,11 +1017,15 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
         matches.push(chat);
     }
     if (matches.length === 0)
-      throw new Error(
+      throw new RequestError(
+        "not_found",
         "WhatsApp chat not found; pass an exact canonical chat_jid or exact chat_name"
       );
     if (matches.length > 1)
-      throw new Error("WhatsApp chat name is ambiguous; pass chat_jid");
+      throw new RequestError(
+        "invalid_request",
+        "WhatsApp chat name is ambiguous; pass chat_jid"
+      );
     return matches[0];
   }
 
@@ -1156,14 +1171,15 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
   async function searchMessages(input) {
     const collections = requireFirst(["WAWebCollections"]);
     const query = String(input?.query ?? "").trim();
-    if (!query) throw new Error("query is required");
+    if (!query) throw new RequestError("invalid_request", "query is required");
     const offset = Math.max(0, Number(input?.offset) || 0);
     const requestedLimit = Math.max(
       1,
       Math.min(Number(input?.limit) || 50, 100)
     );
     if (offset >= 100) {
-      throw new Error(
+      throw new RequestError(
+        "invalid_request",
         "WhatsApp source search supports only the first 100 matches"
       );
     }
@@ -1267,7 +1283,7 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
     const collections = requireFirst(["WAWebCollections"]);
     const chat = await resolveChat(collections, input);
     const text = String(input?.text ?? "");
-    if (!text.trim()) throw new Error("text is required");
+    if (!text.trim()) throw new RequestError("invalid_request", "text is required");
     const draft = {
       body: text,
       timestamp: Math.floor(Date.now() / 1_000),
@@ -1325,9 +1341,12 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
     const chat = await resolveChat(collections, input);
     const chatJid = (await canonicalJid(modelData(chat).id ?? chat?.id)).jid;
     if (chatJid && isBroadcastOnlyJid(chatJid))
-      throw new Error(`WhatsApp chat ${chatJid} does not accept messages`);
+      throw new RequestError(
+        "invalid_request",
+        `WhatsApp chat ${chatJid} does not accept messages`
+      );
     const text = String(input?.text ?? "");
-    if (!text.trim()) throw new Error("text is required");
+    if (!text.trim()) throw new RequestError("invalid_request", "text is required");
     const module = requireFirst(SEND_MODULES);
     // Build the message first when the web build lets us, because the id has
     // to come from the message rather than from the send acknowledgment.
@@ -1404,10 +1423,11 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
 
   function resolveMessage(collections, id) {
     const raw = String(id ?? "").trim();
-    if (!raw) throw new Error("message_id is required");
+    if (!raw) throw new RequestError("invalid_request", "message_id is required");
     const message = collectionByRawId(collections.Msg, raw);
     if (!message)
-      throw new Error(
+      throw new RequestError(
+        "not_found",
         `WhatsApp message ${raw} is not loaded; read it with id:${raw} from the live messages feed or search it first`
       );
     return message;
@@ -1418,7 +1438,10 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
     const message = resolveMessage(collections, input?.message_id);
     const before = modelData(message);
     if (!(before.id?.fromMe ?? before.fromMe))
-      throw new Error("WhatsApp only permits editing outgoing messages");
+      throw new RequestError(
+        "invalid_request",
+        "WhatsApp only permits editing outgoing messages"
+      );
     if (
       !messageActionAllowed(
         message,
@@ -1432,7 +1455,7 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
         "WhatsApp did not affirm that this message is currently editable"
       );
     const text = String(input?.text ?? "");
-    if (!text.trim()) throw new Error("text is required");
+    if (!text.trim()) throw new RequestError("invalid_request", "text is required");
     const module = requireFirst(EDIT_MODULES);
     const fn = module?.sendMessageEdit ?? module?.editMessage ?? message?.edit;
     if (typeof fn !== "function")
@@ -1466,7 +1489,10 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
     const message = resolveMessage(collections, input?.message_id);
     const emoji = input?.remove ? "" : String(input?.emoji ?? "");
     if (!input?.remove && !emoji)
-      throw new Error("emoji is required unless remove=true");
+      throw new RequestError(
+        "invalid_request",
+        "emoji is required unless remove=true"
+      );
     const module = requireFirst(REACTION_MODULES);
     const fn =
       module?.sendReactionToMsg ?? module?.sendReaction ?? message?.react;
@@ -1522,7 +1548,10 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
     const message = resolveMessage(collections, input?.message_id);
     const before = modelData(message);
     if (!(before.id?.fromMe ?? before.fromMe))
-      throw new Error("WhatsApp only permits revoking outgoing messages");
+      throw new RequestError(
+        "invalid_request",
+        "WhatsApp only permits revoking outgoing messages"
+      );
     // Deliberately NOT `canDeleteMsg`: that is delete-for-me, a different
     // operation. Accepting it would let revoke report success having only
     // removed the message from this device.
@@ -1627,7 +1656,7 @@ export function whatsAppWebAdapterProgram(adapterVersion) {
       return {
         ok: false,
         error: {
-          state: "operation_failed",
+          state: error instanceof RequestError ? error.state : "operation_failed",
           reason: error instanceof Error ? error.message : String(error),
         },
       };

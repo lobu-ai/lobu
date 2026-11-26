@@ -343,7 +343,21 @@ describe("whatsAppWebAdapterProgram send_message", () => {
       input: { chat_jid: "0@s.whatsapp.net", text: "synthetic reply" },
     });
     expect(result.ok).toBe(false);
+    expect(result.error.state).toBe("invalid_request");
     expect(sent).toEqual([]);
+  });
+
+  it("names a chat the caller asked for that does not exist as not_found", async () => {
+    const adapter = installAdapter({ addAndSendTextMsg: () => ({}) });
+    const result = await adapter.invoke({
+      op: "send_message",
+      adapter_version: WHATSAPP_ADAPTER_VERSION,
+      input: { chat_name: "Synthetic Nobody", text: "hello" },
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { state: "not_found", reason: expect.stringContaining("chat not found") },
+    });
   });
 
   it("still sends on a build that only offers the one-shot call", async () => {
