@@ -13,6 +13,7 @@ import {
   deviceManifestHash,
   type DeviceConnectorManifest,
 } from '../../worker-api/device-manifests';
+import { DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE } from '../../worker-api/device-connector-readiness';
 import { initWorkspaceProvider } from '../../workspace';
 import { cleanupTestDatabase, getTestDb } from '../setup/test-db';
 import {
@@ -282,11 +283,15 @@ describe('manifest-backed device pin admission', () => {
   // The span a run_sdk failure records derives error.kind from this code, so a
   // device that is offline or out of date reads as a dependency and a
   // connection the caller has not finished setting up as the caller's fault.
+  // Both dependency refusals share a code, so the message is what tells the
+  // caller whether to wake the device or update it: an asleep device that
+  // serves the selected artifact must not read as a missing manifest.
   it.each([
     { refusal: 'an unpinned browser connection', code: 'PRECONDITION_FAILED', kind: 'user' },
     { refusal: 'a device missing the required permission', code: 'PRECONDITION_FAILED', kind: 'user' },
-    { refusal: 'no device advertising the selected artifact', code: 'UPSTREAM_UNAVAILABLE', kind: 'dependency' },
-  ])('classifies an admission refusal for $refusal as $kind', async ({ refusal, code, kind }) => {
+    { refusal: 'no device advertising the selected artifact', code: 'UPSTREAM_UNAVAILABLE', kind: 'dependency', manifestMissing: true },
+    { refusal: 'an offline device serving the selected artifact', code: 'UPSTREAM_UNAVAILABLE', kind: 'dependency', manifestMissing: false },
+  ])('classifies an admission refusal for $refusal as $kind', async ({ refusal, code, kind, manifestMissing }) => {
     const fixture = await seedFixture(
       refusal.startsWith('no device') ? manifest('0.9.0') : manifest(),
     );
@@ -296,6 +301,9 @@ describe('manifest-backed device pin admission', () => {
     }
     if (refusal.startsWith('a device missing')) {
       await sql`UPDATE device_workers SET capabilities = '[]'::jsonb WHERE id = ${fixture.device.id}::uuid`;
+    }
+    if (refusal.startsWith('an offline device')) {
+      await sql`UPDATE device_workers SET last_seen_at = NOW() - INTERVAL '1 hour' WHERE id = ${fixture.device.id}::uuid`;
     }
 
     const execute = () => runSdkScript(
@@ -332,7 +340,10 @@ describe('manifest-backed device pin admission', () => {
 
     // The refusal is the run's issue occurrence, logged once under its typed
     // code; replays hand back that fingerprint without logging it again.
-    const [run] = await sql`SELECT id FROM runs WHERE connection_id = ${fixture.connection.id} AND run_type = 'action'`;
+    const [run] = await sql`SELECT id, error_message FROM runs WHERE connection_id = ${fixture.connection.id} AND run_type = 'action'`;
+    if (manifestMissing !== undefined) {
+      expect(run.error_message === DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE).toBe(manifestMissing);
+    }
     const recorded = logged
       .split('\n')
       .filter((line) => line.includes('"operation_failure"'))

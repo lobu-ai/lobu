@@ -42,6 +42,7 @@ import { getDb } from '../db/client';
 import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS, POLICY_CHECK_WINDOW_SECONDS } from '../config/intervals';
 import type { Env } from '../index';
 import { findBundledConnectorFile } from '../utils/connector-catalog';
+import { DEVICE_ONLINE_WINDOW_SECONDS } from '../utils/device-liveness';
 import {
   describeMissingBrowserExecutionPin,
   hashlessManifestArtifactMayBeClaimed,
@@ -49,6 +50,7 @@ import {
 } from '../utils/connector-execution-placement';
 import {
   DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
+  describeDeviceConnectorOffline,
   describeDeviceConnectorSetupRequired,
   findDeviceConnectorReadiness,
   loadDeviceConnectorReadiness,
@@ -350,7 +352,10 @@ async function resolveActiveConnectorVersion(
  *
  * The code says whose move it is: setup the caller has not finished is a
  * PRECONDITION_FAILED, and no online device serving the artifact is an
- * unavailable dependency.
+ * unavailable dependency. The message says which dependency: a known artifact
+ * whose devices are all offline (or whose pinned device is offline) asks for
+ * the device to be woken; an artifact no device holds, or a pin that is online
+ * but serves another artifact, keeps the manifest text.
  */
 export async function deviceManifestAdmissionError(
   sql: DbClient,
@@ -375,10 +380,13 @@ export async function deviceManifestAdmissionError(
   const [row] = await sql<{
     owner_user_id: string | null;
     runtime: Record<string, unknown> | null;
+    pin_online: boolean | null;
   }>`
     SELECT COALESCE(dw.user_id, (o.metadata::jsonb)->>'personal_org_for_user_id')
              AS owner_user_id,
-           cd.runtime
+           cd.runtime,
+           dw.last_seen_at > now() - make_interval(secs => ${DEVICE_ONLINE_WINDOW_SECONDS})
+             AS pin_online
     FROM connections c
     JOIN "organization" o ON o.id = c.organization_id
     LEFT JOIN device_workers dw ON dw.id = ${deviceWorkerId}::uuid
@@ -403,9 +411,13 @@ export async function deviceManifestAdmissionError(
   const index = await loadDeviceConnectorReadiness({ sql, targets: [target] });
   const readiness = findDeviceConnectorReadiness(index, target);
   if (readiness?.state === 'ready') return null;
-  return readiness?.state === 'setup_required'
-    ? { message: describeDeviceConnectorSetupRequired(readiness), code: 'PRECONDITION_FAILED' }
-    : MANIFEST_UNAVAILABLE;
+  if (readiness?.state === 'setup_required') {
+    return { message: describeDeviceConnectorSetupRequired(readiness), code: 'PRECONDITION_FAILED' };
+  }
+  if (readiness?.state === 'device_offline' && (deviceWorkerId == null || row.pin_online !== true)) {
+    return { message: describeDeviceConnectorOffline(readiness), code: 'UPSTREAM_UNAVAILABLE' };
+  }
+  return MANIFEST_UNAVAILABLE;
 }
 
 /** Why a device run cannot be admitted, typed for the caller's error report. */
