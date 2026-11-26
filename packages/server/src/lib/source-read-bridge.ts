@@ -1,4 +1,4 @@
-import { ToolError, BrowserInterruptionError, browserPageInterruption, createLogger, getErrorMessage } from '@lobu/core';
+import { ToolError, BrowserInterruptionError, browserPageInterruption, browserStepFailure, createLogger, getErrorMessage } from '@lobu/core';
 import {
   canRetainSourceBrowser,
   claimSourceBrowser,
@@ -171,7 +171,7 @@ export function createSourceReadBridge(
         const marker = result.interruption ?? browserPageInterruption(result.output?.value);
         if (marker) throw new BrowserInterruptionError(marker.reason, marker.message);
         if (result.status !== 'completed')
-          throw new Error(result.error_message ?? `Browser source step ${result.status}`);
+          throw browserStepFailure(result, `Browser source step ${result.status}`);
         return result.output ?? {};
       })().catch((error) => {
         if (error instanceof BrowserInterruptionError) interruption = error;

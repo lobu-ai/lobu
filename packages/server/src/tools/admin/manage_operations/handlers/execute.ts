@@ -3,7 +3,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
-import { executionFailureCode, getErrorMessage, type ToolErrorCode } from "@lobu/core";
+import { browserStepFailure, executionFailureCode, getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
@@ -329,9 +329,9 @@ async function executeLocalActionInline(
 					});
 
 					if (dispatchResult.status !== "completed") {
-						throw new Error(
-							dispatchResult.error_message ??
-								`chrome action '${actionKey}' ${dispatchResult.status}`,
+						throw browserStepFailure(
+							dispatchResult,
+							`chrome action '${actionKey}' ${dispatchResult.status}`,
 						);
 					}
 					return dispatchResult.output ?? {};

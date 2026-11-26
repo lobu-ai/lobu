@@ -18,6 +18,8 @@ import type { ToolContext } from "../../tools/registry";
 import { createAuthProfile } from "../../utils/auth-profiles";
 import { initWorkspaceProvider } from "../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../setup/test-db";
+import { post } from "../setup/test-helpers";
+import { serveWorkerJobs } from "../setup/worker-poll";
 import {
 	addUserToOrganization,
 	createTestAgent,
@@ -971,6 +973,91 @@ describe("operations.execute backend lifecycle", () => {
 				"The browser this action is set to open in is offline",
 			),
 		});
+	});
+
+	it("records an action under the code its Chrome step failed with", async () => {
+		const sql = getTestDb();
+		const workerId = "coded-step-browser";
+		await createTestConnectorDefinition({ key: "chrome", name: "Chrome", organization_id: orgId });
+		await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ navigate: { name: "Navigate", kind: "write" } })}
+			WHERE organization_id = ${orgId} AND key = 'chrome'`;
+		const [worker] = await sql`
+			INSERT INTO device_workers (
+				user_id, worker_id, platform, app_version, capabilities, label,
+				organization_id, last_seen_at
+			) VALUES (
+				${userId}, ${workerId}, 'chrome-extension', '9.9.0',
+				${sql.json(["browser.tabs", "browser.debugger"])}, 'Coded Step Browser',
+				${orgId}, NOW()
+			)
+			RETURNING id
+		`;
+		const [browserConnection] = await sql`
+			INSERT INTO connections (
+				organization_id, connector_key, slug, display_name, status,
+				created_by, visibility, device_worker_id, created_at, updated_at
+			) VALUES (
+				${orgId}, 'chrome', 'coded-step-browser', 'Coded Step Browser', 'active',
+				${userId}, 'private', ${worker.id}::uuid, NOW(), NOW()
+			)
+			RETURNING id
+		`;
+		await sql`UPDATE connector_definitions SET browser = ${sql.json({ origins: ["https://example.test"] })} WHERE organization_id = ${orgId} AND key = ${LOCAL}`;
+		await sql`UPDATE connections SET device_worker_id = ${worker.id}::uuid WHERE id = ${localConnectionId}`;
+
+		const write = vi.spyOn(process.stdout, "write");
+		let result: Record<string, unknown>;
+		let logged: string;
+		try {
+			const executing = manageOperations(
+				{
+					action: "execute",
+					connection_id: localConnectionId,
+					operation_key: "stage_browser",
+					input: { browser_connection_id: Number(browserConnection.id) },
+					idempotency_key: "operation-backend-test:coded-chrome-step",
+				},
+				{} as Env,
+				ctx,
+			) as Promise<Record<string, unknown>>;
+			// The paired extension claims the step and reports Chrome's refusal
+			// through the real completion route, code and all.
+			const stepped = await serveWorkerJobs<boolean>({
+				until: executing,
+				deadlineMs: 15_000,
+				poll: async () => (await post("/api/workers/poll", { body: {
+					worker_id: workerId, platform: "chrome-extension", app_version: "9.9.0",
+					capabilities: { "browser.debugger": true, "browser.tabs": true },
+				} })).json(),
+				handle: async (job) => {
+					expect(job.operation_key).toBe("navigate");
+					const completion = await post("/api/workers/complete-action", { body: {
+						run_id: job.run_id, worker_id: workerId, status: "failed",
+						error_message: "navigate: Chrome refused to open https://example.test/: Not allowed",
+						error_code: "ACTION_FAILED",
+					} });
+					expect(completion.status).toBe(200);
+					return { done: true };
+				},
+			});
+			expect(stepped).toBe(true);
+			result = await executing;
+			logged = write.mock.calls.map(([line]) => String(line)).join("");
+		} finally {
+			write.mockRestore();
+		}
+		const recorded = logged
+			.split("\n")
+			.filter((line) => line.includes('"operation_failure"'))
+			.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+		expect(result).toMatchObject({
+			status: "failed",
+			error_code: "ACTION_FAILED",
+			error_message: expect.stringContaining("Chrome refused to open"),
+		});
+		expect(recorded).toEqual([
+			expect.objectContaining({ run_id: result.run_id, error_code: "ACTION_FAILED", error_kind: "user" }),
+		]);
 	});
 
 	it("does not let an Automation use another member's private connection", async () => {

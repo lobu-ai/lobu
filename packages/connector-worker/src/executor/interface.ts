@@ -306,7 +306,11 @@ export interface ConnectorExecutionDiagnostics {
   httpStatus?: number;
   /** Validated PostgreSQL SQLSTATE; distinct from connector outcome codes. */
   pgCode?: string;
-  code?: ConnectorErrorCode;
+  /**
+   * The connector's own outcome, or the code of a host capability failure (a
+   * browser step's, say) the connector let propagate.
+   */
+  code?: ConnectorErrorCode | ToolErrorCode;
 }
 
 export class ConnectorExecutionError extends Error implements ConnectorExecutionDiagnostics {
@@ -316,7 +320,7 @@ export class ConnectorExecutionError extends Error implements ConnectorExecution
   exitReason: ConnectorExitReason;
   httpStatus?: number;
   pgCode?: string;
-  code?: ConnectorErrorCode;
+  code?: ConnectorErrorCode | ToolErrorCode;
 
   constructor(
     message: string,

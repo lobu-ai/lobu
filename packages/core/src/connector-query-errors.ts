@@ -371,6 +371,20 @@ export class BrowserInterruptionError extends ToolError {
     };
   }
 }
+/**
+ * What a host throws for a browser step that did not complete. The step's own
+ * completion may name why it failed (`error_code`, unknown values ignored); the
+ * thrown error carries that code so the run the step served is classified by
+ * it instead of left unclassified.
+ */
+export function browserStepFailure(
+  step: { error_message?: string; error_code?: unknown },
+  fallbackMessage: string
+): Error {
+  const message = step.error_message ?? fallbackMessage;
+  const code = toToolErrorCode(step.error_code);
+  return code ? new ToolError(code, message) : new Error(message);
+}
 export function browserPageInterruption(
   value: unknown
 ): { reason: BrowserInterruptionReason; message: string } | undefined {
