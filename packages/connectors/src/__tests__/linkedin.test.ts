@@ -2259,6 +2259,33 @@ describe("LinkedInConnector home_feed", () => {
     expect(comment.metadata).not.toHaveProperty("author_company_slug");
   });
 
+  test("leaves the post photo empty when a same-named commenter is the only photo", async () => {
+    const res = await syncHomeFeedDom(`
+      <div componentkey="expandedsamename_tokenFeedType_MAIN_FEED_RELEVANCE">
+        <button aria-label="Open control menu for post by Fixture Namesake"></button>
+        <a href="https://www.linkedin.com/in/fixture-namesake-author/">
+          <span aria-label="View Fixture Namesake’s profile"></span>
+        </a>
+        <span id="translatable-commentary-urn:li:activity:6666666666666666666"></span>
+        <p>Fixture Namesake • A post whose author photo has not loaded yet in this tab</p>
+        <div id="replaceableComment_urn:li:comment:(urn:li:activity:6666666666666666666,7777777777777777777)">
+          <a href="https://www.linkedin.com/in/fixture-namesake-commenter/">
+            <img src="https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-namesake-commenter" alt="View Fixture Namesake’s profile" />
+          </a>
+          <p>Fixture Namesake • A different person with the same name comments here</p>
+        </div>
+      </div>`);
+    const [post, comment] = res.events;
+    // Two same-named members leave the author unattributed, so no photo is guessed.
+    expect(post.metadata).not.toHaveProperty("author_linkedin_slug");
+    expect(post.metadata).not.toHaveProperty("author_avatar_url");
+    expect(comment.metadata).toMatchObject({
+      author_linkedin_slug: "fixture-namesake-commenter",
+      author_avatar_url:
+        "https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-namesake-commenter",
+    });
+  });
+
   test("create_engager_people: false stamps every home-feed event for the createWhen gate", async () => {
     const res = await syncHomeFeedDom(
       companyCardHtml,

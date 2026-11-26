@@ -1504,8 +1504,10 @@ function resolveMemberSlug(
 }
 
 /**
- * The profile photo whose alt names `targetName`. Only LinkedIn's own image
- * CDN is accepted, since the URL is rendered back to the user as an image.
+ * The profile photo whose alt names `targetName`. Callers only ask once the
+ * author's profile anchor resolved unambiguously, and two different photos
+ * under one name still leave the author without one rather than guessed. Only
+ * LinkedIn's own image CDN is accepted, since the URL is rendered as an image.
  */
 function resolveAvatarUrl(
   avatars: unknown,
@@ -1513,6 +1515,7 @@ function resolveAvatarUrl(
 ): string | undefined {
   const target = nameKey(targetName);
   if (!target || !Array.isArray(avatars)) return undefined;
+  const urls = new Set<string>();
   for (const raw of avatars) {
     const avatar = (raw ?? {}) as HomeFeedAvatar;
     if (!avatar.url) continue;
@@ -1524,9 +1527,9 @@ function resolveAvatarUrl(
       continue;
     }
     if (url.protocol === "https:" && url.hostname === "media.licdn.com")
-      return url.href;
+      urls.add(url.href);
   }
-  return undefined;
+  return urls.size === 1 ? [...urls][0] : undefined;
 }
 
 /**
@@ -1885,7 +1888,12 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
     metadata.author_linkedin_slug = authorSlug;
     metadata.author_profile_url = profileUrlFor(authorSlug);
   }
-  const authorAvatarUrl = resolveAvatarUrl(row.avatars, author);
+  // A same-named person elsewhere in the card leaves the author unattributed;
+  // the photo follows the same rule instead of taking whichever loaded.
+  const authorAvatarUrl =
+    authorSlug || authorCompanySlug
+      ? resolveAvatarUrl(row.avatars, author)
+      : undefined;
   if (authorAvatarUrl) metadata.author_avatar_url = authorAvatarUrl;
 
   const embeddedUrn = row.post_identity?.match(
