@@ -38,7 +38,7 @@
  *     and the catalog separately, which is how the two drifted.
  */
 
-import { AgentErrorCode, classifyErrorMessage } from "@lobu/core";
+import { AGENT_ERRORS, AgentErrorCode, classifyErrorMessage } from "@lobu/core";
 
 export type RunOutcome = "infra_error" | "agent_error" | "scoreable";
 
@@ -101,9 +101,22 @@ const AGENT_RUN_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * A coded hosted failure is persisted as its catalog text (the API renderer
+ * stores `AGENT_ERRORS[code].message`), which the wording classifier does not
+ * place. Equality with the catalog entry recovers the code it was written from.
+ */
+const CODE_BY_CATALOG_MESSAGE: ReadonlyMap<string, AgentErrorCode> = new Map(
+	(Object.keys(AGENT_ERRORS) as AgentErrorCode[]).flatMap((code) => {
+		const message = AGENT_ERRORS[code].message;
+		return message ? [[message, code] as const] : [];
+	}),
+);
+
+/**
  * The `AgentErrorCode` a run surface renders for a stored failure, derived at
- * read time from the raw `error_message` by THE catalog. Null for non-agent run
- * types, empty messages, and anything the catalog cannot place.
+ * read time from `error_message`: the catalog text a coded failure was stored
+ * as, else the raw provider wording placed by THE catalog. Null for non-agent
+ * run types, empty messages, and anything the catalog cannot place.
  */
 export function runErrorCode(
 	runType: unknown,
@@ -111,7 +124,11 @@ export function runErrorCode(
 ): AgentErrorCode | null {
 	if (typeof runType !== "string" || !AGENT_RUN_TYPES.has(runType)) return null;
 	if (typeof errorMessage !== "string" || !errorMessage) return null;
-	return classifyErrorMessage(errorMessage) ?? null;
+	return (
+		CODE_BY_CATALOG_MESSAGE.get(errorMessage) ??
+		classifyErrorMessage(errorMessage) ??
+		null
+	);
 }
 
 /**

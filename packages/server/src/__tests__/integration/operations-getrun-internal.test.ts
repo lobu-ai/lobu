@@ -8,7 +8,9 @@
  * chat_message (the list's default exclusion) stays unfetchable.
  */
 
+import { AGENT_ERRORS, AgentErrorCode } from "@lobu/core";
 import { beforeAll, describe, expect, it } from "vitest";
+import { resolveAutomationRunsByMessageIds } from "../../automations/run-completion";
 import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
@@ -295,6 +297,30 @@ describe("manage_operations get_run — internal runs", () => {
 		const card = activity.items.find((item) => Number(item.run_id) === id);
 		expect(card?.body).toContain("can't read images");
 		expect(card?.body).not.toContain("does not support image input");
+	});
+
+	it("keeps the code of a hosted failure stored as its catalog text", async () => {
+		const db = getTestDb();
+		const messageId = "image-unsupported-hosted-turn";
+		const [row] = (await db`
+      INSERT INTO runs (organization_id, run_type, action_key, status,
+        dispatched_message_id, created_at, run_at)
+      VALUES (${orgId}, 'automation', null, 'running', ${messageId}, now(), now())
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+		const id = Number(row.id);
+		// The API renderer's terminal write: the catalog text, plus the code.
+		const catalogText = AGENT_ERRORS[AgentErrorCode.MODEL_IMAGE_UNSUPPORTED].message;
+		const { resolved } = await resolveAutomationRunsByMessageIds(
+			[messageId],
+			{ ok: false, error: catalogText as string, errorCode: AgentErrorCode.MODEL_IMAGE_UNSUPPORTED },
+			db,
+		);
+		expect(resolved).toBe(1);
+
+		const got = (await getRun(id)).run as Record<string, unknown>;
+		expect(got.error_message).toBe(catalogText);
+		expect(got.error_code).toBe("MODEL_IMAGE_UNSUPPORTED");
 	});
 
 	it("leaves a non-agent run's error raw: the catalog is an agent vocabulary", async () => {
