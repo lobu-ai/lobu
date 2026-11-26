@@ -1,12 +1,15 @@
 -- migrate:up
--- lobu:quiesce old replicas ignore condition and would apply a conditional rule as unconditional, so a conditional Auto would skip an Ask for every input; none may serve once a conditional rule can be written
+-- lobu:no-quiesce -- old code keeps working: it reads condition-less rows unchanged and its inserts use ON CONFLICT DO NOTHING, which matches the rebuilt index; no conditional rule exists before this deploy (only the new PUT writes one and conditions have no UI)
 
 -- A connector action rule may carry conditions on the operation input (`when`):
 -- a JSON array of 1-8 field or scan conditions that must all hold for the rule
 -- to apply. Null keeps today's rule, which always applies when its scope matches.
 --
--- Rollout: quiesced, so no old replica serves once a new one can accept a
--- conditional rule. Rolling the app image back below this version without the
+-- Rollout: zero-unavailable, so old replicas serve for the minutes of the
+-- rollout. Old code ignores condition, so a conditional rule written in that
+-- window is read there as unconditional: a restriction only gets stricter, a
+-- conditional Auto would lift an Ask. Accepted: conditions have no UI and only
+-- the new PUT writes one. Rolling the app image back below this version without the
 -- down migration makes every conditional rule unconditional, a conditional Auto
 -- included; the down migration refuses while one exists. Cost: one
 -- metadata-only ADD COLUMN, a CHECK validated over the bounded policy table, and
