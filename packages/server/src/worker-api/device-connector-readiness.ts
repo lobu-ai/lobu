@@ -157,6 +157,20 @@ export function describeDeviceConnectorSetupRequired(
   );
 }
 
+/**
+ * Every device that holds the selected manifest is offline. Distinct from
+ * DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE, which means no device holds it: an
+ * asleep Mac needs waking, not an update.
+ */
+export function describeDeviceConnectorOffline(
+  readiness: DeviceConnectorReadiness,
+): string {
+  return (
+    `${readiness.source.metadata.name} runs on a paired device that is offline. ` +
+    'Wake the device or reopen the Lobu app on it, then retry.'
+  );
+}
+
 export const DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE =
   'The selected connector manifest is not available on an eligible device. ' +
   'Update or reconnect your device, then retry.';
