@@ -21,10 +21,12 @@ import { loopPolicyCutoverComplete } from '../../../authz/policy-hooks';
 import { loadMigrationUpSection } from '../../../db/migration-loader';
 import { createTestOrganization } from '../../setup/test-fixtures';
 
+const CREATE_LIBRARY = '20261125120000_workspace_skills_and_guardrails.sql';
 const MIGRATION = '20261125140000_workspace_guardrails_reader_cutover.sql';
 const NORMALIZATION = '20261125160000_workspace_guardrails_custom_config_keys.sql';
 const REFUSAL = '20261125210000_refuse_custom_guardrails.sql';
 const POLICY_CUTOVER = '20261126040000_backfill_loop_policies.sql';
+const RETIRE_LIBRARY = '20261126050000_drop_legacy_workspace_guardrails.sql';
 
 function resolveMigrationsDir(): string {
   let dir = __dirname;
@@ -57,6 +59,7 @@ async function inRollback<T>(body: (tx: Sql) => Promise<T>): Promise<T> {
       await tx.unsafe(`ALTER TABLE agents
         ADD COLUMN guardrails jsonb DEFAULT '[]'::jsonb,
         ADD COLUMN guardrails_inline jsonb DEFAULT '[]'::jsonb`);
+      await tx.unsafe(loadMigrationUpSection(resolveMigrationsDir(), CREATE_LIBRARY));
       await tx`DROP INDEX IF EXISTS write_approval_policies_loop_lookup`;
       result = await body(tx);
       throw new Rollback();
@@ -325,6 +328,10 @@ describe('loop policy cutover', () => {
       await insertAgent(tx, orgId, agentId, ['secret-scan', 'pii-scan', 'forbidden-tools'], []);
       await tx.unsafe(up());
       expect(await loopPolicyCutoverComplete(tx)).toBe(false);
+      const retire = loadMigrationUpSection(resolveMigrationsDir(), RETIRE_LIBRARY);
+      await expect(tx.savepoint((sp: Sql) => sp.unsafe(retire))).rejects.toThrow(
+        'Complete the loop policy backfill'
+      );
       await tx`
         INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled, archived_at)
         VALUES
@@ -346,17 +353,31 @@ describe('loop policy cutover', () => {
           rule.effects.execute === 'deny' && rule.kind === 'guardrail')).toBe(true);
         return policies.map(rule => ({ when: rule.condition, tools: rule.toolPatterns }));
       };
-      expect(await summaries('message_in')).toEqual([
+      const messageRules = await summaries('message_in');
+      const replyRules = await summaries('reply_out');
+      const toolRules = await summaries('tool_call');
+      expect(messageRules).toEqual([
         { when: [{ scan: 'pii', field: '/text' }], tools: null },
       ]);
-      expect(await summaries('reply_out')).toEqual(expect.arrayContaining([
+      expect(replyRules).toEqual(expect.arrayContaining([
         { when: [{ scan: 'secrets', field: '/text' }], tools: null },
         { when: [{ scan: 'pii', field: '/text' }], tools: null },
       ]));
-      expect(await summaries('tool_call')).toEqual(expect.arrayContaining([
+      expect(toolRules).toEqual(expect.arrayContaining([
         { when: [{ scan: 'pii', field: '/arguments' }], tools: null },
         { when: null, tools: ['delete_branch', 'delete_repo', 'drop_table'] },
       ]));
+
+      await tx.unsafe(retire);
+      const [tables] = await tx`
+        SELECT to_regclass('public.workspace_guardrails') AS guardrails,
+               to_regclass('public.workspace_guardrail_subjects') AS subjects
+      `;
+      expect(tables).toEqual({ guardrails: null, subjects: null });
+      expect(await loopPolicyCutoverComplete(tx)).toBe(true);
+      expect(await summaries('message_in')).toEqual(messageRules);
+      expect(await summaries('reply_out')).toEqual(replyRules);
+      expect(await summaries('tool_call')).toEqual(toolRules);
     });
   });
 });
