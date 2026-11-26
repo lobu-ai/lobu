@@ -536,7 +536,9 @@ export class UnifiedThreadResponseConsumer {
           if (
             await this.outputGuardrail.hasOutputGuardrails(
               agentId,
-              md.organizationId
+              md.organizationId,
+              md.source,
+              data.conversationId,
             )
           )
             return;
@@ -558,6 +560,7 @@ export class UnifiedThreadResponseConsumer {
           ].join("\n");
           if (terminalText) {
             const trip = await this.outputGuardrail.scanFinal(terminalText, {
+              source: md.source,
               agentId,
               organizationId: md.organizationId,
               userId: data.userId,

@@ -26,6 +26,7 @@ import {
 } from "../../guardrails/workspace-guardrails.js";
 import { buildGuardrailsByStage } from "./aggregator.js";
 import { recordGuardrailTrip } from "./audit.js";
+import { agentLoopPrincipal, evaluateLoopPolicy, hasBlockingReplyPolicy } from "./loop-policy.js";
 
 const logger = createLogger("output-guardrail");
 
@@ -40,7 +41,7 @@ async function outputGuardrailsFor(
     organizationId,
     agentGuardrailPrincipal(agentId)
   );
-  return buildGuardrailsByStage(guardrails, registry, organizationId).output;
+  return buildGuardrailsByStage(guardrails, registry).output;
 }
 
 export interface OutputScanContext {
@@ -49,6 +50,7 @@ export interface OutputScanContext {
   userId: string;
   conversationId?: string;
   platform: string;
+  source?: string;
   /** Tool names this turn (from the worker's terminal `toolsUsed` stamp). */
   toolsUsed?: string[];
 }
@@ -71,7 +73,6 @@ export async function runOutputGuardrailScan(
   ctx: OutputScanContext
 ): Promise<OutputGuardrailTrip | null> {
   if (!registry) return null;
-  if (!scanText) return null;
   // A payload without an organization (the agent-threads/messaging-api
   // dispatch paths) still resolves through the ambient org context.
   const organizationId = resolveOrgId(ctx.organizationId);
@@ -83,8 +84,6 @@ export async function runOutputGuardrailScan(
       ctx.agentId,
       organizationId
     );
-    if (list.length === 0) return null;
-
     const outcome = await runGuardrailInstances("output", list, {
       agentId: ctx.agentId,
       userId: ctx.userId,
@@ -93,7 +92,14 @@ export async function runOutputGuardrailScan(
       conversationId: ctx.conversationId,
       toolsUsed: ctx.toolsUsed,
     });
-    if (!outcome.tripped) return null;
+    if (!outcome.tripped) return await evaluateLoopPolicy({
+      organizationId,
+      principal: agentLoopPrincipal(ctx.agentId, ctx.source, ctx.conversationId),
+      userId: ctx.userId,
+      conversationId: ctx.conversationId,
+      hook: "reply_out",
+      input: { text: scanText, platform: ctx.platform, tools_used: ctx.toolsUsed },
+    });
 
     // Fire-and-forget — the block decision must not wait on the audit write.
     void recordGuardrailTrip({
@@ -155,13 +161,15 @@ export class OutputGuardrailScanner {
    */
   async hasOutputGuardrails(
     agentId: string,
-    organizationId?: string
+    organizationId?: string,
+    source?: string,
+    conversationId?: string,
   ): Promise<boolean> {
     const orgId = resolveOrgId(organizationId);
     if (!this.registry || !agentId || !orgId) return false;
     try {
       const list = await outputGuardrailsFor(this.registry, agentId, orgId);
-      return list.length > 0;
+      return list.length > 0 || await hasBlockingReplyPolicy(orgId, agentLoopPrincipal(agentId, source, conversationId));
     } catch {
       return false;
     }

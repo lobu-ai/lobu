@@ -9,20 +9,10 @@ import {
 	type AgentCreateInput,
 } from "@lobu/core/contracts/tools/manage-agents";
 import { stableStringify } from "@lobu/core/contracts/tools/view-content-hash";
-import { isUnrestrictedMode } from "@lobu/connector-sdk/egress-policy";
 import { AgentSettingsStoredSchema } from "@lobu/core/contracts/agent-settings";
 import { Value } from "@sinclair/typebox/value";
 import { resolveNewAgentProvisioningDefaults } from "../auth/system-provider-resolution";
-import { type DbClient, getDb } from "../db/client";
-import { loadAllowedDomains } from "../gateway/config/network-allowlist";
-import {
-	findSuppressedJudgedDomains,
-	judgedEgressDomains,
-} from "../gateway/permissions/policy-store";
-import {
-	agentGuardrailPrincipal,
-	resolveEgressGuardrails,
-} from "../guardrails/workspace-guardrails";
+import type { DbClient } from "../db/client";
 import {
 	type ConfigChangeEventParams,
 	insertConfigChangeEventInTransaction,
@@ -222,77 +212,6 @@ export async function validateAgentSettingsUpdate(
 	}
 
 	const patch = updates as Partial<AgentSettings>;
-
-	// An allow grant BEATS the egress judge. `checkDomainAccess` (proxy/
-	// http-proxy.ts) checks per-agent allow grants (step 4) before consulting
-	// the judge (step 5), so a domain that is both judged and allow-granted
-	// returns `source: "grant"` and its judge never runs. That failure is
-	// invisible from the outside — the request succeeds, just for the wrong
-	// reason — so refuse the config instead of saving a control that cannot fire.
-	//
-	// The judges come from the workspace guardrail library, so only a patch
-	// that touches `networkConfig` can open the hole here: an unrelated edit to
-	// an agent already in this state still saves, and removing the grant is
-	// always a valid repair.
-	if ("networkConfig" in (updates as object)) {
-		const effectiveGuardrails =
-			(
-				await resolveEgressGuardrails(
-					getDb(),
-					organizationId,
-					agentGuardrailPrincipal(agentId),
-					null,
-				)
-			).rows ?? [];
-		const effectiveAllowed = patch.networkConfig?.allowedDomains ?? [];
-
-		const shadowed = findSuppressedJudgedDomains(
-			effectiveGuardrails,
-			effectiveAllowed
-		);
-		// Every judge covering a domain runs, so an allow over that domain
-		// silences each of them: name every (judge, domain) pair it hides.
-		if (shadowed.length > 0) {
-			const pairs = shadowed
-				.map(
-					({ domain, judge, grant }) =>
-						`guardrail "${judge}" judges "${domain}" but allowedDomains grants "${grant}"`,
-				)
-				.join("; ");
-			return {
-				error: "guardrail_domain_shadowed_by_grant",
-				error_description: `This agent's networkConfig.allowedDomains shadows egress judges, and the proxy matches an allow grant FIRST — these judges would never run: ${pairs}. A judged domain must not be allow-listed: remove the grant from allowedDomains (a judged domain is reachable through its judges, so it needs no grant), or drop the domain from the guardrail.`,
-			};
-		}
-
-		// The GLOBAL allowlist shadows judges the same way (`checkDomainAccess`
-		// step 3), but it is `WORKER_ALLOWED_DOMAINS` — operator config the
-		// tenant editing this agent cannot fix. Warn rather than reject, so
-		// the signal reaches whoever can act on it without blocking a save
-		// nobody in this request can make valid. Only consult the allowlist
-		// when there is a judge to shadow: `loadAllowedDomains` logs on every
-		// call in isolation mode.
-		if (judgedEgressDomains(effectiveGuardrails).length > 0) {
-			const globalAllowed = loadAllowedDomains();
-			const unrestricted = isUnrestrictedMode(globalAllowed);
-			// Unrestricted mode allows every host, so it shadows every judged
-			// domain without any of them appearing in a list to match against.
-			// The global matcher's `.suffix` also covers the root host, unlike a
-			// per-agent grant.
-			if (
-				unrestricted ||
-				findSuppressedJudgedDomains(effectiveGuardrails, globalAllowed, {
-					wildcardCoversRoot: true,
-				}).length > 0
-			) {
-				logger.warn(
-					`[agent-config] agent "${agentId}" has egress judge guardrails whose domains are covered by WORKER_ALLOWED_DOMAINS${
-						unrestricted ? " (unrestricted, '*')" : ""
-					}. The global allowlist is matched before the judge, so those judges will not run.`
-				);
-			}
-		}
-	}
 
 	// The `models` list is an access gate, so a lookup/infra failure while
 	// validating it must REJECT the write — never persist an unvalidated

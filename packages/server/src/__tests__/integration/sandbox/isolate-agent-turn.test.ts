@@ -1262,15 +1262,13 @@ describe("agent turn on the isolate lane", () => {
 		expect(run.output.text).toBe("Still counting; one more query.");
 	}, 240_000);
 
-	it("reports every tool it called, so requireTool can actually enforce", async () => {
+	it("reports every tool it called", async () => {
 		hits = [];
 		toolReply = { status: 200, body: { content: [{ type: "text", text: "4" }] } };
 		toolScript = [{ id: "toolu_c1", name: "query_sdk", input: { code: "entities.count()" } }];
 		armFirstDeltaGate();
 		const run = await runTurn(toolJob());
 
-		// The `requireTool` output guardrail PASSES on an absent ledger (it
-		// cannot prove a miss), so an unreported ledger silently disabled it.
 		expect(run.output.toolsUsed).toEqual(["query_sdk"]);
 	}, 120_000);
 
@@ -1280,9 +1278,9 @@ describe("agent turn on the isolate lane", () => {
 		armFirstDeltaGate();
 		const run = await runTurn(turnJob());
 
-		// `[]` and absent are different answers: absent passes the guardrail,
-		// empty trips it when a tool was required. This is the case that has
-		// to be reported, not omitted.
+		// `[]` and absent are different answers: absent cannot prove a miss,
+		// empty asserts one. This is the case that has to be reported, not
+		// omitted.
 		expect(run.output.toolsUsed).toEqual([]);
 	}, 120_000);
 

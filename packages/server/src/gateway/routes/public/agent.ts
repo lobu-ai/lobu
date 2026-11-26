@@ -857,8 +857,7 @@ export function createAgentApi(config: AgentApiConfig): Hono {
     };
 
     // Stamp the worker token with the agent's owning org so the egress
-    // proxy's per-tenant gates (grant/deny, judge cache, judge policy) can
-    // scope decisions by org. Prefer the org the ownership check resolved
+    // proxy's per-tenant gates (grant/deny) can scope decisions by org. Prefer the org the ownership check resolved
     // from `agent_users` — that's the agent's REAL tenant, even when the
     // caller's ambient org-context is their (different) default org, which
     // is exactly the SPA-chat case for an agent in a non-default org. Fall

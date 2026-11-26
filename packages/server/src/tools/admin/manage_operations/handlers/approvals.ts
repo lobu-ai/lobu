@@ -13,6 +13,7 @@ import {
 } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
+import { POLICY_CLASSIFY_METADATA_KEY, type PolicyClassifyLookup, storedPolicyClassify } from "../../../../authz/policy-classify";
 import { EntityRowValidationError } from "../../../../authz/entity-row-validation";
 import { DEVICE_ACTION_QUEUE_BUDGET_MS, DEVICE_BACKGROUND_ACTION_QUEUE_BUDGET_MS } from "../../../../config/intervals";
 import { type DbClient, getDb, parsePgNumberArray, pgTextArray } from "../../../../db/client";
@@ -1337,12 +1338,17 @@ export async function handleApprove(
 
 	// Recheck the persisted requesting principal, not the human approver,
 	// guardrails included, before any (possibly edited) input is dispatched.
-	// No transaction is open yet, so the connector may be asked who sees it.
+	// No transaction is open yet, so the connector may be asked who sees it,
+	// and an edited input's classify conditions may be asked of the model.
+	const classify: PolicyClassifyLookup | undefined = args.input
+		? { live: true, results: storedPolicyClassify(pendingRun.run_metadata) }
+		: undefined;
 	const policy = await resolveRunConnectorPolicy({
 		organizationId: ctx.organizationId,
 		runId: args.run_id,
 		sql,
 		destination: { live: true, seen: [] },
+		edit: args.input && classify ? { input: args.input, classify } : undefined,
 	});
 	if (policy?.effect === "deny") {
 		const why = policy.reason === "allowlist"
@@ -1438,7 +1444,10 @@ export async function handleApprove(
 			UPDATE runs
 			SET approval_status = 'approved'
 				${runningSet},
-				action_input = ${args.input ? tx.json(args.input) : tx`action_input`}
+				action_input = ${args.input ? tx.json(args.input) : tx`action_input`},
+				run_metadata = ${classify
+					? tx`COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ [POLICY_CLASSIFY_METADATA_KEY]: classify.results })}::jsonb`
+					: tx`run_metadata`}
 			WHERE id = ${args.run_id}
 				AND organization_id = ${ctx.organizationId}
 				AND approval_status = 'pending'
@@ -1549,6 +1558,7 @@ export async function handleApprove(
 			UPDATE runs SET status = 'failed', completed_at = NOW(),
 				action_output = ${result.output ? tx.json(result.output) : null},
 				error_message = ${result.error_message}
+				${result.error_code ? tx`, run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ error_code: result.error_code })}::jsonb` : tx``}
 			WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
 			${runLeaseFence(tx, inlineOwner)}
 			RETURNING id
@@ -1581,6 +1591,7 @@ export async function handleApprove(
 		connectorKey: resolved.connection.connector_key,
 		operationKey: run.action_key,
 		errorMessage: result.error_message,
+		errorCode: result.error_code,
 	});
 	return {
 		action: "approve",

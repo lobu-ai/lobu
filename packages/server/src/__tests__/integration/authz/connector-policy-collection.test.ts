@@ -1,7 +1,23 @@
 import { serve } from "@hono/node-server";
-import type { Server } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileInputSchema } from "@lobu/connector-sdk";
+import { __resetEncryptionKeyCacheForTests, GuardrailRegistry } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
+import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
+import type { PolicyClassifyLookup, PolicyClassifyResult } from "../../../authz/policy-classify";
+import { predictClassifier, resetPredictClassifierForTests } from "../../../gateway/inference/predict-classifier";
+import { ArtifactStore } from "../../../gateway/files/artifact-store";
+import { ingestInputFiles } from "../../../gateway/files/input-files";
+import * as gateway from "../../../lobu/gateway";
+import { flushPendingGuardrailAudits } from "../../../gateway/guardrails/audit";
+import { evaluatePreToolGuardrails } from "../../../gateway/guardrails/pre-tool";
+import { OutputGuardrailScanner } from "../../../gateway/guardrails/output-scan";
+import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
@@ -160,16 +176,27 @@ describe("connector policy collection", () => {
     expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.audience).sort()).toEqual(["external", null]);
   });
 
-  it("refuses a rule's when in this release and names a malformed condition by field", async () => {
+  it("stores a rule's when as part of its identity and refuses malformed conditions by field", async () => {
     const before = await snapshot();
-    // Old replicas serve during the rolling deploy that adds the column, so no rule takes `when` yet.
     const external = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [{ field: "/to", op: "not_ends_with", value: "@acme.example" }] };
-    for (const rule of [external, { effect: "auto", when: external.when }]) {
-      const refused = await request("PUT", path(), { revision: before.revision, rules: [rule] });
-      expect(refused.status, JSON.stringify(rule)).toBe(400);
-      expect(await refused.json()).toEqual({ error: "invalid_request", message: "rules[0].when is not accepted yet." });
-    }
-    expect(await snapshot()).toEqual(before);
+    const secrets = { effect: "deny", kind: "guardrail", when: [{ scan: "secrets", field: "/body" }, { field: "/draft", op: "exists" }] };
+    const unconditional = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside" };
+    const created = await request("PUT", path(), { revision: before.revision, rules: [external, secrets, unconditional] });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const saved = await created.json();
+    // Two rules that differ only by `when` are separate rows.
+    expect(saved.rules).toHaveLength(3);
+    expect(withoutIds(saved.rules)).toEqual(expect.arrayContaining([external, secrets, unconditional]));
+    expect(await snapshot()).toEqual(saved);
+    const stored = await listEntityApprovalPolicies(org.id, "connector_action");
+    expect(stored.map(p => p.condition)).toEqual(expect.arrayContaining([external.when, secrets.when, null]));
+    // Echoing is a no-op with stable ids; key order inside a condition does not matter.
+    const reordered = saved.rules.map((rule: { when?: Array<Record<string, unknown>> }) =>
+      rule.when ? { ...rule, when: rule.when.map(condition => Object.fromEntries(Object.entries(condition).reverse())) } : rule);
+    const echoed = await request("PUT", path(), { revision: saved.revision, rules: reordered.reverse() });
+    expect(await echoed.json()).toEqual(saved);
+    const duplicate = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules, { ...external, effect: "deny" }] });
+    expect(await duplicate.json()).toEqual({ error: "invalid_request", message: "Duplicate policy scope." });
 
     const condition = (when: unknown) => ({ effect: "deny", kind: "guardrail", when });
     for (const [rule, message] of [
@@ -186,7 +213,7 @@ describe("connector policy collection", () => {
       [condition([{ scan: "credit_cards", field: "/body" }]), "rules[0].when[0].scan must be one of secrets, pii."],
       [condition([{ scan: "pii", field: "/body", op: "eq" }]), "rules[0].when[0].op is not accepted on a scan condition (scan, field)."],
     ] as const) {
-      const rejected = await request("PUT", path(), { revision: before.revision, rules: [rule] });
+      const rejected = await request("PUT", path(), { revision: saved.revision, rules: [rule] });
       expect(rejected.status, JSON.stringify(rule)).toBe(400);
       expect(await rejected.json()).toEqual({ error: "invalid_request", message });
     }
@@ -197,8 +224,12 @@ describe("connector policy collection", () => {
     });
     expect(single.status).toBe(400);
     expect(await single.json()).toMatchObject({ message: "when is only accepted by /write-permissions/connector-actions." });
-    expect(await snapshot()).toEqual(before);
+    expect(await snapshot()).toEqual(saved);
 
+    // Dropping `when` from a rule replaces it with the unconditional one.
+    const plain = await request("PUT", path(), { revision: saved.revision, rules: [unconditional] });
+    expect(withoutIds((await plain.json()).rules)).toEqual([unconditional]);
+    expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.condition)).toEqual([null]);
   });
 
   it("rejects a stale plan after another collection edit", async () => {
@@ -381,6 +412,76 @@ describe("connector policy collection", () => {
     await getTestDb()`UPDATE "member" SET role = 'owner' WHERE "userId" = ${owner.id} AND "organizationId" = ${org.id}`;
     await getTestDb()`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = ${token.id}`;
     expect((await request("GET", path(), undefined, token.token)).status).toBe(401);
+  });
+});
+
+describe("loop rules during the guardrail transition", () => {
+  it("keeps reply rules out of operation replacements and buffers only blocking replies", async () => {
+    const agent = "reply-policy-agent";
+    await createTestAgent({ organizationId: org.id, agentId: agent });
+    const scanner = new OutputGuardrailScanner();
+    scanner.setGuardrails(new GuardrailRegistry());
+    const rule = {
+      resourceClass: "connector_action" as const,
+      hook: "reply_out" as const,
+      principalKind: "agent" as const,
+      principalId: agent,
+      kind: "guardrail" as const,
+      condition: [{ field: "/text", op: "contains", value: "synthetic phrase" }],
+    };
+    const unavailable = await request("GET", `${path()}?hook=reply_out&principal_kind=agent&principal_id=${agent}`);
+    expect(unavailable.status).toBe(404);
+
+    const before = await snapshot();
+    const log = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "log" } });
+    const ctx = { organizationId: org.id, agentId: agent, userId: owner.id, platform: "lobu" };
+    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(false);
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).toBeNull();
+
+    const block = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "deny" } });
+    expect(block.id).toBe(log.id);
+    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(true);
+    expect(await scanner.scanFinal("unrestricted reply", ctx)).toBeNull();
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
+    expect(await scanner.scanFinal("synthetic phrase", { ...ctx, agentId: "different-agent" })).toBeNull();
+    expect(await snapshot()).toEqual(before);
+    const replaced = await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }] });
+    expect(replaced.status).toBe(200);
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
+    await flushPendingGuardrailAudits();
+  });
+
+  it("keeps distinct tool selectors and matches only the intended tool namespace", async () => {
+    const agent = "tool-policy-agent";
+    await createTestAgent({ organizationId: org.id, agentId: agent });
+    const rule = {
+      resourceClass: "connector_action" as const,
+      hook: "tool_call" as const,
+      principalKind: "agent" as const,
+      principalId: agent,
+      kind: "guardrail" as const,
+      effects: { execute: "deny" as const },
+    };
+    const exact = await upsertEntityApprovalPolicy(org.id, { ...rule, toolPatterns: ["repo.delete_branch"] });
+    const namespaced = await upsertEntityApprovalPolicy(org.id, { ...rule, toolPatterns: ["github__*"] });
+    expect(exact.id).not.toBe(namespaced.id);
+    const call = (toolName: string, id = agent, namespace?: string) => evaluatePreToolGuardrails({
+      registry: undefined,
+      organizationId: org.id,
+      principal: { kind: "agent", id, ownerAgentId: null },
+      userId: owner.id,
+      toolName,
+      namespace,
+      arguments: {},
+    });
+    expect(await call("repo.delete_branch")).not.toBeNull();
+    expect(await call("repoXdelete_branch")).toBeNull();
+    expect(await call("github__list_issues")).not.toBeNull();
+    expect(await call("list_issues", agent, "github")).not.toBeNull();
+    expect(await call("list_issues", agent, "other")).toBeNull();
+    expect(await call("othergithub__list_issues")).toBeNull();
+    expect(await call("github__list_issues", "another-agent")).toBeNull();
+    await flushPendingGuardrailAudits();
   });
 });
 
@@ -801,12 +902,7 @@ describe("connected app caller identity", () => {
   it("a rule's when decides on the operation input, and discovery takes the strict side", async () => {
     const exact = { connection_id: connectionId, operation_key: "app-policy::needs_approval" };
     const outside = { field: "/to", op: "not_ends_with", value: "@acme.example" };
-    // The policy PUT refuses `when` in this release, so the rules are written through the policy writer.
-    const conditional = (execute: "approval" | "deny", note: string, condition: unknown[]) => upsertEntityApprovalPolicy(org.id, {
-      resourceClass: "connector_action", connectionId, operationKey: exact.operation_key, kind: "guardrail", note, condition, effects: { execute },
-    });
-    await setRules(path(), [{ effect: "auto" }]);
-    await conditional("approval", "Ask before mailing outside", [outside]);
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [outside] }]);
     const named = await oauthToken(["https://app.example.com/callback"]);
     const explain = async () => ((await (await request("GET",
       `/api/${org.slug}/write-permissions/explain?connection_id=${connectionId}&operation_key=needs_approval&app_key=web%3Aexample.com`)).json()) as { effect: string }).effect;
@@ -841,9 +937,18 @@ describe("connected app caller identity", () => {
     // A missing field holds no comparison, so the Ask does not apply.
     expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
 
+    // A conditional Always allow lifts the Ask only for an input it holds on, and never in discovery.
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail" }]);
+    await setRules(appPath("web:example.com"), [{ ...exact, effect: "auto", when: [{ field: "/to", op: "ends_with", value: "@acme.example" }] }]);
+    expect(await explain()).toBe("approval");
+    const lifted = await execute(named.token, { to: "teammate@acme.example" });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+    expect(lifted.body.status).not.toBe("pending_approval");
+    expect((await execute(named.token, { to: "someone@outside.example" })).body.status).toBe("pending_approval");
+    await setRules(appPath("web:example.com"), []);
+
     // A Block on a body that looks like it carries a secret.
-    await setRules(path(), [{ effect: "auto" }]);
-    await conditional("deny", "Never send credentials", [{ scan: "secrets", field: "/body" }]);
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "deny", kind: "guardrail", note: "Never send credentials", when: [{ scan: "secrets", field: "/body" }] }]);
     expect(await explain()).toBe("deny");
     const blocked = await execute(named.token, { body: `token ghp_${"c".repeat(36)}` });
     expect(blocked.body.error, JSON.stringify(blocked.body)).toContain("Policy blocks 'needs_approval'");
@@ -851,5 +956,247 @@ describe("connected app caller identity", () => {
     const clean = await execute(named.token, { body: "See you at the review." });
     expect(clean.status, JSON.stringify(clean.body)).toBe(200);
     expect(clean.body.error ?? "").not.toContain("Policy blocks");
+  });
+
+  describe("classify conditions", () => {
+    // A local model speaking Chat Completions. It answers from the judged text
+    // so each case reads on its own: "wire" is a payment, "hello" chitchat,
+    // "abstain" no value, "garbage" not JSON, "slow" later than the budget.
+    let model: Server;
+    let modelUrl: string;
+    beforeAll(async () => {
+      process.env.LOBU_ENCRYPTION_KEY ||= "a".repeat(64);
+      __resetEncryptionKeyCacheForTests();
+      model = createServer((req, res) => {
+        let raw = "";
+        req.on("data", chunk => { raw += chunk; });
+        req.on("end", () => {
+          const body = JSON.parse(raw) as { messages: Array<{ role: string; content: string }> };
+          const text = body.messages.find(message => message.role === "user")?.content ?? "";
+          const reply = (content: string) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
+          };
+          const verdict = (value: string | null) => JSON.stringify({ value, reasoning: "synthetic" });
+          if (text.includes("transport-failure")) res.writeHead(503).end();
+          else if (text.includes("slow")) setTimeout(() => reply(verdict("payment")), 4_000);
+          else if (text.includes("garbage")) reply("I think it is a payment.");
+          else if (text.includes("abstain")) reply(verdict(null));
+          else if (text.includes("wire")) reply(verdict("payment"));
+          else reply(verdict("chitchat"));
+        });
+      });
+      await new Promise<void>(resolve => model.listen(0, "127.0.0.1", resolve));
+      modelUrl = `http://127.0.0.1:${(model.address() as AddressInfo).port}/v1`;
+    });
+    afterAll(async () => {
+      model.closeAllConnections();
+      await new Promise<void>(resolve => model.close(() => resolve()));
+    });
+    beforeEach(() => resetPredictClassifierForTests());
+
+    async function addClassifier(slug = "topic") {
+      const [row] = await getTestDb()<{ id: number }>`
+        INSERT INTO classify_facet (organization_id, slug, name, attribute_key, status, created_by, entity_ids, attribute_values, min_similarity)
+        VALUES (${org.id}, ${slug}, 'Topic', ${slug}, 'active', ${owner.id}, ARRAY[]::bigint[],
+          '{"payment":{"description":"Moves money","examples":["wire 500 to this account"]},"chitchat":{"description":"Small talk"}}'::jsonb, 0.7)
+        RETURNING id`;
+      return Number(row.id);
+    }
+    async function addModelProvider() {
+      const created = await createInferenceProvider({ organizationId: org.id, slug: "fake-model", kind: "openai", apiKey: "sk-synthetic",
+        capabilities: { text: { model: "fake-1", base_url: modelUrl } } });
+      if ("error" in created) throw new Error(created.error);
+      await getTestDb()`UPDATE inference_providers SET is_default = true WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+    }
+    const exact = () => ({ connection_id: connectionId, operation_key: "app-policy::needs_approval" });
+    const payment = { classify: "topic", field: "/body", is: ["payment"] };
+
+    it("recovers after provider resolution fails during a half-open probe", async () => {
+      await addClassifier();
+      await addModelProvider();
+      const predict = (text: string) => predictClassifier({ organizationId: org.id, classifier: "topic", model: "fake-model/fake-1", text });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        expect(await predict(`transport-failure ${attempt}`)).toMatchObject({ ok: false, error: "unavailable" });
+      }
+      expect(await predict("hello before cooldown")).toMatchObject({ ok: false, error: "unavailable" });
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 30_001);
+      try {
+        await getTestDb()`UPDATE inference_providers SET deleted_at = now() WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+        expect(await predict("hello during probe")).toMatchObject({ ok: false, error: "no_model_provider" });
+        await getTestDb()`UPDATE inference_providers SET deleted_at = NULL WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+        expect(await predict("hello before retry")).toMatchObject({ ok: false, error: "unavailable" });
+        clock.mockReturnValue(now + 90_002);
+        expect(await predict("hello after recovery")).toMatchObject({ ok: true, value: "chitchat" });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it.each(["", "/payload", "/payload/image"])("replays classification of prepared file input at %j", async (field) => {
+      await addClassifier();
+      await addModelProvider();
+      const sql = getTestDb();
+      await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ needs_approval: {
+        name: "Needs approval", kind: "write", input_schema: { type: "object", properties: {
+          payload: { type: "object", properties: { image: fileInputSchema({ maxBytes: 1024, contentTypes: ["image/png"] }) } },
+        } },
+      } })} WHERE organization_id = ${org.id} AND key = 'app-policy'`;
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "deny", kind: "guardrail", when: [{ ...payment, field }] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const directory = await mkdtemp(join(tmpdir(), "policy-classify-files-"));
+      const store = new ArtifactStore(directory);
+      const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
+      try {
+        const [file] = await ingestInputFiles([{ name: "photo.png", mimeType: "image/png", data: Buffer.from("photo") }],
+          { organizationId: org.id, userId: owner.id, isAuthenticated: true }, store, baseUrl);
+        const admitted = await execute(named.token, { payload: { image: { $file: file.$file } } });
+        expect(admitted.body, JSON.stringify(admitted.body)).toMatchObject({ run_id: expect.any(Number) });
+        const runId = admitted.body.run_id!;
+        const [run] = await sql`SELECT action_input, run_metadata FROM runs WHERE id = ${runId}`;
+        expect(run.action_input).toEqual({ payload: { image: file } });
+        expect(run.run_metadata.policy_classify).toEqual([expect.objectContaining({ result: "not" })]);
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("auto");
+      } finally {
+        services.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("refuses a classify condition the workspace cannot run, naming the field, and stores the default model", async () => {
+      const before = await snapshot();
+      const put = (when: unknown[]) => request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny", kind: "guardrail", when }] });
+      const refusal = async (when: unknown[]) => {
+        const response = await put(when);
+        expect(response.status, JSON.stringify(when)).toBe(400);
+        return ((await response.json()) as { message: string }).message;
+      };
+      expect(await refusal([payment])).toBe('rules[0].when[0].classify: no classifier "topic" in this workspace.');
+      await addClassifier();
+      expect(await refusal([{ field: "/to", op: "exists" }, { ...payment, is: ["payment", "refund"] }]))
+        .toBe('rules[0].when[1].is: "refund" is not a value of classifier "topic".');
+      expect(await refusal([payment])).toBe("rules[0].when[0]: ChatGPT sign-in can't run policy checks; add a provider with an API key.");
+      expect(await refusal([payment, payment, { ...payment, field: "/title" }])).toBe("rules[0].when may hold at most 2 classify conditions.");
+      expect(await refusal([{ ...payment, is: [] }])).toBe("rules[0].when[0].is must be a non-empty list of distinct classifier values.");
+      await addModelProvider();
+      const saved = await put([payment]);
+      expect(saved.status, await saved.clone().text()).toBe(200);
+      const { rules, revision } = await saved.json();
+      expect(rules[0].when).toEqual([{ ...payment, model: "fake-model/fake-1" }]);
+      // Echoing the stored rule keeps its identity.
+      const echoed = await request("PUT", path(), { revision, rules });
+      expect((await echoed.json()).rules).toEqual(rules);
+    });
+
+    it("applies a rule on holds, ignores it on not, and treats a failed call as unknown", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail", note: "Ask before moving money", when: [payment] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const status = async (body: string) => (await execute(named.token, { body })).body.status;
+      expect(await status("please wire 500 today")).toBe("pending_approval");
+      expect(await status("hello, see you at the review")).not.toBe("pending_approval");
+      // Unknown keeps a restriction: invalid output, an abstention, and a call past the budget.
+      expect(await status("garbage")).toBe("pending_approval");
+      expect(await status("abstain")).toBe("pending_approval");
+      const started = Date.now();
+      expect(await status("slow")).toBe("pending_approval");
+      expect(Date.now() - started).toBeLessThan(3_900);
+      // An input with no such field holds nothing, so the Ask does not apply and no call is made.
+      expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
+
+      // Unknown drops a grant: the app's conditional Always allow lifts the Ask only on holds.
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" }]);
+      await setRules(appPath("web:example.com"), [{ ...exact(), effect: "auto", when: [{ ...payment, is: ["chitchat"] }] }]);
+      expect(await status("hello again")).not.toBe("pending_approval");
+      expect(await status("garbage again")).toBe("pending_approval");
+    });
+
+    it("replays the admission result after the model is gone, and a missing one is unknown", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" }]);
+      await setRules(appPath("web:example.com"), [{ ...exact(), effect: "auto", when: [{ ...payment, is: ["chitchat"] }] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const admitted = await execute(named.token, { body: "hello, replay me" });
+      expect(admitted.body.status, JSON.stringify(admitted.body)).not.toBe("pending_approval");
+      const runId = admitted.body.run_id!;
+      const [run] = await getTestDb()<{ run_metadata: Record<string, unknown> }>`SELECT run_metadata FROM runs WHERE id = ${runId}`;
+      // Only the outcome is stored: never the judged text or the model's reasoning.
+      expect(run.run_metadata.policy_classify).toEqual([
+        { rule: expect.any(Number), condition: 0, text: expect.any(String), result: "holds", model: "fake-model/fake-1", classifier: expect.any(String) },
+      ]);
+      expect(JSON.stringify(run.run_metadata)).not.toContain("synthetic");
+
+      model.closeAllConnections();
+      await new Promise<void>(resolve => model.close(() => resolve()));
+      resetPredictClassifierForTests();
+      try {
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("auto");
+        await getTestDb()`UPDATE runs SET run_metadata = run_metadata - 'policy_classify' WHERE id = ${runId}`;
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("approval");
+      } finally {
+        await new Promise<void>(resolve => model.listen(Number(new URL(modelUrl).port), "127.0.0.1", resolve));
+      }
+    });
+
+    it("decides whether the audience matters after classifying, live and on replay", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { effect: "deny", kind: "guardrail", when: [payment] },
+        { effect: "approval", kind: "guardrail", audience: "external", note: "Ask before posting outside" }]);
+      // A connector that can say who sees the channel; the channel was classified external before.
+      const operation = { connector_key: "slack", operation_key: "post", kind: "write" as const,
+        input_schema: { type: "object", properties: { channel: { type: "string", "x-lobu-destination": true }, body: { type: "string" } } } };
+      const actor = await resolveActingPrincipal(getTestDb(), { organizationId: org.id, userId: owner.id });
+      const decide = (body: string, classify: PolicyClassifyLookup) =>
+        resolveConnectorPolicy({ organizationId: org.id, connectionId, operation, actor, input: { channel: "C-outside", body },
+          destination: { live: false, seen: [{ connectionId, destination: "C-outside", audience: "external" }] }, classify });
+      const results: PolicyClassifyResult[] = [];
+      // Not a payment, so the Block drops and the external Ask still applies.
+      expect((await decide("hello, see you at the review", { live: true, results })).effect).toBe("approval");
+      expect(results).toEqual([expect.objectContaining({ result: "not" })]);
+      expect((await decide("hello, see you at the review", { live: false, results })).effect).toBe("approval");
+      expect((await decide("please wire 500 today", { live: true, results: [] })).effect).toBe("deny");
+    });
+
+    it("classifies an approver's edited input afresh, and a stale result never answers for it", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" },
+        { effect: "deny", kind: "guardrail", note: "Never move money", when: [payment] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const held = await execute(named.token, { body: "hello, see you at the review" });
+      expect(held.body.status, JSON.stringify(held.body)).toBe("pending_approval");
+      const runId = held.body.run_id!;
+      // The stored "not" judged other text, so replaying it for the edit is unknown and the Block applies.
+      await getTestDb()`UPDATE runs SET action_input = ${getTestDb().json({ body: "please wire 500 today" })} WHERE id = ${runId}`;
+      expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("deny");
+      await getTestDb()`UPDATE runs SET action_input = ${getTestDb().json({ body: "hello, see you at the review" })} WHERE id = ${runId}`;
+      expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("approval");
+
+      const approved = await request("POST", `/api/${org.slug}/manage_operations`, { action: "approve", run_id: runId, input: { body: "please wire 500 today" } });
+      const body = await approved.json() as { error?: string };
+      expect(body.error, JSON.stringify(body)).toContain("Policy now blocks 'needs_approval'");
+      const [run] = await getTestDb()<{ status: string; approval_status: string; action_input: unknown }>`
+        SELECT status, approval_status, action_input FROM runs WHERE id = ${runId}`;
+      expect(run).toMatchObject({ status: "cancelled", approval_status: "rejected", action_input: { body: "hello, see you at the review" } });
+    });
+
+    it("refuses to delete a classifier a rule's condition uses", async () => {
+      const classifierId = await addClassifier();
+      await addModelProvider();
+      const saved = await setRules(path(), [{ effect: "deny", kind: "guardrail", when: [payment] }]);
+      const remove = () => request("POST", `/api/${org.slug}/manage_classifiers`, { action: "delete", classifier_id: classifierId });
+      const refused = await remove();
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: `Classifier "topic" is used by policy rule ${saved.rules[0].id}; remove its classify condition first.` });
+      const [still] = await getTestDb()`SELECT status FROM classify_facet WHERE id = ${classifierId}`;
+      expect(still.status).toBe("active");
+      await setRules(path(), []);
+      const removed = await remove();
+      expect(removed.status, await removed.clone().text()).toBe(200);
+    });
   });
 });

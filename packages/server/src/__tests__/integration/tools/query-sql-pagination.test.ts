@@ -93,6 +93,36 @@ describe('query_sql internal-path pagination contract', () => {
     expect(Object.keys(res.rows[0])).not.toContain('__lobu_total_count__');
   });
 
+  it('discovers queryable tables and their projected column types through SQL', async () => {
+    const res = await querySql({
+      sql: `SELECT c.column_name, c.data_type
+            FROM "information_schema"."columns" c
+            JOIN information_schema.tables t USING (table_schema, table_name)
+            WHERE c.table_name = 'events' AND c.column_name IN ('id', 'payload_text', 'embedding')
+            ORDER BY c.ordinal_position`,
+    }, {}, ownerCtx);
+    expect(res.error).toBeUndefined();
+    expect(res.rows).toEqual([
+      { column_name: 'id', data_type: 'bigint' },
+      { column_name: 'payload_text', data_type: 'text' },
+    ]);
+
+    const sdk = buildClientSDK(ownerCtx, {} as Env, { mode: 'read' });
+    expect(await sdk.query(`SELECT table_name FROM information_schema.tables
+                            WHERE table_name IN ('events', 'oauth_tokens', 'pg_class')
+                            ORDER BY table_name`)).toEqual([
+      { table_name: 'events' },
+      { table_name: 'oauth_tokens' },
+    ]);
+    expect(await sdk.query(`WITH catalog AS (
+      SELECT information_schema.columns.data_type, 'information_schema.columns 🦔' AS label
+      FROM INFORMATION_SCHEMA /* columns 🦔 */ . columns
+      WHERE table_name = 'entities' AND column_name = 'entity_type'
+    ) SELECT * FROM catalog`)).toEqual([
+      { data_type: 'text', label: 'information_schema.columns 🦔' },
+    ]);
+  });
+
   it('does not bind an unused organization parameter for table-free reads', async () => {
     const res = await querySql(
       { sql: 'SELECT generate_series(1, 25) AS row_number', limit: 50 },
@@ -362,22 +392,43 @@ describe('query_sql internal-path pagination contract', () => {
         token,
       });
 
-      const response = await post(path, {
+      const call = (sql: string) => post(path, {
         body: {
           jsonrpc: '2.0',
           id: 1,
           method: 'tools/call',
-          params: { name: 'query_sql', arguments: { sql: 'SELECT platform FROM conversations' } },
+          params: { name: 'query_sql', arguments: { sql } },
         },
         headers: { 'mcp-session-id': sessionId! },
         token,
       });
+      const response = await call('SELECT platform FROM conversations');
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body.result?.isError).toBe(true);
       expect(body.result?.content?.[0]?.text).toContain('conversations');
       expect(body.result?.content?.[0]?.text).toMatch(/queryable tables/i);
       expect(body.result?.content?.[0]?.text).not.toContain('SQL Query Results');
+      expect(body.result?.content?.[0]?.text).toContain('information_schema.tables');
+
+      const empty = await call('SELECT id, payload_text, entity_ids FROM events LIMIT 0');
+      expect(empty.status).toBe(200);
+      const emptyBody = await empty.json();
+      expect(emptyBody.result?.isError).not.toBe(true);
+      expect(emptyBody.result?.structuredContent?.rows).toEqual([]);
+      expect(emptyBody.result?.content?.[0]?.text).toMatch(/id,\s*bigint/);
+      expect(emptyBody.result?.content?.[0]?.text).toMatch(/payload_text,\s*text/);
+      expect(emptyBody.result?.content?.[0]?.text).toMatch(/entity_ids,\s*bigint\[\]/);
+    });
+
+    it('reports a repeated unknown-column error once and points to schema discovery', async () => {
+      const res = await querySql({
+        sql: 'SELECT e.platform FROM events e WHERE e.platform IS NOT NULL ORDER BY e.platform',
+      }, {}, ownerCtx);
+      expect(res.error_code).toBe('VALIDATION');
+      expect(res.retryable).toBe(false);
+      expect(res.error?.match(/Unknown column 'platform'/gi)).toHaveLength(1);
+      expect(res.error).toContain('information_schema.columns');
     });
   });
 
@@ -399,6 +450,32 @@ describe('query_sql internal-path pagination contract', () => {
         scopedToOrg: true,
         allowCrossOrg: false,
       } as unknown as ToolContext;
+    });
+
+    it('filters metadata for members and rejects access to real database catalogs', async () => {
+      const sdk = buildClientSDK(memberCtx, {} as Env, { mode: 'read' });
+      const tableNames = `('events', 'oauth_tokens', 'oauth_clients', 'user', 'pg_class')`;
+      expect(await sdk.query(`SELECT table_name FROM information_schema.tables
+                              WHERE table_name IN ${tableNames}`)).toEqual([{ table_name: 'events' }]);
+      expect(await sdk.query(`SELECT table_name, column_name FROM information_schema.columns
+                              WHERE table_name IN ${tableNames} AND column_name = 'id'`)).toEqual([
+        { table_name: 'events', column_name: 'id' },
+      ]);
+
+      for (const sql of [
+        'SELECT * FROM information_schema.role_table_grants',
+        'SELECT * FROM pg_catalog.pg_class',
+        'SELECT (SELECT count(*) FROM pg_catalog.pg_class) FROM information_schema.tables',
+        'SELECT * FROM information_schema.tables t JOIN public.events e ON true',
+        'WITH tables AS (SELECT 1) SELECT * FROM information_schema.tables',
+      ]) {
+        const result = await querySql({ sql }, {}, memberCtx);
+        expect(result.error_code).toBe('VALIDATION');
+        expect(result.rows).toEqual([]);
+      }
+
+      const denied = await querySql({ sql: 'SELECT id FROM oauth_tokens' }, {}, memberCtx);
+      expect(denied.error_code).toBe('PERMISSION');
     });
 
     it('caps a large result at 500 rows and reports the rest as has_more', async () => {

@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 // Prevent new, unsuppressed per-feature LLM transports in packages/server.
-// Suggestion chips and query rewriting share gateway-completion.ts. The
-// existing fail-closed egress judge remains explicitly suppressed pending its
-// own migration and red→green coverage.
+// Suggestion chips and query rewriting share gateway-completion.ts.
 //
 // COVERAGE (textual, deliberately — see HONEST GAP):
 //   1. `fetch(...)` whose URL expression mentions a completions-style path

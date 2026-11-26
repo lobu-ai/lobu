@@ -2,10 +2,9 @@ import type { KnipConfig } from "knip";
 
 const config: KnipConfig = {
   rules: {
-    // `core/src/model-ids.ts` intentionally exports semantic aliases of the
-    // same value (DEFAULT_AGENT_MODEL = the sonnet id, EGRESS_JUDGE_MODEL = the
-    // haiku id). Those are meaningful names, not accidental duplication —
-    // collapsing them would lose intent, so don't flag duplicate exports.
+    // Some modules intentionally export semantic aliases of the same value.
+    // Those are meaningful names, not accidental duplication — collapsing them
+    // would lose intent, so don't flag duplicate exports.
     duplicates: "off",
   },
   ignore: [

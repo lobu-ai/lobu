@@ -3,7 +3,7 @@ import { BROWSER_VERIFY_OPERATION } from '@lobu/connector-sdk';
 import { connectionBrowserGrant } from '../../../../connectors/browser-resource';
 import { connectorRunEnv } from "@lobu/connector-worker/env";
 import { executeCompiledConnector } from "@lobu/connector-worker/executor/runtime";
-import { getErrorMessage, type ToolErrorCode } from "@lobu/core";
+import { executionFailureCode, getErrorMessage, type ToolErrorCode } from "@lobu/core";
 import { ExecuteAction, type ManageOperationsResult } from "../schemas";
 import type { Static } from "@sinclair/typebox";
 import { readGrantedScopesFromAuthData } from "../../../../auth/oauth/scopes";
@@ -12,6 +12,7 @@ import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/a
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, requesterPolicyExplanation } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
+import { POLICY_CLASSIFY_METADATA_KEY, type PolicyClassifyLookup } from "../../../../authz/policy-classify";
 import { applyRunConnectorPolicyAtClaim, classifyRunDestination, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { hasClassifiableDestination } from "../../../../authz/destination-audience";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
@@ -122,6 +123,7 @@ async function failRunInline(
 	deferTerminalWrite: boolean,
 	claimedBy: string,
 	output?: Record<string, unknown>,
+	errorCode?: ToolErrorCode,
 ): Promise<InlineExecutionResult> {
 	// Connector code, scraped pages and upstream MCP servers all reach here as
 	// raw text, so the message can carry NUL (0x00) that Postgres rejects (see
@@ -137,11 +139,21 @@ async function failRunInline(
 			runId,
 			organizationId,
 			claimedBy,
-			{ status: "failed", errorMessage: message, ...(reported ? { output: reported } : {}) },
+			{
+				status: "failed",
+				errorMessage: message,
+				...(reported ? { output: reported } : {}),
+				...(errorCode ? { errorCode } : {}),
+			},
 		);
 		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
-	return { status: "failed", error_message: message, ...(reported ? { output: reported } : {}) };
+	return {
+		status: "failed",
+		error_message: message,
+		...(reported ? { output: reported } : {}),
+		...(errorCode ? { error_code: errorCode } : {}),
+	};
 }
 
 // Update the run to completed status and return the output in one call.
@@ -244,6 +256,8 @@ async function executeLocalActionInline(
 			getErrorMessage(err),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(err),
 		);
 	}
 
@@ -353,6 +367,8 @@ async function executeLocalActionInline(
 			getErrorMessage(error),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(error),
 		);
 	}
 }
@@ -393,6 +409,8 @@ async function executeMcpToolInline(
 			getErrorMessage(error),
 			deferTerminalWrite,
 			claimedBy,
+			undefined,
+			executionFailureCode(error),
 		);
 	}
 
@@ -503,7 +521,7 @@ async function executeOperationInlineBackend(
 	try {
 		actionInput = await resolveOperationFiles(actionInput, options.runMetadata);
 	} catch (error) {
-		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+		return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy, undefined, executionFailureCode(error));
 	}
 	if (operation.backend === "local_action") {
 		return executeLocalActionInline(
@@ -530,7 +548,7 @@ async function executeOperationInlineBackend(
 				? completeRunInline(runId, organizationId, delivered.output, deferTerminalWrite, options.claimedBy, operation)
 				: failRunInline(runId, organizationId, delivered.error, deferTerminalWrite, options.claimedBy);
 		} catch (error) {
-			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy);
+			return failRunInline(runId, organizationId, getErrorMessage(error), deferTerminalWrite, options.claimedBy, undefined, executionFailureCode(error));
 		}
 	}
 	if (operation.backend === "mcp_tool") {
@@ -812,7 +830,7 @@ function failedExecuteResult(
 	connectorKey: string,
 	operation: OperationDescriptor,
 	recorded: boolean,
-	/** Why the run failed, when it recorded a typed code: an admission refusal or a device's report. */
+	/** Why the run failed, when it recorded a typed code: an admission refusal, a device's report or an inline failure's structure. */
 	errorCode?: ToolErrorCode | null,
 ): ManageOperationsResult {
 	const failed: ManageOperationsResult = {
@@ -994,6 +1012,17 @@ export async function handleExecute(
 	// Rules stop agents, apps and Automations, never a person in the web app.
 	// A delegated step answers to the parent run's requester instead.
 	const person = !delegation && isPersonInWebApp(ctx);
+	// Classify the same normalized input that the run persists and replays.
+	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
+	input = preparedFiles.input;
+	if (preparedFiles.claims.length > 0) {
+		const fileValidationError = validateOperationInput(operation, input);
+		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
+		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
+	}
+	// Classify conditions run here, before any run lock; the run keeps their
+	// results so claim, approval and dispatch replay them.
+	const classify: PolicyClassifyLookup = { live: true, results: [] };
 	const [policy, principal] = await Promise.all([
 		resolveConnectorPolicy({
 			organizationId: ctx.organizationId,
@@ -1004,6 +1033,7 @@ export async function handleExecute(
 			person,
 			input,
 			destination: { live: true, seen: [] },
+			classify,
 			sql,
 		}),
 		resolvePolicyPrincipal(sql, ctx.organizationId, actor),
@@ -1045,13 +1075,8 @@ export async function handleExecute(
 	if (deviceAccess === "refuse") {
 		return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 	}
-	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
-	input = preparedFiles.input;
-	if (preparedFiles.claims.length > 0) {
-		const fileValidationError = validateOperationInput(operation, input);
-		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
-		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
-	}
+	// Denied operations must not publish a copy of an adopted run artifact.
+	await preparedFiles.publishAdoptions();
 	const notificationContext: ActionApprovalNotificationContext = {
 		...await resolveApprovalChatOrigin(ctx),
 		requesterUserId: visibilityUserId ?? ctx.userId ?? null,
@@ -1067,6 +1092,7 @@ export async function handleExecute(
 		...runMetadata,
 		...(patPrincipalId ? { [POLICY_PAT_PRINCIPAL_METADATA_KEY]: patPrincipalId } : {}),
 		...(person ? { [POLICY_PERSON_METADATA_KEY]: true } : {}),
+		...(classify.results.length > 0 ? { [POLICY_CLASSIFY_METADATA_KEY]: classify.results } : {}),
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 		...(turnOrigin ? { turn_origin: turnOrigin } : {}),
@@ -1514,5 +1540,6 @@ export async function dispatchAdmittedRun(p: {
 		connection.connector_key,
 		operation,
 		true,
+		result.error_code,
 	);
 }

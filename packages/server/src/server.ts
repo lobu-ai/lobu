@@ -21,7 +21,6 @@ import "./utils/assert-node-version";
 
 // Load configuration and fatal diagnostics before the server graph.
 import "./instrument";
-import { checkJudgeShadowingAllowlist } from "./gateway/config/network-allowlist";
 
 import dotenv from "dotenv";
 
@@ -243,27 +242,6 @@ async function main(): Promise<void> {
 					logger.error({ err }, "Connector external dependency check failed");
 					process.exit(1);
 				}
-			},
-			// EGRESS_JUDGE_MODEL was removed: the judge model is the guardrail's
-			// own, else the org default provider model. Say so once rather than
-			// silently ignoring an operator's leftover setting.
-			() => {
-				if (process.env.EGRESS_JUDGE_MODEL?.trim()) {
-					logger.warn(
-						"EGRESS_JUDGE_MODEL is no longer read and has no effect: set a model on the guardrail or an org default provider model instead"
-					);
-				}
-			},
-			// The other way every judge dies silently: an unrestricted global
-			// allowlist answers before the judge is consulted, and that path is
-			// not audit-logged, so it leaves no per-request trace at all.
-			//
-			// Its OWN hook, deliberately: sharing the hook above would put this
-			// call after an `await`, so a rejection there would skip it — and a
-			// preflight that only runs when everything else already worked is
-			// not a preflight. Synchronous, so it cannot reject in turn.
-			() => {
-				checkJudgeShadowingAllowlist();
 			},
 		],
 		extraTeardown,

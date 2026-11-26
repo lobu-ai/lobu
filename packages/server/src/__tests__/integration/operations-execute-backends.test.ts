@@ -167,6 +167,9 @@ describe("operations.execute backend lifecycle", () => {
 						if (ctx.input.value === 'nul-error') {
 							throw new Error('local\\u0000boom');
 						}
+						if (ctx.input.value === 'target-missing') {
+							throw Object.assign(new Error('Synthetic target was not found'), { status: 404 });
+						}
 						if (ctx.input.value === 'page-unrecognized') {
 							return { success: false, error: 'LinkedIn profile header was not found', output: { code: 'page_unrecognized' } };
 						}
@@ -362,6 +365,21 @@ describe("operations.execute backend lifecycle", () => {
 						},
 					});
 				}
+				if (url.startsWith("https://api.example.test/repos/redirect/")) {
+					// GitHub's log downloads answer 302 with a pre-signed URL.
+					const target = {
+						signed: "https://signed.example.test/logs?sig=synthetic",
+						private: "https://127.0.0.1/logs",
+					}[url.slice("https://api.example.test/repos/redirect/".length)];
+					return new Response(null, { status: 302, headers: { location: target ?? "" } });
+				}
+				if (url.startsWith("https://signed.example.test/")) {
+					const headers = new Headers(init?.headers);
+					return new Response(
+						`step log; authorization=${headers.get("authorization")}; x-trace=${headers.get("x-trace")}`,
+						{ status: 200, headers: { "content-type": "text/plain" } },
+					);
+				}
 				if (url.startsWith("https://api.example.test/repos/")) {
 					const headers = new Headers(init?.headers);
 					return jsonResponse({
@@ -385,6 +403,12 @@ describe("operations.execute backend lifecycle", () => {
 					}
 					if (body.value === "nul-failure") {
 						return new Response("upstream\u0000failed", { status: 500 });
+					}
+					if (body.value === "redirect") {
+						return new Response(null, {
+							status: 302,
+							headers: { location: "https://signed.example.test/blob" },
+						});
 					}
 					if (
 						body.value === "wait-for-abort" ||
@@ -467,6 +491,19 @@ describe("operations.execute backend lifecycle", () => {
 									isError: false,
 								},
 							});
+						}
+						if (
+							(request.params?.arguments as Record<string, unknown> | undefined)
+								?.value === "upstream-502"
+						) {
+							return new Response("bad gateway", { status: 502 });
+						}
+						if (
+							(request.params?.arguments as Record<string, unknown> | undefined)
+								?.value === "session-expired"
+						) {
+							expect(new Headers(init?.headers).get("mcp-session-id")).toBe("operations-backend-session");
+							return new Response("Session not found", { status: 404 });
 						}
 						if (
 							(request.params?.arguments as Record<string, unknown> | undefined)
@@ -1540,6 +1577,55 @@ describe("operations.execute backend lifecycle", () => {
 		expect(cancelled.next_action).not.toContain("issue report");
 	});
 
+	it.each([
+		["a connector error's HTTP status", "local", { value: "target-missing" }, "NOT_FOUND", "user"],
+		["an upstream HTTP status", "http", { body: { value: "nul-failure" } }, "UPSTREAM_5XX", "dependency"],
+		["an upstream MCP server's HTTP status", "mcp", { value: "upstream-502" }, "UPSTREAM_5XX", "dependency"],
+		["an upstream MCP session rejection", "mcp", { value: "session-expired" }, "UPSTREAM_UNAVAILABLE", "dependency"],
+		["no cause for a redirect the request did not follow", "http", { body: { value: "redirect" } }, undefined, "system"],
+	] as const)("records an inline failure under %s", async (_label, backend, input, code, kind) => {
+		const target = {
+			local: { connection_id: localConnectionId, operation_key: "echo" },
+			http: { connection_id: httpConnectionId, operation_key: "create_item" },
+			mcp: { connection_id: mcpConnectionId, operation_key: "remote_echo" },
+		}[backend];
+		const args = {
+			action: "execute" as const,
+			...target,
+			input,
+			idempotency_key: `operation-backend-test:failure-code:${backend}:${code ?? "none"}`,
+		};
+		const write = vi.spyOn(process.stdout, "write");
+		let result: Record<string, unknown>;
+		let logged: string;
+		try {
+			result = (await manageOperations(args, {} as Env, ctx)) as Record<string, unknown>;
+			logged = write.mock.calls.map(([line]) => String(line)).join("");
+		} finally {
+			write.mockRestore();
+		}
+		const recorded = logged
+			.split("\n")
+			.filter((line) => line.includes('"operation_failure"'))
+			.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+		expect(result).toMatchObject({ status: "failed" });
+		expect(result.error_code).toBe(code);
+		expect(recorded).toHaveLength(1);
+		expect(recorded[0]).toMatchObject({
+			run_id: result.run_id,
+			error_kind: kind,
+			error_fingerprint: result.failure_fingerprint,
+		});
+		expect(recorded[0].error_code).toBe(code);
+		const [run] = await getTestDb()`
+			SELECT run_metadata->>'error_code' AS error_code FROM runs WHERE id = ${result.run_id as number}
+		`;
+		expect(run.error_code ?? undefined).toBe(code);
+		// A replay reports the failure under the fingerprint the terminal write recorded.
+		const replay = (await manageOperations(args, {} as Env, ctx)) as Record<string, unknown>;
+		expect(replay).toMatchObject({ run_id: result.run_id, failure_fingerprint: result.failure_fingerprint });
+	});
+
 	it("discovers and executes an OpenAPI HTTP operation", async () => {
 		const listed = await manageOperations(
 			{ action: "list_available", connection_id: httpConnectionId },
@@ -1629,6 +1715,32 @@ describe("operations.execute backend lifecycle", () => {
 				WHERE organization_id = ${orgId} AND key = ${HTTP}
 			`;
 		}
+	});
+
+	it("follows a read's redirect without the connection's credentials", async () => {
+		const execute = (repo: string) =>
+			manageOperations(
+				{
+					action: "execute",
+					connection_id: httpConnectionId,
+					operation_key: "get_repo",
+					input: { path: { owner: "redirect", repo }, headers: { "x-trace": "caller" } },
+				},
+				{} as Env,
+				ctx,
+			) as Promise<Record<string, unknown>>;
+
+		expect(await execute("signed")).toMatchObject({
+			status: "completed",
+			output: { body: "step log; authorization=null; x-trace=null" },
+		});
+
+		const fetchMock = vi.mocked(globalThis.fetch);
+		const before = fetchMock.mock.calls.length;
+		expect(await execute("private")).toMatchObject({ status: "failed" });
+		expect(
+			fetchMock.mock.calls.slice(before).map(([input]) => new URL(String(input)).hostname),
+		).toEqual(["api.example.test"]);
 	});
 
 	it("keeps every OpenAPI path parameter inside its template segment", async () => {
@@ -2091,6 +2203,7 @@ describe("operations.execute backend lifecycle", () => {
 				status: "failed",
 				error_message: "HTTP operation timed out after 10ms",
 			});
+			expect((result as { error_code?: string }).error_code).toBe("UPSTREAM_TIMEOUT");
 			const [run] = await getTestDb()<{
 				status: string;
 				completed_at: Date | null;

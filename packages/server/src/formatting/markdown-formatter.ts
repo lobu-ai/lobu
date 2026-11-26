@@ -1067,14 +1067,9 @@ function formatManageAutomationsResult(result: any, _options: FormatterOptions):
   return md;
 }
 
-/**
- * Format query_sql result as CSV.
- *
- * `query_sql` has no `outputSchema`, so its markdown must distinguish a resolved
- * `{ rows: [], error }` failure from a successful empty result.
- */
+/** Format query_sql rows or, for an empty page, the returned column metadata. */
 function formatQuerySqlResult(result: any): string {
-  const { rows, total_count, execution_time_ms } = result;
+  const { rows, columns, total_count, execution_time_ms } = result;
 
   if (typeof result?.error === 'string' && result.error.length > 0) {
     const code = result.error_code ? ` (${result.error_code})` : '';
@@ -1090,14 +1085,14 @@ function formatQuerySqlResult(result: any): string {
   let csv = '';
 
   if (rows && rows.length > 0) {
-    const columns = Object.keys(rows[0]);
+    const names = Object.keys(rows[0]);
 
     // CSV header
-    csv += `${columns.map((col) => escapeCsvValue(col)).join(',')}\n`;
+    csv += `${names.map((col) => escapeCsvValue(col)).join(',')}\n`;
 
     // CSV rows
     rows.forEach((row: any) => {
-      csv += `${columns.map((col) => escapeCsvValue(row[col])).join(',')}\n`;
+      csv += `${names.map((col) => escapeCsvValue(row[col])).join(',')}\n`;
     });
   }
 
@@ -1107,6 +1102,13 @@ function formatQuerySqlResult(result: any): string {
     typeof total_count === 'number'
       ? `**Rows**: ${total_count}`
       : `**Rows returned**: ${rows?.length ?? 0} • **Has More**: ${result.has_more ? 'Yes' : 'No'}`;
+
+  if (!rows?.length && columns?.length) {
+    const metadata = columns.map(({ name, type }: { name: string; type: string }) =>
+      [name, type].map(escapeCsvValue).join(',')
+    ).join('\n');
+    return `# 💾 SQL Query Results\n\n${rowSummary} • **Time**: ${execution_time_ms}ms\n\nNo rows on this page. Returned columns:\n\n\`\`\`csv\ncolumn_name,data_type\n${metadata}\n\`\`\``;
+  }
 
   // Wrap in code block for easy copying
   return `# 💾 SQL Query Results (CSV)\n\n${rowSummary} • **Time**: ${execution_time_ms}ms\n\n\`\`\`csv\n${csv}\`\`\`\n\n*Copy the CSV above and paste into Excel/Google Sheets*`;

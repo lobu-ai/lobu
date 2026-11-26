@@ -76,12 +76,26 @@ const REINJECTABLE_STATES = new Set([
   "adapter_mismatch",
 ]);
 
+/**
+ * Adapter states that refuse the caller's own request, as the HTTP status the
+ * runtime classifies a thrown connector error by: the named chat or message
+ * does not exist, or the input is not one WhatsApp can act on.
+ */
+const REQUEST_STATE_STATUS = new Map([
+  ["not_found", 404],
+  ["invalid_request", 400],
+]);
+
 class WhatsAppAdapterError extends Error {
   readonly state: string;
+  /** Set only when the adapter refused the request itself. */
+  readonly status?: number;
   constructor(state: string, reason: string) {
     super(`WhatsApp Web ${state}: ${reason}`);
     this.name = "WhatsAppAdapterError";
     this.state = state;
+    const status = REQUEST_STATE_STATUS.get(state);
+    if (status !== undefined) this.status = status;
   }
 }
 
@@ -776,6 +790,11 @@ export default class WhatsAppWebConnector extends ConnectorRuntime<
         ),
       };
     } catch (error) {
+      // A refused request carries its status out as a thrown error, the one
+      // shape the runtime reads a cause from; a returned refusal is recorded
+      // as an unclassified connector failure.
+      if (error instanceof WhatsAppAdapterError && error.status !== undefined)
+        throw error;
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),

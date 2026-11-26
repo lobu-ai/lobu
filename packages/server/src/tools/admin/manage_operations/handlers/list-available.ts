@@ -36,6 +36,7 @@ import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../helpers/connection-helpe
 import { buildConnectionAuthUrl, buildConnectionsUrl } from "../../../../utils/url-builder";
 import {
 	DEVICE_CONNECTOR_MANIFEST_UNAVAILABLE,
+	describeDeviceConnectorOffline,
 	describeDeviceConnectorSetupRequired,
 	findDeviceConnectorReadiness,
 	loadDeviceConnectorReadiness,
@@ -173,7 +174,7 @@ function executionTargetFromRow(
 			executable: false,
 			reason: row.device_worker_id
 				? "The paired device is not advertising the connector's selected manifest. Update or reconnect that device."
-				: "No online device is advertising the connector's selected manifest.",
+				: describeDeviceConnectorOffline(deviceReadiness),
 		};
 	}
 	if (row.device_bound && !row.device_online) {

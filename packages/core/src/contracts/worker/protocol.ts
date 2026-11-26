@@ -1176,9 +1176,9 @@ export const CompleteAgentTurnRequestSchema = Type.Object({
   ),
   /**
    * Every tool this turn invoked, first-call order. Absent and `[]` are NOT
-   * the same: the `requireTool` output guardrail passes on an absent ledger
-   * (it cannot prove a miss) and trips on an empty one, so a successful turn
-   * must send the array even when it called nothing.
+   * the same: absent means the worker did not record a ledger, `[]` means the
+   * turn called nothing, so a successful turn must send the array even when
+   * it called nothing.
    */
   tools_used: Type.Optional(Type.Array(Type.String())),
   /**

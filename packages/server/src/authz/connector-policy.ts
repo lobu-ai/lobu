@@ -3,7 +3,11 @@ import type { AvailableOperation } from "../operations/types";
 import { qualifiedOperationKey } from "../tools/admin/manage_operations/handlers/shared";
 import { allowedConnectorEffect, type AllowedAction } from "./caller-action-allowlist";
 import type { ActingPrincipal, EntityApprovalPolicy, EntityPolicyPrincipalKind } from "./entity-policy";
-import { policyConditionsHold } from "./policy-conditions";
+import {
+	type ClassifyOutcome,
+	type PolicyClassifyCondition,
+	policyConditionsHold,
+} from "./policy-conditions";
 import { principalMatches } from "./principal-matches";
 import { type WriteEffect, writeEffectRank } from "./write-action-manifest";
 
@@ -261,6 +265,15 @@ export function evaluateConnectorPolicy(args: {
 	 */
 	input?: Record<string, unknown> | null;
 	unknownConditions?: UnknownConditionSide;
+	/**
+	 * A rule's classify condition result for this input, computed at admission
+	 * (`policy-classify.ts`). Absent, or "unknown": decided per `unknownConditions`.
+	 */
+	classified?: (
+		rule: EntityApprovalPolicy,
+		index: number,
+		condition: PolicyClassifyCondition,
+	) => ClassifyOutcome;
 }): ConnectorPolicyResult {
 	if (!args.actor.ownerResolved) {
 		return { effect: "deny", ruleIds: [], rules: [], reason: "unresolved_principal" };
@@ -294,7 +307,17 @@ export function evaluateConnectorPolicy(args: {
 	// A rule whose `when` does not hold is ignored, exactly as if its scope did
 	// not match. An undecidable one applies only on the side asked for.
 	const lenient = args.unknownConditions === "lenient";
-	const holds = new Map(matches.map((rule) => [rule, policyConditionsHold(rule.condition, args.input)]));
+	const classified = args.classified;
+	const holds = new Map(
+		matches.map((rule) => [
+			rule,
+			policyConditionsHold(
+				rule.condition,
+				args.input,
+				classified && ((index, condition) => classified(rule, index, condition)),
+			),
+		]),
+	);
 	const applies = (rule: EntityApprovalPolicy) => {
 		const held = holds.get(rule);
 		return held === "unknown" ? grantsAccess(rule) === lenient : held === true;

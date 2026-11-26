@@ -9119,18 +9119,9 @@ export type ListGuardrailsResponses = {
        * Unique among the workspace's unarchived guardrails: lowercase letters, digits and single inner hyphens, at most 64 characters
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       applies_to: Array<
         | {
             principal_kind: null;
@@ -9158,20 +9149,11 @@ export type CreateGuardrailData = {
        * Lowercase letters, digits and single inner hyphens, at most 64 characters. Fixed once created: a rename is archive plus create.
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       /**
-       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (a pre-tool judge or forbidden-tools). Defaults to every agent.
+       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (forbidden-tools). Defaults to every agent.
        */
       applies_to?: Array<
         | {
@@ -9240,18 +9222,9 @@ export type CreateGuardrailResponses = {
        * Unique among the workspace's unarchived guardrails: lowercase letters, digits and single inner hyphens, at most 64 characters
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       applies_to: Array<
         | {
             principal_kind: null;
@@ -9336,18 +9309,9 @@ export type ArchiveGuardrailResponses = {
        * Unique among the workspace's unarchived guardrails: lowercase letters, digits and single inner hyphens, at most 64 characters
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       applies_to: Array<
         | {
             principal_kind: null;
@@ -9420,18 +9384,9 @@ export type GetGuardrailResponses = {
        * Unique among the workspace's unarchived guardrails: lowercase letters, digits and single inner hyphens, at most 64 characters
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       applies_to: Array<
         | {
             principal_kind: null;
@@ -9458,20 +9413,11 @@ export type ReplaceGuardrailData = {
        * Lowercase letters, digits and single inner hyphens, at most 64 characters. Fixed once created: a rename is archive plus create.
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       /**
-       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (a pre-tool judge or forbidden-tools). Defaults to every agent.
+       * Who the guardrail applies to: agent subjects, or app subjects on a pre-tool-only guardrail (forbidden-tools). Defaults to every agent.
        */
       applies_to?: Array<
         | {
@@ -9550,18 +9496,9 @@ export type ReplaceGuardrailResponses = {
        * Unique among the workspace's unarchived guardrails: lowercase letters, digits and single inner hyphens, at most 64 characters
        */
       name: string;
-      config:
-        | {
-            builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-          }
-        | {
-            kind: "judge" | "require-tool";
-            stage: "input" | "output" | "pre-tool" | "egress";
-            policy?: string;
-            model?: string;
-            tools?: Array<string>;
-            domains?: Array<string>;
-          };
+      config: {
+        builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
+      };
       applies_to: Array<
         | {
             principal_kind: null;

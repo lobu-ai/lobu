@@ -1,5 +1,5 @@
 /**
- * Red→green reproducers for the four critical multi-tenant isolation gaps
+ * Red→green reproducers for the critical multi-tenant isolation gaps
  * surfaced on PR #836:
  *
  *   - Finding 1: secret-proxy `lookupPlaceholderMapping` was dead-code —
@@ -10,11 +10,6 @@
  *     fell back to ALS (empty in the raw HTTP proxy hot path) and matched
  *     grants by `agent_id` alone — cross-org leakage when an agent id is
  *     reused.
- *   - Finding 3: `PolicyStore` was keyed by `agentId` alone, so the last
- *     `set()` across orgs won. Cache scoping became theatre because the
- *     policy fed into the verdict was already wrong. (The store now reads
- *     the workspace guardrail library with an explicit org predicate; the
- *     reproducers drive that read.)
  *   - Finding 6 — peek-before-consume — is covered by `slack-routes.test.ts`
  *     ("rejects when callback session org differs from install state"
  *     asserts the row is preserved for a legitimate retry).
@@ -32,10 +27,7 @@ import {
   generateWorkerTokenPair,
   verifyWorkerToken,
 } from "@lobu/core";
-import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
-import { getDb } from "../../db/client.js";
 import { GrantStore } from "../permissions/grant-store.js";
-import { PolicyStore } from "../permissions/policy-store.js";
 import {
   __resetPlaceholderCacheForTests,
   generatePlaceholder,
@@ -49,64 +41,6 @@ import {
   seedAgentRow,
 } from "./helpers/db-setup.js";
 import { withFreePortRetry } from "../../__tests__/setup/free-port.js";
-
-// ─── Finding 3: PolicyStore cross-tenant clobbering ──────────────────────────
-
-describe("[finding 3] PolicyStore is keyed by (orgId, agentId)", () => {
-  async function storePolicy(orgId: string, agentId: string, policy: string) {
-    await seedAgentRow(agentId, { organizationId: orgId });
-    await createTestWorkspaceGuardrail({
-      organizationId: orgId,
-      name: "default",
-      config: { kind: "judge", stage: "egress", policy, domains: ["api.example.com"] },
-      appliesTo: [{ kind: "agent", id: agentId }],
-    });
-  }
-
-  beforeAll(async () => {
-    await ensureDbForGatewayTests();
-  });
-
-  beforeEach(async () => {
-    await resetTestDatabase();
-  });
-
-  test("two orgs reusing one agent id each read their own policy through one store", async () => {
-    await storePolicy("org-a", "shared-agent-id", "ORG A: deny by default");
-    await storePolicy("org-b", "shared-agent-id", "ORG B: allow reads");
-    const store = new PolicyStore();
-
-    const [aResolved] = await store.resolve("org-a", "shared-agent-id", "api.example.com");
-    const [bResolved] = await store.resolve("org-b", "shared-agent-id", "api.example.com");
-
-    expect(aResolved?.policy).toBe("ORG A: deny by default");
-    expect(bResolved?.policy).toBe("ORG B: allow reads");
-    // policyHash diverges so the verdict cache cannot collide either.
-    expect(aResolved?.policyHash).not.toBe(bResolved?.policyHash as string);
-  });
-
-  test("resolve refuses cross-org reads — no fall-through to a sibling tenant's policy", async () => {
-    await storePolicy("org-a", "agent-1", "ORG A only");
-    await seedAgentRow("agent-1", { organizationId: "org-b" });
-    const store = new PolicyStore();
-    // Warm org A's entry first, so a cache keyed by agent alone would answer.
-    expect(await store.resolve("org-a", "agent-1", "api.example.com")).toHaveLength(1);
-    expect(await store.resolve("org-b", "agent-1", "api.example.com")).toEqual([]);
-  });
-
-  test("clearing org A's policy does not affect org B's for the same agent id", async () => {
-    await storePolicy("org-a", "shared", "A");
-    await storePolicy("org-b", "shared", "B");
-    const store = new PolicyStore();
-    await store.resolve("org-a", "shared", "api.example.com");
-    await store.resolve("org-b", "shared", "api.example.com");
-
-    await getDb()`DELETE FROM workspace_guardrails WHERE organization_id = 'org-a'`;
-    expect(await store.resolve("org-a", "shared", "api.example.com")).toEqual([]);
-    const [b] = await store.resolve("org-b", "shared", "api.example.com");
-    expect(b?.policy).toBe("B");
-  });
-});
 
 // ─── Finding 1: secret-proxy placeholder cross-org leak ──────────────────────
 
@@ -469,7 +403,7 @@ describe("[finding 2] GrantStore queries scope to caller's organization id", () 
 
       // Pre-fix: 200 — org A's grant matched because no org was passed.
       // Post-fix: 403 — grant lookup scoped to org B finds nothing,
-      // global allowlist denies, judge has no rule for this agent.
+      // global allowlist denies.
       expect(status).toBe(403);
     } finally {
       await stopHttpProxy(proxyServer);

@@ -2,23 +2,21 @@
  * The workspace guardrail library (`workspace_guardrails` +
  * `workspace_guardrail_subjects`). Every reader goes through here: the message
  * pipeline (chat input/output, pre-tool on the outbound MCP proxy and on inbound
- * MCP tool calls), the egress
- * policy store and grant guards, and the read-only REST/SDK list/get; the
- * REST writers apply through here too.
+ * MCP tool calls) and the read-only REST/SDK list/get; the REST writers apply
+ * through here too.
  */
 import { randomBytes } from "node:crypto";
 import { isLibrarySkillName, LIBRARY_SKILL_NAME_MAX_CHARS } from "@lobu/core/agent-tooling";
 import {
 	type GuardrailSubject,
-	isBuiltinGuardrailConfig,
 	type ListGuardrailsResult,
 	parseGuardrailConfig,
 	type WorkspaceGuardrail,
 	type WorkspaceGuardrailConfig,
 } from "@lobu/core/contracts/workspace-guardrails";
-import type { GuardrailStage } from "@lobu/core";
 import type { ActingPrincipal } from "../authz/entity-policy";
 import { appKeyProblem } from "../authz/policy-principal";
+import { LOOP_POLICY_CUTOVER_INDEX } from "../authz/policy-hooks";
 import type { DbClient } from "../db/client";
 import { pgTextArray } from "../db/client";
 import { builtinGuardrailStages } from "../gateway/guardrails/builtins";
@@ -41,98 +39,41 @@ export interface ApplyingGuardrail {
 	revision: number;
 }
 
-interface ApplyingQuery {
-	/** Only custom checks at this stage (built-ins carry no stage). */
-	stage?: GuardrailStage;
-	/** Skip transferring rows while the set still hashes to this revision. */
-	knownRevision?: string | null;
-}
-
-/**
- * The enabled, unarchived guardrails that apply to `principal`, plus a content revision
- * of exactly that set. One indexed read over a bounded config table; the
- * subject predicate is `principalMatches` in SQL: everyone, the principal's
- * kind, the principal itself, or (for an Automation) its owner agent. `rows`
- * is null when the set still hashes to `knownRevision`, so a revision-checked
- * cache pays one read and no JSON transfer in the steady state.
- */
-async function queryApplying(
-	sql: DbClient,
-	organizationId: string,
-	principal: GuardrailPrincipal,
-	query: ApplyingQuery,
-): Promise<{ revision: string; rows: ApplyingGuardrail[] | null }> {
-	const ownerAgentId = principal.kind === "automation" ? principal.ownerAgentId : null;
-	const [result] = await sql<{ revision: string; rows: ApplyingGuardrail[] | null }>`
-		WITH applying AS (
-			SELECT g.id, g.name, g.config, g.enabled, g.revision
-			FROM workspace_guardrails g
-			WHERE g.organization_id = ${organizationId}
-			  AND g.archived_at IS NULL
-			  AND g.enabled
-			  AND (${query.stage ?? null}::text IS NULL OR g.config ->> 'stage' = ${query.stage ?? null})
-			  AND EXISTS (
-			    SELECT 1 FROM workspace_guardrail_subjects gs
-			    WHERE gs.guardrail_id = g.id
-			      AND gs.organization_id = g.organization_id
-			      AND (
-			        gs.principal_kind IS NULL
-			        OR (gs.principal_kind = ${principal.kind}
-			            AND (gs.principal_id IS NULL OR gs.principal_id = ${principal.id}))
-			        OR (${ownerAgentId}::text IS NOT NULL AND gs.principal_kind = 'agent'
-			            AND (gs.principal_id IS NULL OR gs.principal_id = ${ownerAgentId}))
-			      )
-			  )
-		),
-		digest AS (
-			SELECT md5(COALESCE(
-				jsonb_agg(jsonb_build_array(id, revision, name, enabled, config) ORDER BY id COLLATE "C")::text,
-				''
-			)) AS revision
-			FROM applying
-		)
-		SELECT digest.revision,
-		       CASE WHEN digest.revision IS DISTINCT FROM ${query.knownRevision ?? null}::text THEN (
-		         SELECT COALESCE(jsonb_agg(
-		           jsonb_build_object('id', id, 'name', name, 'config', config, 'enabled', enabled, 'revision', revision)
-		           ORDER BY name COLLATE "C", id COLLATE "C"
-		         ), '[]'::jsonb)
-		         FROM applying
-		       ) END AS rows
-		FROM digest
-	`;
-	return {
-		revision: result?.revision ?? "",
-		rows: result?.rows ? result.rows.map((row) => ({ ...row, revision: Number(row.revision) })) : null,
-	};
-}
-
 /**
  * The guardrails enforced for `principal`: enabled, unarchived, and applying
  * to it. Guardrails accumulate — every one returned runs, and any trip wins.
+ * One indexed read over a bounded config table; the subject predicate is
+ * `principalMatches` in SQL: everyone, the principal's kind, the principal
+ * itself, or (for an Automation) its owner agent.
  */
 export async function resolveGuardrails(
 	sql: DbClient,
 	organizationId: string,
 	principal: GuardrailPrincipal,
 ): Promise<ApplyingGuardrail[]> {
-	return (await queryApplying(sql, organizationId, principal, {})).rows ?? [];
-}
-
-/**
- * The enabled `egress`-stage guardrails for `principal`, revision-checked: the
- * rows come back only when the set no longer hashes to `knownRevision`.
- */
-export function resolveEgressGuardrails(
-	sql: DbClient,
-	organizationId: string,
-	principal: GuardrailPrincipal,
-	knownRevision: string | null,
-): Promise<{ revision: string; rows: ApplyingGuardrail[] | null }> {
-	return queryApplying(sql, organizationId, principal, {
-		stage: "egress",
-		knownRevision,
-	});
+	const ownerAgentId = principal.kind === "automation" ? principal.ownerAgentId : null;
+	const rows = await sql<Omit<ApplyingGuardrail, "revision"> & { revision: string | number }>`
+		SELECT g.id, g.name, g.config, g.enabled, g.revision
+		FROM workspace_guardrails g
+		WHERE g.organization_id = ${organizationId}
+		  AND g.archived_at IS NULL
+		  AND g.enabled
+		  AND to_regclass(${LOOP_POLICY_CUTOVER_INDEX}) IS NULL
+		  AND EXISTS (
+		    SELECT 1 FROM workspace_guardrail_subjects gs
+		    WHERE gs.guardrail_id = g.id
+		      AND gs.organization_id = g.organization_id
+		      AND (
+		        gs.principal_kind IS NULL
+		        OR (gs.principal_kind = ${principal.kind}
+		            AND (gs.principal_id IS NULL OR gs.principal_id = ${principal.id}))
+		        OR (${ownerAgentId}::text IS NOT NULL AND gs.principal_kind = 'agent'
+		            AND (gs.principal_id IS NULL OR gs.principal_id = ${ownerAgentId}))
+		      )
+		  )
+		ORDER BY g.name COLLATE "C", g.id COLLATE "C"
+	`;
+	return rows.map((row) => ({ ...row, revision: Number(row.revision) }));
 }
 
 // ============================================
@@ -291,11 +232,10 @@ function normalizeGuardrailConfig(raw: unknown): WorkspaceGuardrailConfig {
 }
 
 /**
- * True when a guardrail runs at the pre-tool stage only: a pre-tool judge, or
- * a built-in that implements no other stage (forbidden-tools).
+ * True when a guardrail runs at the pre-tool stage only: a built-in that
+ * implements no other stage (forbidden-tools).
  */
 function runsOnlyPreTool(config: WorkspaceGuardrailConfig): boolean {
-	if (!isBuiltinGuardrailConfig(config)) return config.stage === "pre-tool";
 	const stages = builtinGuardrailStages(config.builtin);
 	return stages.length > 0 && stages.every((stage) => stage === "pre-tool");
 }
@@ -328,7 +268,7 @@ function normalizeGuardrailSubjects(subjects: unknown, config: WorkspaceGuardrai
 		if (kind === "app") {
 			if (!runsOnlyPreTool(config)) {
 				throw new ToolUserError(
-					"App subjects apply only to pre-tool guardrails: a judge at stage pre-tool, or the forbidden-tools built-in.",
+					"App subjects apply only to pre-tool guardrails: the forbidden-tools built-in.",
 					422,
 				);
 			}
@@ -388,42 +328,15 @@ async function assertSubjectAgentsExist(
 }
 
 /**
- * The agents a guardrail's subjects cover, as a predicate for a query to
- * apply to the agents it reads: every agent of the workspace for an
- * every-agent subject, else the named ones. Never a resolved id list, which
- * would go stale as agents are created.
- */
-export function guardrailSubjectScope(subjects: readonly GuardrailSubject[]): {
-	everyAgent: boolean;
-	agentIds: string[];
-} {
-	const everyAgent = subjects.some(
-		(subject) => subject.principal_kind === null || (subject.principal_kind === "agent" && subject.principal_id === null),
-	);
-	const agentIds = everyAgent
-		? []
-		: [
-				...new Set(
-					subjects.flatMap((subject) =>
-						subject.principal_kind === "agent" && subject.principal_id !== null ? [subject.principal_id] : [],
-					),
-				),
-			];
-	return { everyAgent, agentIds };
-}
-
-/**
  * Check a write against the library's current state and return the guardrail
  * it replaces (null for a create): 404 for a missing or foreign id, 409 for an
  * archived target, a stale `expected_revision` or a taken name, 422 for a
- * rename. `lock` takes the target row's write lock for the applying
- * transaction.
+ * rename. It takes the target row's write lock for the applying transaction.
  */
-export async function checkGuardrailWrite(
+async function checkGuardrailWrite(
 	sql: DbClient,
 	organizationId: string,
 	write: GuardrailWrite,
-	options: { lock: boolean },
 ): Promise<WorkspaceGuardrail | null> {
 	if (write.guardrail) await assertSubjectAgentsExist(sql, organizationId, write.guardrail.applies_to);
 	if (write.op === "create") {
@@ -436,16 +349,11 @@ export async function checkGuardrailWrite(
 		}
 		return null;
 	}
-	const rows = options.lock
-		? await sql<GuardrailRow>`
-			SELECT id, name, config, enabled, revision, archived_at FROM workspace_guardrails
-			WHERE organization_id = ${organizationId} AND id = ${write.id}
-			FOR UPDATE
-		`
-		: await sql<GuardrailRow>`
-			SELECT id, name, config, enabled, revision, archived_at FROM workspace_guardrails
-			WHERE organization_id = ${organizationId} AND id = ${write.id}
-		`;
+	const rows = await sql<GuardrailRow>`
+		SELECT id, name, config, enabled, revision, archived_at FROM workspace_guardrails
+		WHERE organization_id = ${organizationId} AND id = ${write.id}
+		FOR UPDATE
+	`;
 	const [current] = await withSubjects(sql, organizationId, rows);
 	if (!current) throw new ToolUserError(`Guardrail "${write.id}" not found`, 404);
 	if (current.archived) throw new ToolUserError(`Guardrail "${write.id}" is archived.`, 409);
@@ -502,7 +410,7 @@ export async function applyGuardrailWrite(
 	organizationId: string,
 	write: GuardrailWrite,
 ): Promise<{ before: WorkspaceGuardrail | null; after: WorkspaceGuardrail; changed: boolean }> {
-	const before = await checkGuardrailWrite(tx, organizationId, write, { lock: true });
+	const before = await checkGuardrailWrite(tx, organizationId, write);
 	if (write.op === "archive") {
 		await tx`
 			UPDATE workspace_guardrails

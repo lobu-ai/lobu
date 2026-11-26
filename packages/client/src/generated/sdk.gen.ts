@@ -859,7 +859,7 @@ export const resolvePath = <ThrowOnError extends boolean = false>(
 /**
  * List the workspace guardrail library
  *
- * Built-in checks and custom judge/require-tool checks, ordered by name, with who each applies to.
+ * The built-in checks the workspace enables, ordered by name, with who each applies to.
  */
 export const listGuardrails = <ThrowOnError extends boolean = false>(
   options: Options<ListGuardrailsData, ThrowOnError>,

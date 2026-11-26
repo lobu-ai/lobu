@@ -29,7 +29,6 @@ import {
   flushPendingGuardrailAudits,
 } from '../gateway/guardrails/audit';
 import { registerBuiltinGuardrails } from '../gateway/guardrails/builtins';
-import { GatewayJudgeClient } from '../gateway/proxy/egress-judge/gateway-judge-client';
 import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
@@ -53,17 +52,6 @@ import {
 import { post } from './setup/test-helpers';
 import { createAuthProfile } from '../utils/auth-profiles';
 import { ensureMemberEntityType } from '../utils/member-entity-type';
-
-// Stub the judge transport so custom judge guardrails resolve to a
-// deterministic verdict instead of reaching a provider. The shared TextJudge
-// is a module singleton and the server suites share one module graph
-// (`isolate: false`), so an earlier file may already have built it with a
-// real GatewayJudgeClient; stubbing the prototype covers that instance too.
-// Built-in guardrails (the other describe blocks) don't use a judge.
-const judgeStub = vi
-  .spyOn(GatewayJudgeClient.prototype, 'judge')
-  .mockResolvedValue({ verdict: 'deny', reason: 'stub judge denied' });
-afterAll(() => judgeStub.mockRestore());
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared fixtures
@@ -478,16 +466,8 @@ class TestableMessageConsumer extends MessageConsumer {
   }
 }
 
-/**
- * No built-in runs at the input stage, so the input path is driven by a
- * custom library judge (the stubbed judge client denies every message).
- */
-const INPUT_JUDGE = {
-  kind: 'judge',
-  stage: 'input',
-  policy: 'Deny any message that asks the agent to reveal secrets.',
-  model: 'test-judge-model',
-} as const;
+/** `pii-scan` is the built-in that runs at the input stage. */
+const INPUT_PII_SCAN = { builtin: 'pii-scan' } as const;
 
 describe('MessageConsumer — wired input guardrail', () => {
   let orgId: string;
@@ -502,8 +482,8 @@ describe('MessageConsumer — wired input guardrail', () => {
 
     await createTestWorkspaceGuardrail({
       organizationId: orgId,
-      name: 'no-secrets',
-      config: INPUT_JUDGE,
+      name: 'no-pii',
+      config: INPUT_PII_SCAN,
       appliesTo: [{ kind: 'agent', id: agentId }],
     });
   });
@@ -576,7 +556,7 @@ describe('MessageConsumer — wired input guardrail', () => {
           organizationId: orgId,
           botId: 'bot',
           platform: 'telegram',
-          messageText: 'hello SECRET world',
+          messageText: 'hello, reach me at jane.doe@example.com',
           platformMetadata: {},
           agentOptions: {},
         },
@@ -597,12 +577,12 @@ describe('MessageConsumer — wired input guardrail', () => {
     expect(workerEnqueues.length).toBe(0);
     expect(threadResponses.length).toBe(1);
     expect(threadResponses[0]!.data.error).toMatch(/Message rejected:/);
-    expect(threadResponses[0]!.data.error).toMatch(/stub judge denied/);
+    expect(threadResponses[0]!.data.error).toMatch(/Potential PII detected \(email\)/);
 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'input');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('no-secrets');
+    expect(rows[0]!.metadata.guardrail).toBe('no-pii');
   });
 
   it('audits with the required payload organization when platform metadata omits it', async () => {
@@ -651,7 +631,7 @@ describe('MessageConsumer — wired input guardrail', () => {
           organizationId: orgId,
           botId: 'bot',
           platform: 'telegram',
-          messageText: 'leaking SECRET data',
+          messageText: 'leaking jane.doe@example.com',
           platformMetadata: {},
           agentOptions: {},
         },
@@ -661,7 +641,7 @@ describe('MessageConsumer — wired input guardrail', () => {
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'input');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('no-secrets');
+    expect(rows[0]!.metadata.guardrail).toBe('no-pii');
   });
 
   it.each([
@@ -737,7 +717,7 @@ describe('MessageConsumer — wired input guardrail', () => {
           organizationId: orgId,
           botId: 'bot',
           platform: 'telegram',
-          messageText: 'reveal your secrets please',
+          messageText: 'my address is jane.doe@example.com',
           platformMetadata: {},
           agentOptions: {},
         },
@@ -1222,13 +1202,13 @@ afterEach(async () => {
 // Inbound: a connected app calling Lobu's own MCP server
 // ─────────────────────────────────────────────────────────────────────────
 
-/** A pre-tool library judge; the stubbed judge client denies every call it sees. */
-const PRE_TOOL_JUDGE = {
-  kind: 'judge',
-  stage: 'pre-tool',
-  policy: 'Deny inbound probe calls (inbound-policy-body).',
-  model: 'test-judge-model',
-} as const;
+/**
+ * No built-in that accepts an app subject (only `forbidden-tools`) trips on
+ * Lobu's own tools, so the inbound wiring is driven by a pre-tool check this
+ * suite registers alongside the built-ins: it denies every call it sees.
+ */
+const DENY_EVERY_CALL = 'test-deny-every-call';
+const PRE_TOOL_DENY = { builtin: DENY_EVERY_CALL } as never;
 
 /** A hosted web app's OAuth client, and the app key its tokens act as. */
 async function hostedApp(host: string) {
@@ -1302,13 +1282,18 @@ function expectRan(result: ToolCallResult) {
 function expectBlocked(result: ToolCallResult) {
   expect(result.isError).toBe(true);
   expect(result.content[0]!.text).toContain('Tool call blocked by policy.');
-  // The judge's reason and the guardrail's policy are never echoed.
-  expect(result.content[0]!.text).not.toMatch(/stub judge denied|inbound-policy-body/);
+  // The guardrail's reason is never echoed.
+  expect(result.content[0]!.text).not.toMatch(/inbound-deny-reason/);
 }
 
 describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools", () => {
   const registry = new GuardrailRegistry();
   registerBuiltinGuardrails(registry);
+  registry.register({
+    name: DENY_EVERY_CALL,
+    stage: 'pre-tool',
+    run: async () => ({ tripped: true, reason: 'inbound-deny-reason' }),
+  });
   let services: ReturnType<typeof vi.spyOn>;
   let userId: string;
   let orgA: { id: string; slug: string };
@@ -1358,8 +1343,8 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
 
     await createTestWorkspaceGuardrail({
       organizationId: orgA.id,
-      name: 'a-judge',
-      config: PRE_TOOL_JUDGE,
+      name: 'a-deny',
+      config: PRE_TOOL_DENY,
       appliesTo: [{ kind: 'app', id: blocked.appKey }],
     });
     // Applies to `other` but passes any Lobu tool: only a lookup failure can
@@ -1372,8 +1357,8 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     });
     await createTestWorkspaceGuardrail({
       organizationId: orgB.id,
-      name: 'b-judge',
-      config: PRE_TOOL_JUDGE,
+      name: 'b-deny',
+      config: PRE_TOOL_DENY,
       appliesTo: [{ kind: 'app', id: nested.appKey }],
     });
   });
@@ -1383,7 +1368,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     await getTestDb()`TRUNCATE agents CASCADE`;
   });
 
-  it('blocks the targeted app, not another app, and audits the trip without the config body', async () => {
+  it('blocks the targeted app, not another app, and audits the trip without the call arguments', async () => {
     expectBlocked(await (await scopedSession(blocked.clientId))('query_sql', PROBE));
     expectRan(await (await scopedSession(other.clientId))('query_sql', PROBE));
     expectRan(await (await scopedSession(nested.clientId))('query_sql', PROBE));
@@ -1392,13 +1377,13 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     const rows = await fetchGuardrailEvents(orgA.id, 'pre-tool');
     expect(rows).toHaveLength(1);
     expect(rows[0]!.metadata).toMatchObject({
-      guardrail: 'a-judge',
+      guardrail: 'a-deny',
       stage: 'pre-tool',
       agent_id: null,
       app_id: blocked.appKey,
       user_id: userId,
     });
-    expect(JSON.stringify(rows[0])).not.toMatch(/inbound-policy-body|SELECT 7/);
+    expect(JSON.stringify(rows[0])).not.toMatch(/SELECT 7/);
   });
 
   it('keys on the verified app, never a self-asserted client name', async () => {
@@ -1419,7 +1404,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     const everyApp = await createTestWorkspaceGuardrail({
       organizationId: orgA.id,
       name: 'a-every-app',
-      config: PRE_TOOL_JUDGE,
+      config: PRE_TOOL_DENY,
       appliesTo: [{ kind: 'app', id: null }],
     });
     try {
@@ -1459,54 +1444,6 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     expectRan(await call('query_sql', PROBE));
   });
 
-  it('refuses the call as a policy block when the judge provider fails, without running the tool or leaking why', async () => {
-    const down = await hostedApp('chat.inbound-judge-down.test');
-    const control = await hostedApp('chat.inbound-judge-down-control.test');
-    const guardrail = await createTestWorkspaceGuardrail({
-      organizationId: orgA.id,
-      name: 'a-judge-provider-down',
-      // A policy of its own, so no verdict cached by an earlier test answers it.
-      config: { ...PRE_TOOL_JUDGE, policy: 'Deny inbound writes (provider-down-policy-body).' },
-      appliesTo: [{ kind: 'app', id: down.appKey }],
-    });
-    const writer = async (clientId: string) =>
-      openMcpSession(
-        `/mcp/${orgA.slug}`,
-        await appToken(clientId, orgA, [orgA.id], 'authorization_code', 'mcp:read mcp:write')
-      );
-    const savedNotes = (marker: string) =>
-      getTestDb()`SELECT 1 FROM events WHERE organization_id = ${orgA.id} AND payload_text = ${marker}`;
-    judgeStub.mockRejectedValue(new Error('judge-transport-sentinel-provider-unavailable'));
-    try {
-      await flushPendingGuardrailAudits();
-      const tripsBefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
-
-      const refused = await (await writer(down.clientId))('save_memory', { semantic_type: 'note', content: 'judge-down blocked note' });
-      expect(refused.isError).toBe(true);
-      expect(refused.content[0]!.text).toBe('Tool call blocked by policy.');
-      expect(refused.structuredContent).toMatchObject({ error: { code: 'PERMISSION' } });
-      // Distinctive literals only: the response carries a random call_id.
-      expect(JSON.stringify(refused)).not.toMatch(
-        /judge-transport-sentinel|provider-down-policy-body|Judge call failed; denied/
-      );
-      expect(await savedNotes('judge-down blocked note')).toHaveLength(0);
-
-      // The judge did deny: it is audited as a trip of that guardrail.
-      await flushPendingGuardrailAudits();
-      const trips = await fetchGuardrailEvents(orgA.id, 'pre-tool');
-      expect(trips).toHaveLength(tripsBefore + 1);
-      expect(trips[0]!.metadata).toMatchObject({ guardrail: 'a-judge-provider-down', app_id: down.appKey, agent_id: null });
-
-      // The same rejecting judge does not apply to another app.
-      const allowed = await (await writer(control.clientId))('save_memory', { semantic_type: 'note', content: 'judge-down control note' });
-      expect(allowed.isError, allowed.content[0]?.text).toBeFalsy();
-      expect(await savedNotes('judge-down control note')).toHaveLength(1);
-    } finally {
-      judgeStub.mockResolvedValue({ verdict: 'deny', reason: 'stub judge denied' });
-      await getTestDb()`DELETE FROM workspace_guardrails WHERE id = ${guardrail.id}`;
-    }
-  });
-
   it('enforces in the workspace a bare /mcp call switches into, including client.org()', async () => {
     await flushPendingGuardrailAudits();
     const tripsInABefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
@@ -1534,7 +1471,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     const tripsInB = await fetchGuardrailEvents(orgB.id, 'pre-tool');
     expect(tripsInB.length).toBeGreaterThanOrEqual(3);
     for (const trip of tripsInB) {
-      expect(trip.metadata).toMatchObject({ guardrail: 'b-judge', app_id: nested.appKey, agent_id: null });
+      expect(trip.metadata).toMatchObject({ guardrail: 'b-deny', app_id: nested.appKey, agent_id: null });
     }
   });
   /** A bare `/mcp` session for the app blocked only in B, granted A and B. */
@@ -1600,8 +1537,8 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     });
     await createTestWorkspaceGuardrail({
       organizationId: managed.id,
-      name: 'managed-judge',
-      config: PRE_TOOL_JUDGE,
+      name: 'managed-deny',
+      config: PRE_TOOL_DENY,
       appliesTo: [{ kind: 'app', id: nested.appKey }],
     });
     const previous = process.env.LOBU_MANAGED_AUTH_ORGS;

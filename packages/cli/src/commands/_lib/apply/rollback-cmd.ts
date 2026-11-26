@@ -135,11 +135,12 @@ export function sanitizeSnapshotState(
       "library skills left at current values (a deployment records only each body's digest; re-apply that deployment's config to restore them)"
     );
   }
-  // Likewise a judge guardrail's policy is recorded only as its digest.
+  // Library guardrails are not restored either: re-applying the deployment's
+  // config is the way back.
   if (state.guardrails !== undefined) {
     state.guardrails = undefined;
     notes.push(
-      "library guardrails left at current values (a deployment records a judge's policy only as its digest; re-apply that deployment's config to restore them)"
+      "library guardrails left at current values (re-apply that deployment's config to restore them)"
     );
   }
 

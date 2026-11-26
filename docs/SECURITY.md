@@ -37,7 +37,6 @@ This is a **policy layer**, not a security boundary. If you allow `nodejs`, `pyt
 Workers run with `HTTP_PROXY` pointing at the gateway's authenticated in-process proxy. The gateway binds the proxy to `127.0.0.1` and injects a URL that uses the port from `WORKER_PROXY_PORT` (default `8118`) into each worker. Derive firewall and monitoring rules from `WORKER_PROXY_PORT` rather than the literal 8118. The proxy enforces:
 - **Allowlist mode** — only configured domains reachable.
 - **Blocklist mode** — allow all except denied domains.
-- **LLM egress judge** — risky domains get LLM verdict per request, with a 5 min cache and a circuit breaker.
 
 An agent turn runs in a V8 isolate with no network primitive of its own: the guest is built without `fetch`, and its bash tool's in-memory shell has no `curl` or `wget`. Egress is therefore not advisory at the language layer — there is no socket API to bypass a proxy env var with. Every request an agent makes is a call the host mediates, and the gateway's egress proxy resolves the hostname, rejects private and loopback address literals, and applies the agent's network policy before connecting. This holds identically on Linux and macOS, because it does not depend on a host kernel feature.
 
@@ -75,7 +74,7 @@ Implications, by design:
   device and the data the connector reads. Capability-matched (unpinned) device connectors are
   no-auth by construction and still receive no credentials.
 - **Egress uses the device's network.** Connector traffic from a device worker is not subject to
-  the gateway's allowlist/blocklist/egress-judge — those govern locally-spawned workers, not a
+  the gateway's allowlist/blocklist — those govern locally-spawned workers, not a
   remote device. Treat a device-pinned cloud connector as running on that machine's network.
 - **A device has one home workspace.** Each device row is owned by one user and attached to one
   workspace (`device_workers.organization_id`). The approver picks that home when pairing

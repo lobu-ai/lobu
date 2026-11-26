@@ -44,7 +44,7 @@ export interface WorkerTokenData {
   agentId?: string;
   /**
    * Owning organization of the agent the token was minted for. Used by the
-   * HTTP proxy to scope per-tenant caches (e.g. egress-judge verdict cache)
+   * HTTP proxy to scope per-tenant lookups (e.g. per-agent grants)
    * so org A's decisions can never satisfy org B's requests. Optional only
    * because some internal/preflight call sites mint tokens before the owning
    * org has been resolved; production agent runs always set it.

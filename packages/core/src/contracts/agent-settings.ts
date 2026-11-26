@@ -25,7 +25,6 @@
  * REST PATCH bodies and sanitized GET responses stay with the route that owns them.
  */
 import { type Static, Type } from "@sinclair/typebox";
-import type { GuardrailStage } from "../guardrails/types";
 
 // ── Nested schemas ──────────────────────────────────────────────────────────
 
@@ -40,24 +39,6 @@ export const NixConfigSchema = Type.Object({
   packages: Type.Optional(Type.Array(Type.String())),
 });
 export type NixConfig = Static<typeof NixConfigSchema>;
-
-// GuardrailStage lives in guardrails/types.ts as the canonical union. The
-// schema mirrors it exactly; if the union grows, the _StageCheck assertion
-// below fails at compile time. (TypeBox can't derive from a TS type at
-// runtime, so this is the minimal, guarded duplication — not a parallel
-// definition that can silently drift.)
-const GUARDRAIL_STAGES = ["input", "output", "pre-tool", "egress"] as const;
-export const GuardrailStageSchema = Type.Union(
-  GUARDRAIL_STAGES.map((s) => Type.Literal(s))
-);
-// Compile-time bidirectional check: GUARDRAIL_STAGES must match GuardrailStage.
-type _StageCheck = GuardrailStage extends (typeof GUARDRAIL_STAGES)[number]
-  ? (typeof GUARDRAIL_STAGES)[number] extends GuardrailStage
-    ? true
-    : never
-  : never;
-const _stageCheck: _StageCheck = true;
-void _stageCheck;
 
 /**
  * A skill as `lobu.config.ts` declares it. Agent settings no longer carry
