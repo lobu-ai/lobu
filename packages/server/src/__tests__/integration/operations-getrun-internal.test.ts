@@ -260,4 +260,66 @@ describe("manage_operations get_run — internal runs", () => {
 		expect(got.exit_signal).toBe("SIGTERM");
 		expect(got.output_tail).toContain("MCP server handshake failed");
 	});
+
+	it("classifies an image-unsupported error_message into error_code for the peek pane", async () => {
+		const db = getTestDb();
+		const [row] = (await db`
+      INSERT INTO runs (organization_id, run_type, action_key, status,
+        error_message, created_at, run_at)
+      VALUES (${orgId}, 'automation', null, 'failed',
+        'Cannot read "image" (this model does not support image input). Inform the user.',
+        now(), now())
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+		const id = Number(row.id);
+
+		const got = (await getRun(id)).run as Record<string, unknown>;
+		// The raw vendor string stays for logs; each run surface renders the
+		// catalog message + CTA from this code instead.
+		expect(got.error_code).toBe("MODEL_IMAGE_UNSUPPORTED");
+		expect(got.error_message).toContain("does not support image input");
+
+		const listed = (await manageOperations(
+			{ action: "list_runs", run_types: ["automation"] },
+			env,
+			ctx(),
+		)) as { runs: Array<Record<string, unknown>> };
+		const listedRun = listed.runs.find((r) => Number(r.id) === id);
+		expect(listedRun?.error_code).toBe("MODEL_IMAGE_UNSUPPORTED");
+
+		const activity = (await manageOperations(
+			{ action: "list_activity", include_notifications: false, aggregate: false },
+			env,
+			ctx(),
+		)) as { items: Array<Record<string, unknown>> };
+		const card = activity.items.find((item) => Number(item.run_id) === id);
+		expect(card?.body).toContain("can't read images");
+		expect(card?.body).not.toContain("does not support image input");
+	});
+
+	it("leaves a non-agent run's error raw: the catalog is an agent vocabulary", async () => {
+		const db = getTestDb();
+		// The isolate executor's wording, which the catalog maps to the agent's
+		// "didn't finish responding" for an agent turn — wrong for a connector run.
+		const [row] = (await db`
+      INSERT INTO runs (organization_id, run_type, action_key, status,
+        error_message, created_at, run_at)
+      VALUES (${orgId}, 'internal', 'entity_change', 'failed',
+        'Execution timed out after 600000ms', now(), now())
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+		const id = Number(row.id);
+
+		const got = (await getRun(id)).run as Record<string, unknown>;
+		expect(got.error_code).toBeNull();
+		expect(got.error_message).toBe("Execution timed out after 600000ms");
+
+		const activity = (await manageOperations(
+			{ action: "list_activity", include_notifications: false, aggregate: false },
+			env,
+			ctx(),
+		)) as { items: Array<Record<string, unknown>> };
+		const card = activity.items.find((item) => Number(item.run_id) === id);
+		expect(card?.body).toBe("Execution timed out after 600000ms");
+	});
 });

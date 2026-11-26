@@ -194,6 +194,8 @@ export const AutomationMetadataSchema = Type.Object({
   last_scheduling_error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   /** Latest run's write-time outcome classification (null until stamped). */
   last_run_outcome: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  /** `AgentErrorCode` classifying the latest run error (null when unclassified). */
+  automation_run_error_code: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
 export type AutomationMetadata = Static<typeof AutomationMetadataSchema>;
 

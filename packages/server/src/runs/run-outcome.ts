@@ -90,6 +90,31 @@ const INFRA_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * Run types whose failures are agent turns. The `classifyErrorMessage` catalog
+ * is an agent/provider vocabulary, so a connector sync's "Execution timed out
+ * after …ms" must not read back as "The agent didn't finish responding".
+ */
+const AGENT_RUN_TYPES: ReadonlySet<string> = new Set([
+	"automation",
+	"agent_turn",
+	"chat_message",
+]);
+
+/**
+ * The `AgentErrorCode` a run surface renders for a stored failure, derived at
+ * read time from the raw `error_message` by THE catalog. Null for non-agent run
+ * types, empty messages, and anything the catalog cannot place.
+ */
+export function runErrorCode(
+	runType: unknown,
+	errorMessage: unknown,
+): AgentErrorCode | null {
+	if (typeof runType !== "string" || !AGENT_RUN_TYPES.has(runType)) return null;
+	if (typeof errorMessage !== "string" || !errorMessage) return null;
+	return classifyErrorMessage(errorMessage) ?? null;
+}
+
+/**
  * The `error_message` a run carries when `claim_next_window` cancels it because
  * the Automation's arrival mark moved past the range it was queued for.
  *

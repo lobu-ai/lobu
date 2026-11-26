@@ -186,6 +186,14 @@ export function classifyErrorMessage(
     )
   )
     return AgentErrorCode.PROVIDER_UNKNOWN_MODEL;
+  // The model was asked to read an image but has no vision. The upstream shape
+  // is an internal instruction ("Cannot read \"image\" (this model does not
+  // support image input). Inform the user.") leaked verbatim — never useful to a
+  // human. Match the wording rather than that one sentence, because the same
+  // capability gap arrives phrased differently per vendor ("The current model
+  // does not support image input", "does not support image inputs…").
+  if (/does not support image(?:s| input(?:s)?)\b/i.test(message))
+    return AgentErrorCode.MODEL_IMAGE_UNSUPPORTED;
   // model-resolver.ts / session-runner.ts throw this when a non-OpenAI
   // provider cannot be routed through the Lobu gateway proxy. This is usually a
   // provider/model configuration issue, not an agent crash.

@@ -13,6 +13,7 @@ import {
 	pgTextArray,
 } from "../../../../db/client";
 import { GATEWAY_INLINE_OWNER_PREFIX } from "../../../../runs/run-lease";
+import { runErrorCode } from "../../../../runs/run-outcome";
 import { describeNonDeviceWorkerId } from "../../../../utils/device-worker-id";
 import { ToolUserError, withFailureCode } from "../../../../utils/errors";
 import type { ToolContext } from "../../../registry";
@@ -274,6 +275,7 @@ export async function handleListRuns(
   const runs = await Promise.all(
     pageRows.map(async ({ policy_principal_kind, policy_principal_id, ...row }) => ({
       ...publicRunRecord(row, skillBodies),
+      error_code: runErrorCode(row.run_type, row.error_message),
       policy_principal: await policyPrincipalOf(
         policy_principal_kind as string | null,
         policy_principal_id as string | null,
@@ -328,10 +330,11 @@ export async function handleGetRun(
     LIMIT 1
   `;
 	if (rows.length === 0) return withFailureCode({ error: "Run not found" }, "NOT_FOUND");
+	const row = rows[0] as Record<string, unknown>;
 	return {
 		action: "get_run",
 		run: publicRunRecord(
-			rows[0] as Record<string, unknown>,
+			{ ...row, error_code: runErrorCode(row.run_type, row.error_message) },
 			await skillBodiesFor(rows, ctx),
 		),
 	};
