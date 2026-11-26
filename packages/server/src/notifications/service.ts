@@ -1586,8 +1586,11 @@ function approvalDecisionSql(sql: DbClient, userId: string) {
 		join: sql`LEFT JOIN events pe
       ON COALESCE(e.metadata->>'notification_type', 'generic') = 'action_approval_needed'
      AND e.metadata->>'resource_type' = 'event'
-     AND e.metadata->>'resource_id' ~ '^[0-9]+$'
-     AND pe.id = (e.metadata->>'resource_id')::bigint
+     -- Other notification kinds carry text ids (invitations). The guard must
+     -- sit inside the CASE: as a sibling AND, the planner uses the cast as the
+     -- index key for every outer row before the guard ever runs.
+     AND pe.id = CASE WHEN e.metadata->>'resource_id' ~ '^[0-9]+$'
+       THEN (e.metadata->>'resource_id')::bigint END
      AND pe.organization_id = e.organization_id
      AND pe.interaction_type = 'approval'
     LEFT JOIN runs ar
