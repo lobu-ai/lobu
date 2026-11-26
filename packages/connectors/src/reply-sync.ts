@@ -1,16 +1,21 @@
 /**
  * Bounded reply sync for social timeline feeds.
  *
- * A timeline post page reads a post's replies as child events of that post:
- * same connection, `origin_parent_id` = the post's `origin_id`, nested replies
- * naming the comment they answer in `metadata.parent_comment_author`. Feeds
- * that store posts can opt into fetching those replies in the same sync.
+ * Feeds that store posts can also store a bounded slice of each post's reply
+ * tree in the same sync. Each reply is mapped exactly like the connector's
+ * own comment feeds map it (same origin_id, same `origin_parent_id` = the
+ * immediate parent: the post for a top-level reply, the comment it answers
+ * otherwise), so a comment synced by two feeds is one unchanged row.
  *
  * Timelines are large (a Reddit home feed brings thousands of posts a day), so
  * every knob here is a cap: how many posts per sync get replies, how many
  * top-level and nested replies per post, how deep, and when an already-fetched
  * post is worth fetching again. The checkpoint remembers each fetched post's
  * comment count so an unchanged thread is never re-read.
+ *
+ * Replies are optional: every reply request is bounded by a timeout and the
+ * reply phase's budget, and a failed or slow thread is skipped so it can never
+ * block or fail the sync of the posts themselves.
  */
 
 export interface ReplySyncLimits {
@@ -168,38 +173,69 @@ export function selectReplyPosts<T extends ReplyCandidate>(
   return [...fresh, ...refresh].slice(0, limits.postsPerSync);
 }
 
-export interface KeptReply<T> {
-  node: T;
-  /** 1 for a top-level reply. */
-  depth: number;
-  /** The reply this one answers; null for a top-level reply. */
-  parent: T | null;
-}
-
 /**
  * Walk a ranked reply tree keeping at most `maxTopLevel` top-level replies,
- * `maxNested` replies under each kept reply, down to `maxDepth` levels.
- * `children` must return a node's replies in the order to keep them;
- * a reply that fails `keep` (deleted, removed) is skipped with its subtree.
+ * `maxNested` replies under each kept reply, down to `maxDepth` levels, in
+ * pre-order. `children` must return a node's replies in the order to keep
+ * them; a reply that fails `keep` (deleted, removed) is skipped with its subtree.
  */
 export function boundedReplyTree<T>(
   roots: T[],
   limits: ReplySyncLimits,
   children: (node: T) => T[],
   keep: (node: T) => boolean
-): KeptReply<T>[] {
-  const kept: KeptReply<T>[] = [];
-  const visit = (nodes: T[], depth: number, parent: T | null) => {
+): T[] {
+  const kept: T[] = [];
+  const visit = (nodes: T[], depth: number) => {
     const cap = depth === 1 ? limits.maxTopLevel : limits.maxNested;
     let count = 0;
     for (const node of nodes) {
       if (count >= cap) break;
       if (!keep(node)) continue;
       count++;
-      kept.push({ node, depth, parent });
-      if (depth < limits.maxDepth) visit(children(node), depth + 1, node);
+      kept.push(node);
+      if (depth < limits.maxDepth) visit(children(node), depth + 1);
     }
   };
-  visit(roots, 1, null);
+  visit(roots, 1);
   return kept;
+}
+
+// The whole reply phase of one sync, and any single reply request in it.
+const REPLY_PHASE_BUDGET_MS = 60_000;
+const REPLY_REQUEST_TIMEOUT_MS = 10_000;
+
+/** When the reply phase starting now must end, never past the sync's own deadline. */
+export function replyPhaseDeadline({
+  syncDeadline = Number.POSITIVE_INFINITY,
+  budgetMs = REPLY_PHASE_BUDGET_MS,
+}: { syncDeadline?: number; budgetMs?: number } = {}): number {
+  return Math.min(syncDeadline, Date.now() + budgetMs);
+}
+
+/**
+ * Run one reply request — fetch and body read — under a timeout of
+ * min(per-request cap, time left until `deadline`). The signal aborts the
+ * request; the race guarantees the caller moves on even if the transport
+ * ignores the signal. Rejects on timeout, or at once when no time is left.
+ */
+export async function withinReplyBudget<T>(
+  deadline: number,
+  run: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const timeoutMs = Math.min(REPLY_REQUEST_TIMEOUT_MS, deadline - Date.now());
+  if (timeoutMs <= 0) throw new Error('Reply sync budget exhausted');
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Reply request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([run(controller.signal), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

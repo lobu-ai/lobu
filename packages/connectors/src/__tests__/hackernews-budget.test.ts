@@ -120,9 +120,9 @@ test('front-page schema accepts every story and reply kind the mapper emits', as
   ]);
 });
 
-// Front-page post pages read replies as child events of the story on the same
-// connection (origin_parent_id = the story's origin_id). Replies are fetched
-// for a bounded number of stories per sync from the Algolia items endpoint.
+// Front-page replies are fetched for a bounded number of stories per sync from
+// the Algolia items endpoint and stored exactly as the comments feed stores the
+// same comment: origin_parent_id is the story or the comment it answers.
 function frontPageHit(id: string, numComments: number) {
   return {
     objectID: id,
@@ -138,8 +138,35 @@ function frontPageHit(id: string, numComments: number) {
   };
 }
 
-function comment(id: number, author: string | null, text: string | null, children: unknown[] = []) {
-  return { id, type: 'comment', author, text, created_at_i: 1_767_225_600 + id, children };
+interface ItemNode {
+  id: number;
+  parent_id?: number;
+  story_id?: number;
+  children: ItemNode[];
+  [key: string]: unknown;
+}
+
+function comment(id: number, author: string | null, text: string | null, children: ItemNode[] = []): ItemNode {
+  const createdAt = 1_767_225_600 + id;
+  return {
+    id,
+    type: 'comment',
+    author,
+    text,
+    created_at: new Date(createdAt * 1000).toISOString(),
+    created_at_i: createdAt,
+    children,
+  };
+}
+
+// The items endpoint names each comment's parent and story.
+function withLineage(nodes: ItemNode[], parentId: number, storyId: number): ItemNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    parent_id: parentId,
+    story_id: storyId,
+    children: withLineage(node.children, node.id, storyId),
+  }));
 }
 
 function storyItem(id: number) {
@@ -149,7 +176,7 @@ function storyItem(id: number) {
     author: 'poster',
     text: null,
     created_at_i: 1_767_225_600,
-    children: [
+    children: withLineage([
       // No replies: ranks below the busier thread despite being older.
       comment(101, 'alice', 'Quiet <i>one</i>'),
       comment(102, 'bob', 'It&#x27;s a &gt; b<p>See <a href="https://example.com/a/very/long/path" rel="nofollow">https://example.com/a/very/lo...</a>', [
@@ -160,7 +187,7 @@ function storyItem(id: number) {
       ]),
       // Ties alice on thread size but is newer, so it is the one over the cap.
       comment(103, 'gina', 'Third top-level, over the cap'),
-    ],
+    ], id, id),
   };
 }
 
@@ -189,7 +216,7 @@ const replyCaps = {
   reply_refresh_min_new_comments: 20,
 };
 
-test('front page stores bounded replies as child events of the most-commented story', async () => {
+test('front page stores bounded replies of the most-commented story with comment lineage', async () => {
   const itemFetches = mockFrontPage([frontPageHit('1', 0), frontPageHit('2', 40), frontPageHit('3', 120)]);
   const { default: HackerNewsConnector } = await import('../hackernews');
   const result = await runSync(new HackerNewsConnector(), {
@@ -210,7 +237,13 @@ test('front page stores bounded replies as child events of the most-commented st
     'hn_comment_203',
     'hn_comment_101',
   ]);
-  for (const reply of replies) expect(reply.origin_parent_id).toBe('hn_story_3');
+  // Top-level replies hang off the story, nested ones off the comment they answer.
+  expect(replies.map((event) => event.origin_parent_id)).toEqual([
+    'hn_story_3',
+    'hn_comment_102',
+    'hn_comment_102',
+    'hn_story_3',
+  ]);
 
   const [bob, carol, erin, alice] = replies;
   expect(bob).toMatchObject({
@@ -219,11 +252,12 @@ test('front page stores bounded replies as child events of the most-commented st
     source_url: 'https://news.ycombinator.com/item?id=102',
     occurred_at: new Date((1_767_225_600 + 102) * 1000),
   });
-  expect(bob.metadata).not.toHaveProperty('parent_comment_author');
-  expect(carol.metadata).toMatchObject({
-    parent_comment_author: 'bob',
-    parent_comment_origin_id: 'hn_comment_102',
-    reply_depth: 2,
+  expect(carol.metadata).toEqual({
+    type: 'comment',
+    story_id: 3,
+    parent_id: 102,
+    created_at_i: 1_767_225_600 + 201,
+    tags: ['comment', 'author_carol', 'story_3'],
   });
   expect(erin.payload_text).toBe('  indented\n  code');
   expect(alice.payload_text).toBe('Quiet one');
@@ -257,6 +291,82 @@ test('front page skips stored threads until their comment count grows enough', a
   expect(grown.itemFetches).toEqual(['5', '3']);
   expect(grown.result.checkpoint?.reply_counts).toEqual({ hn_story_2: 40, hn_story_3: 150, hn_story_5: 3 });
 });
+
+test('a comment synced by front page and by the comments feed is the same row', async () => {
+  const itemFetches = mockFrontPage([frontPageHit('3', 120)]);
+  const { default: HackerNewsConnector } = await import('../hackernews');
+  const frontPage = await runSync(new HackerNewsConnector(), {
+    feedKey: 'front_page',
+    config: replyCaps,
+    checkpoint: null,
+    // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
+  } as any);
+  expect(itemFetches).toEqual(['3']);
+
+  // The same two comments as `/search?tags=comment` returns them.
+  const [carol] = storyItem(3).children[1].children;
+  const [bob] = storyItem(3).children.slice(1);
+  const searchHit = (node: ItemNode) => ({
+    objectID: String(node.id),
+    created_at: node.created_at,
+    created_at_i: node.created_at_i,
+    author: node.author,
+    comment_text: node.text,
+    story_id: node.story_id,
+    parent_id: node.parent_id,
+    _tags: ['comment', `author_${node.author}`, `story_${node.story_id}`],
+  });
+  globalThis.fetch = (async () =>
+    Response.json({
+      hits: [searchHit(bob), searchHit(carol)],
+      nbHits: 2,
+      page: 0,
+      nbPages: 1,
+      hitsPerPage: 100,
+    })) as unknown as typeof fetch;
+  const comments = await runSync(new HackerNewsConnector(), {
+    feedKey: 'comments',
+    config: { search_query: 'x' },
+    checkpoint: null,
+    // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
+  } as any);
+
+  for (const originId of ['hn_comment_102', 'hn_comment_201']) {
+    const fromFrontPage = frontPage.events.find((event) => event.origin_id === originId);
+    const fromComments = comments.events.find((event) => event.origin_id === originId);
+    expect(fromFrontPage).toBeDefined();
+    expect(fromFrontPage).toEqual(fromComments);
+  }
+});
+
+test('a stalled items endpoint skips replies and still commits the front page', async () => {
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(typeof input === 'string' ? input : input.toString());
+    if (url.pathname === '/api/v1/search') {
+      const hits = [frontPageHit('3', 120)];
+      return Response.json({ hits, nbHits: 1, page: 0, nbPages: 1, hitsPerPage: 100 });
+    }
+    // Never answers and ignores the abort signal.
+    return new Promise<Response>(() => {});
+  }) as typeof fetch;
+  const { default: HackerNewsConnector } = await import('../hackernews');
+  const connector = new HackerNewsConnector();
+  // Shrink the sync budget so the reply request's timeout is the remaining budget.
+  (connector as unknown as { SYNC_BUDGET_MS: number }).SYNC_BUDGET_MS = 200;
+
+  const result = await runSync(connector, {
+    feedKey: 'front_page',
+    config: replyCaps,
+    checkpoint: null,
+    // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
+  } as any);
+
+  expect(result.status).toBe('complete');
+  expect(result.events.map((event) => event.origin_id)).toEqual(['hn_story_3']);
+  expect(result.metadata).toMatchObject({ replies_found: 0, reply_fetch_failures: 1 });
+  // The thread was not read, so the next sync tries it again.
+  expect(result.checkpoint?.reply_counts).toEqual({});
+}, 5_000);
 
 test('reply_posts_per_sync 0 turns front-page reply sync off', async () => {
   const itemFetches = mockFrontPage([frontPageHit('3', 120)]);

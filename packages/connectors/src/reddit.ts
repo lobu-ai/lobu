@@ -29,8 +29,10 @@ import {
   readReplyCounts,
   readReplySyncLimits,
   replyCountsCheckpoint,
+  replyPhaseDeadline,
   replySyncConfigProperties,
   selectReplyPosts,
+  withinReplyBudget,
 } from './reply-sync';
 
 // ---------------------------------------------------------------------------
@@ -347,9 +349,10 @@ export default class RedditConnector extends ConnectorRuntime {
               default: 7,
               description: 'Skip home feed posts older than this many days.',
             },
-            // Replies are stored as `comment` events whose origin_parent_id is
-            // the post's origin_id. Defaults: 5 posts per sync, 10 top-level
-            // replies, 2 nested replies each, 2 levels, re-fetch after 50 new
+            // Replies are stored as `comment` events exactly as the comments
+            // feed stores them (origin_parent_id = the post or the comment
+            // answered). Defaults: 5 posts per sync, 10 top-level replies,
+            // 2 nested replies each, 2 levels, re-fetch after 50 new
             // comments — at most 150 replies per sync.
             ...replySyncConfigProperties,
           },
@@ -376,16 +379,12 @@ export default class RedditConnector extends ConnectorRuntime {
             },
           },
           comment: {
-            description:
-              'A reply on a home feed post; origin_parent_id is the post, metadata names the comment it answers',
+            description: 'A Reddit comment on a home feed post',
             metadataSchema: {
               type: 'object',
               properties: {
                 subreddit: { type: 'string' },
                 score: { type: 'number', description: 'Reddit score (upvotes - downvotes)' },
-                reply_depth: { type: 'number', description: '1 for a top-level reply' },
-                parent_comment_author: { type: 'string' },
-                parent_comment_origin_id: { type: 'string' },
               },
             },
           },
@@ -396,6 +395,8 @@ export default class RedditConnector extends ConnectorRuntime {
 
   private readonly MAX_PAGES = 10;
   private readonly RATE_LIMIT_MS = 1000;
+  // Wall-clock budget for fetching home feed replies in one sync.
+  private readonly REPLY_PHASE_BUDGET_MS = 60_000;
   private readonly USER_AGENT = 'Lobu-Connector/1.0.0';
 
   private async inboxPage(
@@ -698,9 +699,12 @@ export default class RedditConnector extends ConnectorRuntime {
 
   /**
    * Fetch the top-sorted comment trees of a bounded set of posts and keep a
-   * capped slice of each as child events of the post. Best-effort: a missing
-   * or forbidden thread is retried next sync, and any other failure stops
-   * reply fetching without failing the post sync.
+   * capped slice of each, mapped by the same `transformComment` as the
+   * comments and user_activity feeds so overlapping feeds store identical
+   * rows. Best-effort and bounded: each request (fetch and body) is cut off by
+   * `withinReplyBudget`; a missing, forbidden, malformed or slow thread is
+   * skipped and retried next sync, any other HTTP failure stops reply
+   * fetching, and nothing here throws, so the posts always commit.
    */
   private async collectReplies(args: {
     http: ReturnType<typeof createHttpClient>;
@@ -724,26 +728,31 @@ export default class RedditConnector extends ConnectorRuntime {
     // Ask for enough comments to fill nested slots after skipped ones.
     const requestLimit = Math.min(200, 2 * maxRepliesPerPost(limits));
 
+    const replyDeadline = replyPhaseDeadline({ budgetMs: this.REPLY_PHASE_BUDGET_MS });
     const events: EventEnvelope[] = [];
     const fetched: ReplyCounts = {};
     let failures = 0;
     for (const { post, originId, commentCount } of selected) {
       await sleep(this.RATE_LIMIT_MS);
+      if (Date.now() >= replyDeadline) break;
+      // No raw_json: the comments and user_activity listings are read without
+      // it, and the body must match theirs byte for byte.
       const params = new URLSearchParams({
         sort: 'top',
         depth: String(limits.maxDepth),
         limit: String(requestLimit),
-        raw_json: '1',
       });
       const url = `${baseUrl}/comments/${encodeURIComponent(post.id)}${isOAuth ? '' : '.json'}?${params}`;
 
       let response: unknown;
       try {
-        response = await http.get<unknown>(url);
+        response = await withinReplyBudget(replyDeadline, (signal) =>
+          http.get<unknown>(url, { signal })
+        );
       } catch (error) {
         failures++;
-        if (error instanceof HttpStatusError && [403, 404].includes(error.status)) continue;
-        break;
+        if (error instanceof HttpStatusError && ![403, 404].includes(error.status)) break;
+        continue;
       }
       const roots = Array.isArray(response)
         ? (response[1] as { data?: { children?: unknown } } | undefined)?.data?.children
@@ -773,23 +782,7 @@ export default class RedditConnector extends ConnectorRuntime {
           );
         }
       );
-      for (const { node, depth, parent } of kept) {
-        const reply = this.transformComment(node.data);
-        events.push({
-          ...reply,
-          origin_parent_id: originId,
-          metadata: {
-            ...reply.metadata,
-            reply_depth: depth,
-            ...(parent
-              ? {
-                  parent_comment_author: parent.data.author,
-                  parent_comment_origin_id: `reddit_comment_${parent.data.name}`,
-                }
-              : {}),
-          },
-        });
-      }
+      for (const node of kept) events.push(this.transformComment(node.data));
       fetched[originId] = commentCount;
     }
 

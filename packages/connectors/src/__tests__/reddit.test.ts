@@ -574,9 +574,15 @@ describe('RedditConnector runtime', () => {
     }
   );
 
-  // Timeline post pages read replies as child events of the post on the same
-  // connection, so home_feed stores a bounded slice of each busy thread.
-  function thread(id: string, author: string, body: string, extra: Record<string, unknown> = {}, replies: unknown[] = []) {
+  // home_feed stores a bounded slice of each busy thread, each reply exactly as
+  // the comments feed stores it (origin_parent_id = the post or the parent comment).
+  function thread(
+    id: string,
+    author: string,
+    body: string,
+    extra: Record<string, unknown> = {},
+    replies: ReturnType<typeof thread>[] = []
+  ): { kind: string; data: ReturnType<typeof redditComment>['data'] & Record<string, unknown> } {
     return {
       kind: 't1',
       data: {
@@ -585,13 +591,21 @@ describe('RedditConnector runtime', () => {
         body,
         link_id: 't3_busy',
         permalink: `/r/lobu/comments/busy/post/${id}/`,
-        replies: replies.length ? { kind: 'Listing', data: { children: replies, after: null } } : '',
+        replies: replies.length
+          ? {
+              kind: 'Listing',
+              data: { children: replies.map((reply) => ({ ...reply, data: { ...reply.data, parent_id: `t1_${id}` } })), after: null },
+            }
+          : '',
         ...extra,
       },
     };
   }
 
-  function mockHomeFeedWithThreads(posts: ReturnType<typeof redditPost>[], threads: Record<string, unknown[] | number>) {
+  function mockHomeFeedWithThreads(
+    posts: ReturnType<typeof redditPost>[],
+    threads: Record<string, unknown[] | number | 'stall'>
+  ) {
     const commentUrls: URL[] = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(input.toString());
@@ -600,6 +614,8 @@ describe('RedditConnector runtime', () => {
       const id = url.pathname.split('/').at(-1)!;
       const comments = threads[id];
       if (typeof comments === 'number') return new Response('error', { status: comments });
+      // Never answers and ignores the abort signal.
+      if (comments === 'stall') return new Promise<Response>(() => {});
       return Response.json([
         { kind: 'Listing', data: { children: [], after: null } },
         { kind: 'Listing', data: { children: comments ?? [], after: null } },
@@ -622,7 +638,7 @@ describe('RedditConnector runtime', () => {
     reply_refresh_min_new_comments: 50,
   };
 
-  test('home_feed stores bounded replies of the most-commented post as its child events', async () => {
+  test('home_feed stores bounded replies of the most-commented post with comment lineage', async () => {
     const commentUrls = mockHomeFeedWithThreads(
       [postWithComments('quiet', 2), postWithComments('busy', 300), postWithComments('none', 0)],
       {
@@ -651,10 +667,10 @@ describe('RedditConnector runtime', () => {
     expect(commentUrls.map((url) => `${url.origin}${url.pathname}`)).toEqual([
       'https://oauth.reddit.com/comments/busy',
     ]);
-    expect(Object.fromEntries(commentUrls[0].searchParams)).toMatchObject({
+    expect(Object.fromEntries(commentUrls[0].searchParams)).toEqual({
       sort: 'top',
       depth: '2',
-      raw_json: '1',
+      limit: '8',
     });
     const replies = result.events.filter((event) => event.origin_type === 'comment');
     expect(replies.map((event) => event.origin_id)).toEqual([
@@ -662,18 +678,16 @@ describe('RedditConnector runtime', () => {
       'reddit_comment_t1_nested',
       'reddit_comment_t1_second',
     ]);
-    for (const reply of replies) expect(reply.origin_parent_id).toBe('reddit_post_t3_busy');
-    const [top, nested] = replies;
-    expect(top).toMatchObject({
+    expect(replies.map((event) => event.origin_parent_id)).toEqual([
+      'reddit_post_t3_busy',
+      'reddit_comment_t1_top',
+      'reddit_post_t3_busy',
+    ]);
+    expect(replies[0]).toMatchObject({
       author_name: 'alice',
       payload_text: 'Top reply & more',
       source_url: 'https://reddit.com/r/lobu/comments/busy/post/top/',
-    });
-    expect(top.metadata).not.toHaveProperty('parent_comment_author');
-    expect(nested.metadata).toMatchObject({
-      parent_comment_author: 'alice',
-      parent_comment_origin_id: 'reddit_comment_t1_top',
-      reply_depth: 2,
+      metadata: { subreddit: 'lobu', score: 3 },
     });
     expect(result.checkpoint?.reply_counts).toEqual({ reddit_post_t3_busy: 300 });
 
@@ -704,6 +718,64 @@ describe('RedditConnector runtime', () => {
     });
     expect(result.metadata).toMatchObject({ reply_fetch_failures: 1 });
   });
+
+  test('a comment synced by home_feed and by the comments feed is the same row', async () => {
+    const nested = thread('nested', 'bob', 'Nested reply');
+    const top = thread('top', 'alice', 'Top reply', {}, [nested]);
+    mockHomeFeedWithThreads([postWithComments('busy', 300)], { busy: [top] });
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    const homeFeed = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: replyCaps,
+      credentials: { accessToken: 'token' },
+      checkpoint: null,
+    });
+
+    // The same comments as a subreddit comments listing returns them.
+    const { replies: _topReplies, ...topData } = top.data;
+    const nestedData = { ...nested.data, parent_id: 't1_top' };
+    globalThis.fetch = (async () =>
+      listing([{ kind: 't1', data: topData }, { kind: 't1', data: nestedData }])) as unknown as typeof fetch;
+    const comments = await runSync(new RedditConnector(), {
+      feedKey: 'comments',
+      config: { subreddit: 'lobu' },
+      credentials: { accessToken: 'token' },
+      checkpoint: {},
+    });
+
+    for (const originId of ['reddit_comment_t1_top', 'reddit_comment_t1_nested']) {
+      const fromHomeFeed = homeFeed.events.find((event) => event.origin_id === originId);
+      const fromComments = comments.events.find((event) => event.origin_id === originId);
+      expect(fromHomeFeed).toBeDefined();
+      expect(fromHomeFeed).toEqual(fromComments);
+    }
+  });
+
+  test('home_feed skips a stalled thread and still commits its posts', async () => {
+    mockHomeFeedWithThreads(
+      [postWithComments('busy', 300), postWithComments('next', 100)],
+      { busy: 'stall', next: [thread('ok', 'gina', 'Answered')] }
+    );
+    const connector = new RedditConnector();
+    connector.RATE_LIMIT_MS = 0;
+    (connector as unknown as { REPLY_PHASE_BUDGET_MS: number }).REPLY_PHASE_BUDGET_MS = 200;
+    const result = await runSync(connector, {
+      feedKey: 'home_feed',
+      config: { ...replyCaps, reply_posts_per_sync: 2 },
+      credentials: { accessToken: 'token' },
+      checkpoint: null,
+    });
+
+    // The stall used the whole reply budget: no replies, posts committed,
+    // and neither thread is recorded, so the next sync retries both.
+    expect(result.events.map((event) => event.origin_id)).toEqual([
+      'reddit_post_t3_busy',
+      'reddit_post_t3_next',
+    ]);
+    expect(result.metadata).toMatchObject({ replies_found: 0, reply_fetch_failures: 1 });
+    expect(result.checkpoint?.reply_counts).toEqual({});
+  }, 5_000);
 
   test('names the subreddit in the error raised for a 404 listing', async () => {
     globalThis.fetch = (async () => new Response('not found', { status: 404 })) as typeof fetch;
