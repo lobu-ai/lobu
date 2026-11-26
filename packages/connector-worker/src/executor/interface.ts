@@ -17,6 +17,7 @@ import type {
   SyncCredentials,
   WebhookRegistration,
 } from '@lobu/connector-sdk';
+import type { ToolErrorCode } from '@lobu/core/connector-query-errors';
 import type { ConnectorHttpRequest, ConnectorHttpResponse } from '@lobu/core/contracts/worker/protocol';
 
 /**
@@ -172,6 +173,8 @@ export type ExecutorResult =
        * then holds what it reported alongside, such as a refusal `code`.
        */
       error?: string;
+      /** The refusal's typed cause, when the action named a catalog code. */
+      error_code?: ToolErrorCode;
     }
   | {
       mode: 'authenticate';

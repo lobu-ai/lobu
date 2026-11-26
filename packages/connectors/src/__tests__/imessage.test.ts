@@ -575,11 +575,43 @@ describe('iMessage connector over the existing shell operation', () => {
       }),
     });
     expect(result.success).toBe(false);
+    expect(result.error_code).toBe('ACTION_FAILED');
     expect(JSON.parse(String(result.error))).toMatchObject({
       run_id: 789,
       exit_code: 1,
       stderr: 'Error: unable to open database file',
     });
+  });
+
+  it.each([
+    ['a shell run that timed out', completed({ exit_code: -1, stdout: '', stderr: '', timed_out: true }), 'UPSTREAM_TIMEOUT'],
+    [
+      'a failed shell run that exited non-zero',
+      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command exited with code 1', output: { exit_code: 1, stdout: '', stderr: 'boom', timed_out: false } },
+      'ACTION_FAILED',
+    ],
+    ['a shell run the caller stopped waiting for', { action: 'execute', status: 'timeout', run_id: 789, error_message: 'Run 789 timed out' }, 'UPSTREAM_TIMEOUT'],
+    [
+      'a shell run that never started',
+      { action: 'execute', status: 'failed', run_id: 789, error_message: 'Shell command failed to start', output: { exit_code: -1, process_error: 'spawn ENOENT', timed_out: false } },
+      undefined,
+    ],
+    ['a delegation refusal', { error: 'Connection 123 is not available' }, undefined],
+  ] as const)('codes %s from its structure', async (_label, receipt, code) => {
+    const { result } = await invoke('list_chats', {}, { receipt });
+    expect(result.success).toBe(false);
+    expect(result.error_code).toBe(code);
+  });
+
+  it('refuses a connection without a shell connection as an unmet precondition', async () => {
+    const result = await connector.execute({
+      actionKey: 'list_chats',
+      input: {},
+      config: {},
+      credentials: null,
+      operations: { execute: async () => ({}) },
+    } as unknown as ActionContext);
+    expect(result).toMatchObject({ success: false, error_code: 'PRECONDITION_FAILED' });
   });
 
   it('reports a truncated shell page as a lower-limit error', async () => {
@@ -789,6 +821,7 @@ describe('iMessage connector over the existing shell operation', () => {
       },
     );
     expect(result.success).toBe(false);
+    expect(result.error_code).toBe('ACTION_FAILED');
     const failure = JSON.parse(String(result.error));
     expect(failure).toMatchObject({
       status: 'failed',

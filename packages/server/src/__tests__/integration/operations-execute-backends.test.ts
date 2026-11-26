@@ -170,6 +170,12 @@ describe("operations.execute backend lifecycle", () => {
 						if (ctx.input.value === 'target-missing') {
 							throw Object.assign(new Error('Synthetic target was not found'), { status: 404 });
 						}
+						if (ctx.input.value === 'delivery-refused') {
+							return { success: false, error: 'Synthetic delivery was refused', error_code: 'ACTION_FAILED' };
+						}
+						if (ctx.input.value === 'forged-code') {
+							return { success: false, error: 'Synthetic refusal with a forged code', error_code: 'NOT_A_CATALOG_CODE' };
+						}
 						if (ctx.input.value === 'page-unrecognized') {
 							return { success: false, error: 'LinkedIn profile header was not found', output: { code: 'page_unrecognized' } };
 						}
@@ -497,6 +503,29 @@ describe("operations.execute backend lifecycle", () => {
 								?.value === "upstream-502"
 						) {
 							return new Response("bad gateway", { status: 502 });
+						}
+						if (
+							(request.params?.arguments as Record<string, unknown> | undefined)
+								?.value === "tool-error"
+						) {
+							return jsonResponse({
+								jsonrpc: "2.0",
+								id: request.id,
+								result: {
+									content: [{ type: "text", text: "Synthetic tool refused the call" }],
+									isError: true,
+								},
+							});
+						}
+						if (
+							(request.params?.arguments as Record<string, unknown> | undefined)
+								?.value === "protocol-error"
+						) {
+							return jsonResponse({
+								jsonrpc: "2.0",
+								id: request.id,
+								error: { code: -32603, message: "Synthetic internal error" },
+							});
 						}
 						if (
 							(request.params?.arguments as Record<string, unknown> | undefined)
@@ -1579,9 +1608,13 @@ describe("operations.execute backend lifecycle", () => {
 
 	it.each([
 		["a connector error's HTTP status", "local", { value: "target-missing" }, "NOT_FOUND", "user"],
+		["the code a refused action names", "local", { value: "delivery-refused" }, "ACTION_FAILED", "user"],
+		["no cause for a refusal naming a code outside the catalog", "local", { value: "forged-code" }, undefined, "system"],
 		["an upstream HTTP status", "http", { body: { value: "nul-failure" } }, "UPSTREAM_5XX", "dependency"],
 		["an upstream MCP server's HTTP status", "mcp", { value: "upstream-502" }, "UPSTREAM_5XX", "dependency"],
 		["an upstream MCP session rejection", "mcp", { value: "session-expired" }, "UPSTREAM_UNAVAILABLE", "dependency"],
+		["an MCP tool's own isError result", "mcp", { value: "tool-error" }, "ACTION_FAILED", "user"],
+		["no cause for an MCP JSON-RPC protocol error", "mcp", { value: "protocol-error" }, undefined, "system"],
 		["no cause for a redirect the request did not follow", "http", { body: { value: "redirect" } }, undefined, "system"],
 	] as const)("records an inline failure under %s", async (_label, backend, input, code, kind) => {
 		const target = {
@@ -1593,7 +1626,7 @@ describe("operations.execute backend lifecycle", () => {
 			action: "execute" as const,
 			...target,
 			input,
-			idempotency_key: `operation-backend-test:failure-code:${backend}:${code ?? "none"}`,
+			idempotency_key: `operation-backend-test:failure-code:${backend}:${JSON.stringify(input)}`,
 		};
 		const write = vi.spyOn(process.stdout, "write");
 		let result: Record<string, unknown>;

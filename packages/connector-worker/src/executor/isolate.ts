@@ -31,6 +31,7 @@ import type { EventEnvelope } from '@lobu/connector-sdk';
 import { decideEgress } from '@lobu/connector-sdk/egress-policy';
 import { type EgressAddressPolicy, isReservedIp, stripIpv6Brackets } from '@lobu/connector-sdk/ip-reachability';
 import { normalizeDomainPattern } from '@lobu/core';
+import { toToolErrorCode } from '@lobu/core/connector-query-errors';
 import { CredentialVault } from '../egress/credentials.js';
 import { CONNECTOR_HTTP_MAX_BYTES } from '@lobu/core/contracts/worker/protocol';
 import { isConnectorOperationRequest } from '@lobu/core/contracts/tools/manage-operations';
@@ -298,7 +299,7 @@ const GUEST_RUNNER = String.raw`
       });
       if (!actionResult) throw new Error("Action '" + job.actionKey + "' failed");
       if (!actionResult.success) {
-        return { mode: 'action', output: actionResult.output || {}, error: actionResult.error || ("Action '" + job.actionKey + "' failed") };
+        return { mode: 'action', output: actionResult.output || {}, error: actionResult.error || ("Action '" + job.actionKey + "' failed"), error_code: actionResult.error_code };
       }
       return { mode: 'action', output: actionResult.output || {} };
     }
@@ -1333,9 +1334,16 @@ export class IsolateExecutor implements SyncExecutor {
         throw new Error(`result: expected mode '${job.mode}', got '${String(outcome.result?.mode)}'`);
       }
       // A refusal's message is connector text, often an upstream body: redact it
-      // the way guestError redacts a thrown one.
+      // the way guestError redacts a thrown one. Its code is connector input
+      // too: keep it only when it names a catalog code.
       if (outcome.result.mode === 'action' && typeof outcome.result.error === 'string') {
-        return { ...outcome.result, error: redactOutput(outcome.result.error) };
+        const { error_code: reportedCode, ...refused } = outcome.result;
+        const errorCode = toToolErrorCode(reportedCode);
+        return {
+          ...refused,
+          error: redactOutput(outcome.result.error),
+          ...(errorCode ? { error_code: errorCode } : {}),
+        };
       }
       return outcome.result;
     } finally {
