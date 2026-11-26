@@ -975,6 +975,28 @@ describe("actions", () => {
     expect(result.error).toMatch(/capability_unavailable/);
   });
 
+  it.each([
+    ["not_found", 404],
+    ["invalid_request", 400],
+  ])("throws a %s refusal with the status the runtime classifies", async (state, status) => {
+    const { dispatcher } = makeDispatcher({
+      probe: READY,
+      send_message: { ok: false, error: { state, reason: "synthetic refusal" } },
+    });
+    const run = connector.execute({
+      actionKey: "send_message",
+      input: { chat_name: "Synthetic Nobody", text: "hi" },
+      credentials: null,
+      sessionState: { account_id: "15550000001@c.us" },
+      config: {},
+      browser: dispatcher,
+    } as never);
+    await expect(run).rejects.toMatchObject({
+      status,
+      message: `WhatsApp Web ${state}: synthetic refusal`,
+    });
+  });
+
   it("rejects an action the connector does not declare", async () => {
     const result = await connector.execute({
       actionKey: "delete_account",

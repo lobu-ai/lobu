@@ -1,4 +1,4 @@
-import { getErrorMessage } from "@lobu/core";
+import { executionFailureCode, getErrorMessage, ToolError, type ToolErrorCode } from "@lobu/core";
 import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
 import { LOST_LEASE_MESSAGE } from "../runs/run-lease";
 import { terminalizeInlineOperationRun } from "./operation-run-card";
@@ -19,7 +19,13 @@ export type HttpOperationExecutionResult =
 			output: Record<string, unknown>;
 			metadata?: Record<string, unknown>;
 	  }
-	| { status: "failed"; error_message: string; output?: Record<string, unknown> };
+	| {
+			status: "failed";
+			error_message: string;
+			output?: Record<string, unknown>;
+			/** The typed cause, when the failure's structure names one. */
+			error_code?: ToolErrorCode;
+	  };
 
 export interface HttpOperationConnection {
 	id: number;
@@ -131,6 +137,7 @@ async function failRun(
 	errorMessage: string,
 	deferTerminalWrite: boolean,
 	claimedBy: string,
+	errorCode?: ToolErrorCode,
 ): Promise<HttpOperationExecutionResult> {
 	// Upstream response text reaches here through getErrorMessage, so the
 	// message can carry NUL (0x00) that Postgres rejects (see streamContent).
@@ -144,11 +151,11 @@ async function failRun(
 			runId,
 			organizationId,
 			claimedBy,
-			{ status: "failed", errorMessage: message },
+			{ status: "failed", errorMessage: message, ...(errorCode ? { errorCode } : {}) },
 		);
 		if (!held) return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 	}
-	return { status: "failed", error_message: message };
+	return { status: "failed", error_message: message, ...(errorCode ? { error_code: errorCode } : {}) };
 }
 
 function requestAbortSignal(parent?: AbortSignal): {
@@ -173,7 +180,10 @@ function requestAbortSignal(parent?: AbortSignal): {
 	const timeout = setTimeout(
 		() =>
 			controller.abort(
-				new Error(`HTTP operation timed out after ${timeoutMs}ms`),
+				new ToolError(
+					"UPSTREAM_TIMEOUT",
+					`HTTP operation timed out after ${timeoutMs}ms`,
+				),
 			),
 		timeoutMs,
 	);
@@ -324,17 +334,30 @@ export async function executeHttpOperation(
 		if (!response.ok) {
 			const errorText =
 				typeof parsedBody === "string" ? parsedBody : `HTTP ${response.status}`;
+			// The upstream's status names the cause; a redirect the request did
+			// not follow names none, and stays unclassified.
+			const errorCode = executionFailureCode({ httpStatus: response.status });
 			if (!deferTerminalWrite) {
 				const held = await terminalizeInlineOperationRun(
 					runId,
 					organizationId,
 					claimedBy,
-					{ status: "failed", errorMessage: errorText, output },
+					{
+						status: "failed",
+						errorMessage: errorText,
+						output,
+						...(errorCode ? { errorCode } : {}),
+					},
 				);
 				if (!held)
 					return { status: "failed", error_message: LOST_LEASE_MESSAGE };
 			}
-			return { status: "failed", error_message: errorText, output };
+			return {
+				status: "failed",
+				error_message: errorText,
+				output,
+				...(errorCode ? { error_code: errorCode } : {}),
+			};
 		}
 
 		if (!deferTerminalWrite) {
@@ -354,6 +377,7 @@ export async function executeHttpOperation(
 			getErrorMessage(error),
 			deferTerminalWrite,
 			claimedBy,
+			executionFailureCode(error),
 		);
 	}
 }

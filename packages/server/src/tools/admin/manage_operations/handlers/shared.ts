@@ -1,10 +1,18 @@
+import type { ToolErrorCode } from "@lobu/core";
+
 type InlineExecutionResult =
 	| {
 			status: "completed";
 			output: Record<string, unknown>;
 			metadata?: Record<string, unknown>;
 	  }
-	| { status: "failed" | "blocked"; error_message: string; output?: Record<string, unknown> }
+	| {
+			status: "failed" | "blocked";
+			error_message: string;
+			output?: Record<string, unknown>;
+			/** The typed cause, when the failure's structure names one. */
+			error_code?: ToolErrorCode;
+	  }
 	| { status: "pending_approval" };
 
 type ConnectionRow = {

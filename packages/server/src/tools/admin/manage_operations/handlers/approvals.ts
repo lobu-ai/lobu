@@ -1558,6 +1558,7 @@ export async function handleApprove(
 			UPDATE runs SET status = 'failed', completed_at = NOW(),
 				action_output = ${result.output ? tx.json(result.output) : null},
 				error_message = ${result.error_message}
+				${result.error_code ? tx`, run_metadata = COALESCE(run_metadata, '{}'::jsonb) || ${tx.json({ error_code: result.error_code })}::jsonb` : tx``}
 			WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
 			${runLeaseFence(tx, inlineOwner)}
 			RETURNING id
@@ -1590,6 +1591,7 @@ export async function handleApprove(
 		connectorKey: resolved.connection.connector_key,
 		operationKey: run.action_key,
 		errorMessage: result.error_message,
+		errorCode: result.error_code,
 	});
 	return {
 		action: "approve",
