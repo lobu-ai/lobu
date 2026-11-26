@@ -166,16 +166,27 @@ describe("connector policy collection", () => {
     expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.audience).sort()).toEqual(["external", null]);
   });
 
-  it("refuses a rule's when in this release and names a malformed condition by field", async () => {
+  it("stores a rule's when as part of its identity and refuses malformed conditions by field", async () => {
     const before = await snapshot();
-    // Old replicas serve during the rolling deploy that adds the column, so no rule takes `when` yet.
     const external = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [{ field: "/to", op: "not_ends_with", value: "@acme.example" }] };
-    for (const rule of [external, { effect: "auto", when: external.when }]) {
-      const refused = await request("PUT", path(), { revision: before.revision, rules: [rule] });
-      expect(refused.status, JSON.stringify(rule)).toBe(400);
-      expect(await refused.json()).toEqual({ error: "invalid_request", message: "rules[0].when is not accepted yet." });
-    }
-    expect(await snapshot()).toEqual(before);
+    const secrets = { effect: "deny", kind: "guardrail", when: [{ scan: "secrets", field: "/body" }, { field: "/draft", op: "exists" }] };
+    const unconditional = { effect: "approval", kind: "guardrail", note: "Ask before mailing outside" };
+    const created = await request("PUT", path(), { revision: before.revision, rules: [external, secrets, unconditional] });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const saved = await created.json();
+    // Two rules that differ only by `when` are separate rows.
+    expect(saved.rules).toHaveLength(3);
+    expect(withoutIds(saved.rules)).toEqual(expect.arrayContaining([external, secrets, unconditional]));
+    expect(await snapshot()).toEqual(saved);
+    const stored = await listEntityApprovalPolicies(org.id, "connector_action");
+    expect(stored.map(p => p.condition)).toEqual(expect.arrayContaining([external.when, secrets.when, null]));
+    // Echoing is a no-op with stable ids; key order inside a condition does not matter.
+    const reordered = saved.rules.map((rule: { when?: Array<Record<string, unknown>> }) =>
+      rule.when ? { ...rule, when: rule.when.map(condition => Object.fromEntries(Object.entries(condition).reverse())) } : rule);
+    const echoed = await request("PUT", path(), { revision: saved.revision, rules: reordered.reverse() });
+    expect(await echoed.json()).toEqual(saved);
+    const duplicate = await request("PUT", path(), { revision: saved.revision, rules: [...saved.rules, { ...external, effect: "deny" }] });
+    expect(await duplicate.json()).toEqual({ error: "invalid_request", message: "Duplicate policy scope." });
 
     const condition = (when: unknown) => ({ effect: "deny", kind: "guardrail", when });
     for (const [rule, message] of [
@@ -192,7 +203,7 @@ describe("connector policy collection", () => {
       [condition([{ scan: "credit_cards", field: "/body" }]), "rules[0].when[0].scan must be one of secrets, pii."],
       [condition([{ scan: "pii", field: "/body", op: "eq" }]), "rules[0].when[0].op is not accepted on a scan condition (scan, field)."],
     ] as const) {
-      const rejected = await request("PUT", path(), { revision: before.revision, rules: [rule] });
+      const rejected = await request("PUT", path(), { revision: saved.revision, rules: [rule] });
       expect(rejected.status, JSON.stringify(rule)).toBe(400);
       expect(await rejected.json()).toEqual({ error: "invalid_request", message });
     }
@@ -203,8 +214,12 @@ describe("connector policy collection", () => {
     });
     expect(single.status).toBe(400);
     expect(await single.json()).toMatchObject({ message: "when is only accepted by /write-permissions/connector-actions." });
-    expect(await snapshot()).toEqual(before);
+    expect(await snapshot()).toEqual(saved);
 
+    // Dropping `when` from a rule replaces it with the unconditional one.
+    const plain = await request("PUT", path(), { revision: saved.revision, rules: [unconditional] });
+    expect(withoutIds((await plain.json()).rules)).toEqual([unconditional]);
+    expect((await listEntityApprovalPolicies(org.id, "connector_action")).map(p => p.condition)).toEqual([null]);
   });
 
   it("rejects a stale plan after another collection edit", async () => {
@@ -807,12 +822,7 @@ describe("connected app caller identity", () => {
   it("a rule's when decides on the operation input, and discovery takes the strict side", async () => {
     const exact = { connection_id: connectionId, operation_key: "app-policy::needs_approval" };
     const outside = { field: "/to", op: "not_ends_with", value: "@acme.example" };
-    // The policy PUT refuses `when` in this release, so the rules are written through the policy writer.
-    const conditional = (execute: "approval" | "deny", note: string, condition: unknown[]) => upsertEntityApprovalPolicy(org.id, {
-      resourceClass: "connector_action", connectionId, operationKey: exact.operation_key, kind: "guardrail", note, condition, effects: { execute },
-    });
-    await setRules(path(), [{ effect: "auto" }]);
-    await conditional("approval", "Ask before mailing outside", [outside]);
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail", note: "Ask before mailing outside", when: [outside] }]);
     const named = await oauthToken(["https://app.example.com/callback"]);
     const explain = async () => ((await (await request("GET",
       `/api/${org.slug}/write-permissions/explain?connection_id=${connectionId}&operation_key=needs_approval&app_key=web%3Aexample.com`)).json()) as { effect: string }).effect;
@@ -847,9 +857,18 @@ describe("connected app caller identity", () => {
     // A missing field holds no comparison, so the Ask does not apply.
     expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
 
+    // A conditional Always allow lifts the Ask only for an input it holds on, and never in discovery.
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "approval", kind: "guardrail" }]);
+    await setRules(appPath("web:example.com"), [{ ...exact, effect: "auto", when: [{ field: "/to", op: "ends_with", value: "@acme.example" }] }]);
+    expect(await explain()).toBe("approval");
+    const lifted = await execute(named.token, { to: "teammate@acme.example" });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+    expect(lifted.body.status).not.toBe("pending_approval");
+    expect((await execute(named.token, { to: "someone@outside.example" })).body.status).toBe("pending_approval");
+    await setRules(appPath("web:example.com"), []);
+
     // A Block on a body that looks like it carries a secret.
-    await setRules(path(), [{ effect: "auto" }]);
-    await conditional("deny", "Never send credentials", [{ scan: "secrets", field: "/body" }]);
+    await setRules(path(), [{ effect: "auto" }, { ...exact, effect: "deny", kind: "guardrail", note: "Never send credentials", when: [{ scan: "secrets", field: "/body" }] }]);
     expect(await explain()).toBe("deny");
     const blocked = await execute(named.token, { body: `token ghp_${"c".repeat(36)}` });
     expect(blocked.body.error, JSON.stringify(blocked.body)).toContain("Policy blocks 'needs_approval'");
