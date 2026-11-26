@@ -2259,6 +2259,104 @@ describe("LinkedInConnector home_feed", () => {
     expect(comment.metadata).not.toHaveProperty("author_company_slug");
   });
 
+  // The current card shape (recorded from the live feed, names synthetic): the
+  // card and each comment wrap their header, headline, time, Follow control and
+  // counts around a `data-testid="expandable-text-box"` body whose clamp button
+  // renders "… more". Replies nest inside their parent comment row.
+  test("stores only the post and comment bodies, not the card chrome", async () => {
+    const activityId = "7481111111111111111";
+    const textBox = (inner: string) => `
+          <p componentkey="body-${inner.length}">
+            <span data-testid="expandable-text-box">${inner}<button data-testid="expandable-text-button" aria-hidden="true"><span><span>…</span> <span>more</span></span></button></span>
+          </p>`;
+    const comment = (id: string, name: string, slug: string, body: string, nested = "") => `
+        <div id="replaceableComment_urn:li:comment:(urn:li:activity:${activityId},${id})">
+          <div componentkey="CommentComponentReference_${id}">
+            <a href="https://www.linkedin.com/in/${slug}/">
+              <img src="https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/${slug}" alt="View ${name}’s profile" />
+              <span aria-label="View ${name}’s profile"></span>
+            </a>
+            <a href="https://www.linkedin.com/in/${slug}/">
+              <p><span><span>${name} Premium Profile 2nd</span> <span aria-hidden="true">${name} • 2nd</span></span></p>
+              <p><span>Synthetic headline for ${name}</span></p>
+            </a>
+            <p><span>10h</span></p>
+            <div role="button" aria-label="Follow ${name}"><p><span>Follow</span></p></div>
+            ${textBox(body)}
+            <div role="button"><p><span><span>4 reactions</span> <span aria-hidden="true">4</span></span></p></div>
+            <button aria-label="Open reactions menu"></button>
+            <button aria-label="Reply"></button>
+          </div>
+          ${nested}
+        </div>`;
+    const res = await syncHomeFeedDom(`
+      <div componentkey="expandedclean_textFeedType_MAIN_FEED_RELEVANCE">
+        <h2><span>Feed post</span></h2>
+        <p><span>Fixture Engager commented</span></p>
+        <a href="https://www.linkedin.com/in/fixture-author/">
+          <img src="https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-author" alt="View Fixture Author’s profile" />
+          <span aria-label="View Fixture Author’s profile"></span>
+        </a>
+        <a href="https://www.linkedin.com/in/fixture-author/">
+          <div aria-label="Fixture Author Verified Profile 2nd">
+            <p><span>Fixture Author</span></p>
+            <p><span>• 2nd</span></p>
+          </div>
+        </a>
+        <p><span>Founder and CEO @ Synthetic Robotics | Multi-purpose robots 🤖</span></p>
+        <p><span>10h • Edited •</span></p>
+        <div role="button" aria-label="Follow Fixture Author"><span>Follow</span></div>
+        <button aria-label="Open control menu for post by Fixture Author"></button>
+        <span id="translatable-commentary-urn:li:activity:${activityId}"></span>
+        ${textBox("All the robotics datasets available in one synthetic list https://lnkd.in/fixture")}
+        <button aria-label="Reaction button state: no reaction"><span>10</span></button>
+        <button aria-label="Open reactions menu"></button>
+        <button aria-label="Comment"><span>2</span></button>
+        <div componentkey="commentsSectionContainer_clean">
+          ${comment(
+            "7482222222222222221",
+            "Fixture Commenter",
+            "fixture-commenter",
+            `<a href="https://www.linkedin.com/in/fixture-author/" aria-label="View Fixture Author’s profile"><strong>Fixture Author</strong></a> they'll be commodities within a year`,
+            comment(
+              "7482222222222222222",
+              "Fixture Replier",
+              "fixture-replier",
+              "A nested reply that must stay off its parent comment"
+            )
+          )}
+        </div>
+      </div>`);
+    const [post, parent, reply] = res.events;
+    expect(post).toMatchObject({
+      origin_type: "post",
+      author_name: "Fixture Author",
+      payload_text:
+        "All the robotics datasets available in one synthetic list https://lnkd.in/fixture",
+    });
+    expect(parent).toMatchObject({
+      origin_type: "comment",
+      origin_id: "li_comment_7482222222222222221",
+      author_name: "Fixture Commenter",
+      payload_text: "Fixture Author they'll be commodities within a year",
+    });
+    expect(reply).toMatchObject({
+      origin_type: "comment",
+      origin_parent_id: "li_comment_7482222222222222221",
+      author_name: "Fixture Replier",
+      payload_text: "A nested reply that must stay off its parent comment",
+    });
+    // Author attribution and photos still come from the full card.
+    expect(post.metadata).toMatchObject({
+      author_linkedin_slug: "fixture-author",
+      author_avatar_url:
+        "https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-author",
+    });
+    expect(parent.metadata).toMatchObject({
+      author_linkedin_slug: "fixture-commenter",
+    });
+  });
+
   test("leaves the post photo empty when a same-named commenter is the only photo", async () => {
     const res = await syncHomeFeedDom(`
       <div componentkey="expandedsamename_tokenFeedType_MAIN_FEED_RELEVANCE">
@@ -3529,7 +3627,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.27.0");
+    expect(c.definition.version).toBe("3.28.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );

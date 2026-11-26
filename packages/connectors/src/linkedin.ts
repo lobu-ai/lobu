@@ -71,6 +71,7 @@ import {
   runAction as runLinkedInReadAction,
   searchLinkedInCompanies,
   searchLinkedInPeople,
+  stripMore,
   withLineBreaks,
 } from "./linkedin-search.js";
 import {
@@ -401,7 +402,13 @@ interface HomeFeedMedia {
 interface HomeFeedRow {
   /** The componentkey token (base64url-ish, NOT a numeric activity id). */
   id?: string;
+  /** The whole card's text: header, banners and counts feed author parsing. */
   body?: string;
+  /**
+   * The row's own post/comment body paragraphs, without the card header,
+   * counts, or nested comments. This is what becomes `payload_text`.
+   */
+  text_boxes?: Array<{ text?: string }>;
   author?: string;
   /**
    * The post-author's name, read from the card's control-menu button
@@ -616,6 +623,19 @@ const HOME_FEED_SCRAPE_CONFIG = {
   requireFields: ["body"],
   fields: {
     body: { take: "text" },
+    text_boxes: {
+      // The body paragraphs LinkedIn renders as `expandable-text-box`, so the
+      // stored text excludes the actor header, headline, time, Follow control
+      // and counts that `body` carries. A post row contains its comment rows,
+      // so the post branch skips boxes inside a comment. A comment row contains
+      // its nested replies, so the comment branch skips boxes inside a deeper
+      // comment row. objectAll keeps every post box: a repost with commentary
+      // renders the sharer's box and then the original post's.
+      selector:
+        ':scope:not([id^="replaceableComment_"]) [data-testid="expandable-text-box"]:not([id^="replaceableComment_"] *), :scope[id^="replaceableComment_"] [data-testid="expandable-text-box"]:not(:scope [id^="replaceableComment_"] *)',
+      take: "objectAll",
+      parts: { text: { take: "text" } },
+    },
     author: {
       // LinkedIn obfuscates the actor classes, so the old
       // .update-components-actor__* selectors no longer match. Best-effort:
@@ -1051,7 +1071,10 @@ function searchPostCard(
     const name = (mention.t ?? "").replace(/\s+/g, " ").trim();
     if (url && name && !mentions.has(url)) mentions.set(url, { name, url });
   }
-  const bodyLine = lines[timeIndex + 1]?.replace(/\s*…\s*more$/, "");
+  const bodyLine =
+    lines[timeIndex + 1] === undefined
+      ? undefined
+      : stripMore(lines[timeIndex + 1]);
   const bodyLinks = [
     ...new Set(
       (row.body_links ?? [])
@@ -1916,6 +1939,19 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
   };
 }
 
+/**
+ * The stored text of a post or comment: its own body boxes, each without the
+ * clamp button's "… more". A card with no body box (an image-only post) keeps
+ * the whole card text, as before.
+ */
+function homeFeedPayloadText(row: HomeFeedRow): string {
+  const boxes = Array.isArray(row.text_boxes) ? row.text_boxes : [];
+  const texts = boxes
+    .map((box) => stripMore(box?.text ?? ""))
+    .filter(Boolean);
+  return texts.length > 0 ? texts.join("\n\n") : (row.body ?? "");
+}
+
 function isHomeFeedRowNoise(
   row: HomeFeedRow,
   context: HomeFeedRowContext
@@ -1970,7 +2006,7 @@ export function buildHomeFeedEvents(
     }
     prepared.push({
       row,
-      body: row.body,
+      body: homeFeedPayloadText(row),
       context,
       ...(nativeIdentity ? { nativeIdentity } : {}),
       ...(parentCommentIdentity ? { parentCommentIdentity } : {}),
@@ -3248,7 +3284,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, manage your network (connection requests, follows), and prepare message, post, or comment drafts for human submission.",
-    version: "3.27.0",
+    version: "3.28.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {

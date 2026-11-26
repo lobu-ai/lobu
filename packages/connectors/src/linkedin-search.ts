@@ -157,7 +157,7 @@ function nonEmpty(value: string | undefined | null): string | null {
 }
 
 /** LinkedIn's "… more" expander text, rendered inside clamped paragraphs. */
-function stripMore(text: string): string {
+export function stripMore(text: string): string {
   return text.replace(/\s*…\s*(?:see\s+)?more$/i, "").trim();
 }
 
