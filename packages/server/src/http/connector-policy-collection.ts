@@ -1,32 +1,25 @@
 import { createHash } from "node:crypto";
 import type { Context } from "hono";
-import { type ConnectorPolicyKind, canonicalConnectorPolicyScope } from "../authz/connector-policy";
+import type { ConnectorPolicyKind } from "../authz/connector-policy";
 import {
   automationIdFromPrincipalId,
   deleteEntityApprovalPolicy,
   type EntityApprovalPolicy,
   type EntityApprovalPolicyInput,
   listEntityApprovalPolicies,
+  policyScopeKey,
   upsertEntityApprovalPolicy,
   validatePolicyKindAndNote,
   withConnectorPolicyTransaction,
 } from "../authz/entity-policy";
 import { classifyConditionProblem, withClassifyModel } from "../authz/policy-classify";
-import { type PolicyCondition, parsePolicyConditions, policyConditionsKey } from "../authz/policy-conditions";
-import { isPolicyHook, loopPolicyCutoverComplete, parsePolicyToolPatterns, type PolicyHook } from "../authz/policy-hooks";
+import { type PolicyCondition, parsePolicyConditions } from "../authz/policy-conditions";
+import { isPolicyHook, parsePolicyToolPatterns, type PolicyHook } from "../authz/policy-hooks";
 import { appKeyProblem, resolvePolicyPrincipal } from "../authz/policy-principal";
 import { POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { type DbClient, getDb } from "../db/client";
 import * as invalidationEmitter from "../events/emitter";
 import { agentExists, parsePolicy, requireHumanWorkspaceAdmin, serializeEntityApprovalPolicy, validateConnectorPolicyTarget } from "./permission-policy-write";
-
-function scopeKey(policy: EntityApprovalPolicyInput) {
-  const scope = canonicalConnectorPolicyScope(policy);
-  // A grant and a guardrail may share one scope; kind, audience and conditions are part of the rule's identity.
-  const key = [scope.connectorKey, scope.connectionId, policy.operationKey ?? null, scope.operationCategory, policy.kind ?? "grant", policy.audience ?? null,
-    policyConditionsKey(policy.condition ?? null)];
-  return JSON.stringify(policy.hook && policy.hook !== "operation" ? [...key, policy.hook, policy.toolPatterns ?? null] : key);
-}
 
 function serializeRule(policy: EntityApprovalPolicy) {
   return {
@@ -79,9 +72,6 @@ async function collectionSelection(c: Context) {
   if (principal.principalKind === "agent" && principal.principalId !== null && !(await agentExists(org, principal.principalId))) {
     return c.json({ error: "invalid_request", message: "Agent not found in this workspace." }, 400);
   }
-  if (hook !== "operation" && !(await loopPolicyCutoverComplete(getDb()))) {
-    return c.json({ error: "not_found", message: "Loop policies are not available yet." }, 404);
-  }
   return { org, hook, principal };
 }
 
@@ -113,7 +103,7 @@ function snapshotOf(all: readonly EntityApprovalPolicy[], principal: CollectionP
   const policies = all
     .filter(p => p.principalKind === principal.principalKind && (principal.principalKind === null || p.principalId === principal.principalId) &&
       p.effects.execute !== undefined)
-    .sort((a, b) => scopeKey(a).localeCompare(scopeKey(b)));
+    .sort((a, b) => policyScopeKey(a).localeCompare(policyScopeKey(b)));
   // Include stored identity and delivery: changing either invalidates a previously reviewed plan.
   // An app collection also binds its principal, so a plan cannot move between collections.
   const reviewed = JSON.stringify(policies.map(policy => hook === "operation" ? serializeEntityApprovalPolicy(policy)
@@ -208,7 +198,7 @@ export async function replaceConnectorPolicyCollection(c: Context) {
       // A classify condition runs on the model that was the workspace default when it was written.
       const condition = when == null ? null : await withClassifyModel(org, parsePolicyConditions(when, `rules[${index}].when`));
       const policy = { ...parsed, ...principal, kind: checked.kind, note: checked.note ?? null, condition, hook, toolPatterns };
-      const key = scopeKey(policy);
+      const key = policyScopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
       scopes.add(key);
       policies.push(policy);
@@ -223,11 +213,11 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   }
   const current = await readSnapshot(org, principal, hook);
   if (revision !== current.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);
-  const unchanged = new Map(current.policies.map(policy => [scopeKey(policy), policy.effects.execute]));
+  const unchanged = new Map(current.policies.map(policy => [policyScopeKey(policy), policy.effects.execute]));
   // Retained rules survive catalog removal; new grants still need a live target.
   // Discovery may contact connector providers; never hold a database lock during it.
   for (const [index, policy] of policies.entries()) {
-    if (unchanged.get(scopeKey(policy)) === policy.effects?.execute) continue;
+    if (unchanged.get(policyScopeKey(policy)) === policy.effects?.execute) continue;
     for (const [at, condition] of ((policy.condition ?? []) as PolicyCondition[]).entries()) {
       if (!("classify" in condition)) continue;
       const problem = await classifyConditionProblem(org, condition, `rules[${index}].when[${at}]`);
@@ -241,10 +231,10 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   const result = await withConnectorPolicyTransaction(org, async tx => {
     const before = await readSnapshot(org, principal, hook, tx);
     if (revision !== before.revision) return c.json({ error: "policy_conflict", message: "Policies changed. Reload and review the current rules before applying." }, 409);
-    const desired = new Set(policies.map(scopeKey));
+    const desired = new Set(policies.map(policyScopeKey));
     for (const policy of policies) await upsertEntityApprovalPolicy(org, policy, tx);
     for (const old of before.policies) {
-      if (!desired.has(scopeKey(old))) await deleteEntityApprovalPolicy({ ...old, organizationId: org }, tx);
+      if (!desired.has(policyScopeKey(old))) await deleteEntityApprovalPolicy({ ...old, organizationId: org }, tx);
     }
     const { revision: nextRevision, rules } = await readSnapshot(org, principal, hook, tx);
     return c.json({ revision: nextRevision, rules });

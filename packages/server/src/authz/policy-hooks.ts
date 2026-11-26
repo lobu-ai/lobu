@@ -1,13 +1,3 @@
-import type { DbClient } from "../db/client";
-
-// This lookup index is created in the same transaction as the legacy backfill.
-export const LOOP_POLICY_CUTOVER_INDEX = "public.write_approval_policies_loop_lookup";
-
-export async function loopPolicyCutoverComplete(sql: DbClient): Promise<boolean> {
-	const [cutover] = await sql<{ active: boolean }>`SELECT to_regclass(${LOOP_POLICY_CUTOVER_INDEX}) IS NOT NULL AS active`;
-	return cutover.active;
-}
-
 export const POLICY_HOOKS = ["operation", "message_in", "reply_out", "tool_call"] as const;
 
 export type PolicyHook = (typeof POLICY_HOOKS)[number];
