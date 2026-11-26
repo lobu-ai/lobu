@@ -1,5 +1,8 @@
 import { executionFailureCode, getErrorMessage, ToolError, type ToolErrorCode } from "@lobu/core";
-import { fetchCredentialedPublicUrl } from "@lobu/connector-worker/egress";
+import {
+	fetchCredentialedPublicUrl,
+	fetchPublicUrl,
+} from "@lobu/connector-worker/egress";
 import { LOST_LEASE_MESSAGE } from "../runs/run-lease";
 import { terminalizeInlineOperationRun } from "./operation-run-card";
 import {
@@ -206,6 +209,8 @@ async function readHttpOperationResponse(response: Response): Promise<string> {
 	);
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 function fetchAuthenticatedHttpOperation(
 	url: string | URL,
 	init: RequestInit,
@@ -289,18 +294,30 @@ export async function executeHttpOperation(
 		);
 
 		const requestAbort = requestAbortSignal(abortSignal);
+		const isRead = ["GET", "HEAD"].includes(operation.backend_config.method);
 		let response: Response;
 		let text: string;
 		try {
 			response = await fetchAuthenticatedHttpOperation(url, {
 				method: operation.backend_config.method,
 				headers,
-				body: ["GET", "HEAD"].includes(operation.backend_config.method)
-					? undefined
-					: requestBody,
+				body: isRead ? undefined : requestBody,
 				redirect: "manual",
 				signal: requestAbort.signal,
 			});
+			const location = response.headers.get("location");
+			if (isRead && REDIRECT_STATUSES.has(response.status) && location) {
+				// A read that redirects hands off to a pre-signed URL (GitHub log
+				// and artifact downloads). Fetch it bare, so neither the
+				// credential nor the caller's headers leave the original host;
+				// the public transport still guards every hop.
+				await response.body?.cancel();
+				response = await fetchPublicUrl(new URL(location, url), {
+					method: operation.backend_config.method,
+					redirect: "follow",
+					signal: requestAbort.signal,
+				});
+			}
 			text = await readHttpOperationResponse(response);
 		} finally {
 			requestAbort.cleanup();

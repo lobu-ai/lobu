@@ -365,6 +365,21 @@ describe("operations.execute backend lifecycle", () => {
 						},
 					});
 				}
+				if (url.startsWith("https://api.example.test/repos/redirect/")) {
+					// GitHub's log downloads answer 302 with a pre-signed URL.
+					const target = {
+						signed: "https://signed.example.test/logs?sig=synthetic",
+						private: "https://127.0.0.1/logs",
+					}[url.slice("https://api.example.test/repos/redirect/".length)];
+					return new Response(null, { status: 302, headers: { location: target ?? "" } });
+				}
+				if (url.startsWith("https://signed.example.test/")) {
+					const headers = new Headers(init?.headers);
+					return new Response(
+						`step log; authorization=${headers.get("authorization")}; x-trace=${headers.get("x-trace")}`,
+						{ status: 200, headers: { "content-type": "text/plain" } },
+					);
+				}
 				if (url.startsWith("https://api.example.test/repos/")) {
 					const headers = new Headers(init?.headers);
 					return jsonResponse({
@@ -1700,6 +1715,32 @@ describe("operations.execute backend lifecycle", () => {
 				WHERE organization_id = ${orgId} AND key = ${HTTP}
 			`;
 		}
+	});
+
+	it("follows a read's redirect without the connection's credentials", async () => {
+		const execute = (repo: string) =>
+			manageOperations(
+				{
+					action: "execute",
+					connection_id: httpConnectionId,
+					operation_key: "get_repo",
+					input: { path: { owner: "redirect", repo }, headers: { "x-trace": "caller" } },
+				},
+				{} as Env,
+				ctx,
+			) as Promise<Record<string, unknown>>;
+
+		expect(await execute("signed")).toMatchObject({
+			status: "completed",
+			output: { body: "step log; authorization=null; x-trace=null" },
+		});
+
+		const fetchMock = vi.mocked(globalThis.fetch);
+		const before = fetchMock.mock.calls.length;
+		expect(await execute("private")).toMatchObject({ status: "failed" });
+		expect(
+			fetchMock.mock.calls.slice(before).map(([input]) => new URL(String(input)).hostname),
+		).toEqual(["api.example.test"]);
 	});
 
 	it("keeps every OpenAPI path parameter inside its template segment", async () => {
