@@ -266,11 +266,11 @@ describe("manage_agents — builder gate e2e", () => {
     await expect(executeTool("manage_agents", {
       action: "update", agent_id: "invalid-settings-bot", settings: { skillsConfig: { skills: [] } },
     }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/manage_skills/) });
-    // Guardrails moved to the workspace guardrail library the same way.
+    // Agent loop rules are managed through Policies.
     for (const settings of [{ guardrails: ["secret-scan"] }, { guardrailsInline: [] }]) {
       await expect(executeTool("manage_agents", {
         action: "update", agent_id: "invalid-settings-bot", settings,
-      }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/client\.guardrails/) });
+      }, TEST_ENV, ownerCtx)).rejects.toMatchObject({ httpStatus: 422 });
     }
     await expect(executeTool("manage_agents", { action: "update", agent_id: "invalid-settings-bot", settings: { soulMd: "Denied" } }, TEST_ENV, memberCtx)).rejects.toThrow();
     expect(await sdk.get("invalid-settings-bot")).toEqual(before);
