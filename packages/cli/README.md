@@ -213,23 +213,22 @@ export default defineConfig({
   guardrails: [
     defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }),
     defineGuardrail({
-      name: "no-refunds",
-      judge: { stage: "output", policy: "Never promise a refund." },
+      name: "no-pii",
+      builtin: "pii-scan",
       appliesTo: [{ agent: "support" }],
     }),
   ],
 });
 ```
 
-Each guardrail sets exactly one of `builtin`, `judge` or `requireTool`.
-`appliesTo` defaults to every agent; `enabled` defaults to true. Leave out
+Each guardrail names one built-in check: `secret-scan`, `pii-scan` or
+`forbidden-tools`. `appliesTo` defaults to every agent; `enabled` defaults to true. Leave out
 `guardrails` and apply never reads or writes the library; `--only memory`
 skips it too. Apply owns each declared guardrail whole, matched by name, and
 refuses to overwrite one edited in the app since its last apply. A guardrail
 this config created and no longer declares is archived only with `prune`;
-guardrails it never created are left alone. The deployment record keeps a
-SHA-256 digest of each judge policy, never the text, and `lobu rollback`
-leaves the library as it is.
+guardrails it never created are left alone. `lobu rollback` leaves the
+library as it is.
 
 Writing guardrails needs an owner or admin. A CLI login cannot write them: set
 `LOBU_API_TOKEN` to a personal access token with the `guardrails:write` scope,

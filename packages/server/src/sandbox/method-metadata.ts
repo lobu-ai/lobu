@@ -1196,7 +1196,7 @@ export default async (_ctx, client) => {
 	// guardrails
 	"guardrails.list": {
 		summary:
-			"List the workspace guardrail library (built-in checks and custom judge/require-tool checks), ordered by name, with who each applies to. Archived guardrails only with include_archived. Read-only.",
+			"List the workspace guardrail library (built-in checks), ordered by name, with who each applies to. Archived guardrails only with include_archived. Read-only.",
 		access: "read",
 		signature:
 			"guardrails.list(input?: { include_archived?: boolean; cursor?: string; limit?: number }): Promise<{ items: WorkspaceGuardrail[]; next_cursor: string | null }>",

@@ -160,38 +160,30 @@ describe('decideEgress', () => {
       hostname: 'evil.com',
       global: { allowedDomains: ['*'], deniedDomains: ['evil.com'] },
       tenant: t.lookups,
-      judge: async () => ({ allowed: true, decision: 'never' }),
     });
     expect(decision).toEqual({ allowed: false, source: 'global' });
     expect(t.calls).toEqual([]);
   });
 
-  test('a tenant deny beats the global allowlist and the judge', async () => {
+  test('a tenant deny beats the global allowlist', async () => {
     const t = tenant({ denied: ['api.example.com'] });
     const decision = await decideEgress({
       hostname: 'api.example.com',
       global: { allowedDomains: ['.example.com'], deniedDomains: [] },
       tenant: t.lookups,
-      judge: async () => ({ allowed: true, decision: 'never' }),
     });
     expect(decision).toEqual({ allowed: false, source: 'grant' });
   });
 
-  test('a global allow short-circuits before grants and the judge', async () => {
+  test('a global allow short-circuits before the allow grants', async () => {
     const t = tenant({});
-    let judged = 0;
     const decision = await decideEgress({
       hostname: 'www.example.com',
       global: { allowedDomains: ['.example.com'], deniedDomains: [] },
       tenant: t.lookups,
-      judge: async () => {
-        judged += 1;
-        return null;
-      },
     });
     expect(decision).toEqual({ allowed: true, source: 'global' });
     expect(t.calls).toEqual(['isDenied:www.example.com']);
-    expect(judged).toBe(0);
   });
 
   test('a tenant grant allows a host the global lists do not name', async () => {
@@ -204,25 +196,11 @@ describe('decideEgress', () => {
     expect(decision).toEqual({ allowed: true, source: 'grant' });
   });
 
-  test('the judge is asked last and its verdict is returned with its decision', async () => {
-    const decision = await decideEgress({
-      hostname: 'judged.com',
-      global: { allowedDomains: [], deniedDomains: [] },
-      tenant: tenant({}).lookups,
-      judge: async (host) => ({ allowed: false, decision: { host, reason: 'policy' } }),
-    });
-    expect(decision).toEqual({
-      allowed: false,
-      source: 'judge',
-      judge: { host: 'judged.com', reason: 'policy' },
-    });
-  });
-
-  test('no list, no grant, no judged rule → deny', async () => {
+  test('no list and no grant → deny', async () => {
     const decision = await decideEgress({
       hostname: 'nowhere.com',
       global: { allowedDomains: [], deniedDomains: [] },
-      judge: async () => null,
+      tenant: tenant({}).lookups,
     });
     expect(decision).toEqual({ allowed: false, source: 'global' });
   });

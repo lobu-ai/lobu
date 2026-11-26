@@ -67,7 +67,6 @@ import {
 	resolveSystemCredential,
 } from "../modules/module-system.js";
 import { GrantStore, sweepExpiredGrants } from "../permissions/grant-store.js";
-import { PolicyStore } from "../permissions/policy-store.js";
 import { SecretProxy } from "../proxy/secret-proxy.js";
 import { TokenRefreshJob } from "../proxy/token-refresh-job.js";
 import {
@@ -141,7 +140,6 @@ export class CoreServices {
 	// Permissions
 	// ============================================================================
 	private grantStore?: GrantStore;
-	private policyStore?: PolicyStore;
 
 	// ============================================================================
 	// Bundled Provider Registry
@@ -379,11 +377,6 @@ export class CoreServices {
 		// Initialize grant store for unified permissions (PG-backed)
 		this.grantStore = new GrantStore();
 		logger.debug("Grant store initialized");
-
-		// Policy store for egress judge (per-agent judged-domain rules + named
-		// judges + operator extra_policy). In-memory; synced on each deployment.
-		this.policyStore = new PolicyStore();
-		logger.debug("Policy store initialized");
 
 		const defaultSecretStore = new PostgresSecretStore();
 		this.secretStore =
@@ -1098,10 +1091,6 @@ export class CoreServices {
 
 	getGrantStore(): GrantStore | undefined {
 		return this.grantStore;
-	}
-
-	getPolicyStore(): PolicyStore | undefined {
-		return this.policyStore;
 	}
 
 	getProviderRegistryService(): ProviderRegistryService | undefined {

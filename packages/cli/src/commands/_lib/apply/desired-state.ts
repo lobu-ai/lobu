@@ -356,11 +356,7 @@ export interface DesiredGuardrail {
   enabled: boolean;
 }
 
-/**
- * A library guardrail as a deployment records it. Deployment events are
- * readable by principals the guardrail read policy may deny, so a judge's
- * policy is kept only as its digest: enough to tell whether the library moved.
- */
+/** A library guardrail as a deployment records it. */
 export interface RecordedGuardrail {
   /** The library row this config applied. */
   id: string;
@@ -371,22 +367,9 @@ export interface RecordedGuardrail {
    */
   created: boolean;
   name: string;
-  /** The config, with a judge's `policy` replaced by `policy_sha256`. */
-  config: Record<string, unknown>;
+  config: WorkspaceGuardrailConfig;
   applies_to: GuardrailSubject[];
   enabled: boolean;
-}
-
-/** A guardrail config with a judge's policy as its digest (idempotent). */
-export function recordGuardrailConfig(
-  config: WorkspaceGuardrailConfig | Record<string, unknown>
-): Record<string, unknown> {
-  const { policy, ...rest } = config as Record<string, unknown>;
-  if (typeof policy !== "string") return { ...config };
-  return {
-    ...rest,
-    policy_sha256: createHash("sha256").update(policy).digest("hex"),
-  };
 }
 
 export function recordGuardrail(
@@ -398,7 +381,7 @@ export function recordGuardrail(
     id,
     created,
     name: guardrail.name,
-    config: recordGuardrailConfig(guardrail.config),
+    config: guardrail.config,
     applies_to: guardrail.applies_to,
     enabled: guardrail.enabled,
   };

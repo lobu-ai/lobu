@@ -286,7 +286,7 @@ export class McpProxy {
 	* bypass the stage. Operation authorization runs in the upstream handlers.
 	*
 	* Fails OPEN on store/registry-level errors (per-guardrail throws already
-	* fail open in the runner); judge guardrails fail CLOSED by design.
+	* fail open in the runner).
 	*
 	* @internal Public only for the route-handler modules.
 	*/

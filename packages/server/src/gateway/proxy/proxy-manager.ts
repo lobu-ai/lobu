@@ -1,10 +1,8 @@
 import type { Server } from "node:http";
 import { createLogger } from "@lobu/core";
 import type { GrantStore } from "../permissions/grant-store.js";
-import type { PolicyStore } from "../permissions/policy-store.js";
 import {
   setProxyGrantStore,
-  setProxyPolicyStore,
   startHttpProxy,
   stopHttpProxy,
 } from "./http-proxy.js";
@@ -14,40 +12,32 @@ const logger = createLogger("proxy-manager");
 let proxyServer: Server | null = null;
 
 /**
- * Wire the grant + policy stores into the HTTP egress proxy, which READS them
- * per request (both are Postgres-backed: grants rows and the workspace
- * guardrail library). Without this the proxy's
- * `proxyGrantStore`/`proxyPolicyStore` stay null and `checkDomainAccess`
- * silently skips per-agent grants and the LLM egress judge, leaving only the
- * global `WORKER_ALLOWED_DOMAINS` allowlist in force. (This wiring was dropped
- * in #672's dead-code sweep when the proxy stores still looked unused;
- * `startFilteringProxy()` was re-added at the gateway boot site but these two
- * calls were not.) `setProxyPolicyStore` also lazily constructs the real
- * `EgressJudge`, so judged-domain rules become enforceable.
+ * Wire the grant store into the HTTP egress proxy, which READS it per request
+ * (Postgres-backed grants rows). Without this the proxy's `proxyGrantStore`
+ * stays null and `checkDomainAccess` silently skips per-agent grants, leaving
+ * only the global `WORKER_ALLOWED_DOMAINS` allowlist in force. (This wiring
+ * was dropped in #672's dead-code sweep when the proxy store still looked
+ * unused; `startFilteringProxy()` was re-added at the gateway boot site but
+ * this call was not.)
  *
  * Lives here (not in `lobu/gateway.ts`) so it can be unit-tested without pulling
  * in the heavyweight, route-test-mocked gateway module — the regression slipped
- * through precisely because every proxy test injects these stores itself, so
+ * through precisely because every proxy test injects the store itself, so
  * nothing covered the boot path.
  */
 export function wireProxyEgressStores(services: {
   getGrantStore(): GrantStore | undefined;
-  getPolicyStore(): PolicyStore | undefined;
 }): void {
   const grantStore = services.getGrantStore();
   if (grantStore) {
     setProxyGrantStore(grantStore);
-  }
-  const policyStore = services.getPolicyStore();
-  if (policyStore) {
-    setProxyPolicyStore(policyStore);
   }
 }
 
 /**
  * Start filtering HTTP proxy for worker network isolation. Workers can
  * only reach the internet through this proxy, which enforces domain
- * allowlist/blocklist + LLM egress judge.
+ * allowlist/blocklist and per-agent grants.
  *
  * Automation based on environment configuration:
  * - Empty/unset: Deny all (complete isolation)

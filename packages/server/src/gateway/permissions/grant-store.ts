@@ -5,15 +5,8 @@ import {
   type Grant,
   type GrantKind,
 } from "@lobu/core";
-import {
-  patternReaches,
-  wildcardParentPatterns,
-} from "@lobu/connector-sdk/egress-policy";
+import { wildcardParentPatterns } from "@lobu/connector-sdk/egress-policy";
 import { getDb, pgTextArray } from "../../db/client.js";
-import {
-  lockEgressJudgeDecisions,
-  readJudgedEgressDomains,
-} from "./policy-store.js";
 import { orgScope, requireOrgId } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("grant-store");
@@ -104,50 +97,15 @@ export class GrantStore {
     const expiresAtTs = expiresAt === null ? null : new Date(expiresAt);
     const orgId = requireOrgId(organizationId, "GrantStore.grant");
 
-    // CHOKEPOINT: never write an ALLOW grant for a domain the egress judge
-    // governs. An allow grant outranks the judge in `checkDomainAccess`, so
-    // such a row makes the judge permanently inert — the request succeeds at
-    // `source: "grant"` and the operator's policy never runs.
-    //
-    // Every domain writer funnels through here, which is why the check lives
-    // at this level rather than in each caller. The dispatch reconcile already
-    // skips judged domains (and revokes stale non-expiring rows), but it
-    // cannot heal the deploy-time npm-registry grants — those hosts are exempt
-    // from its revocation — and it never looks at an expiring row at all. A
-    // per-caller fix would have to be repeated for each writer and would
-    // reopen on the next one added.
-    //
-    // Denies are exempt: a deny grant outranks the judge by design. Non-domain
-    // kinds (MCP tool patterns, which is what interactive tool approvals
-    // write) cannot shadow a domain judge at all.
-    //
-    // The judged-domain read and the insert share one transaction under the
-    // organization's egress-judge lock, so a concurrent guardrail write either
-    // commits its judge first (and this read sees it) or runs its grant
-    // cleanup after this insert commits.
-    const skipped = await getDb().begin(async (tx) => {
-      if (kind === "domain" && !denied) {
-        await lockEgressJudgeDecisions(tx, orgId);
-        const judged = await readJudgedEgressDomains(orgId, agentId, tx);
-        if (judged.some((j) => patternReaches(j, pattern))) return true;
-      }
-      await tx`
-        INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
-        VALUES (${orgId}, ${agentId}, ${kind}, ${pattern}, ${expiresAtTs}, now(), ${denied ?? false})
-        ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
-          expires_at = EXCLUDED.expires_at,
-          granted_at = EXCLUDED.granted_at,
-          denied = EXCLUDED.denied
-      `;
-      return false;
-    });
-    if (skipped) {
-      logger.info("Skipped allow grant — the egress judge governs this domain", {
-        agentId,
-        pattern,
-      });
-      return;
-    }
+    const sql = getDb();
+    await sql`
+      INSERT INTO grants (organization_id, agent_id, kind, pattern, expires_at, granted_at, denied)
+      VALUES (${orgId}, ${agentId}, ${kind}, ${pattern}, ${expiresAtTs}, now(), ${denied ?? false})
+      ON CONFLICT (organization_id, agent_id, kind, pattern) DO UPDATE SET
+        expires_at = EXCLUDED.expires_at,
+        granted_at = EXCLUDED.granted_at,
+        denied = EXCLUDED.denied
+    `;
     logger.info("Granted access", { agentId, pattern, expiresAt });
   }
 

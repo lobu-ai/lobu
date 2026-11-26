@@ -416,7 +416,7 @@ export function generateGuardrailRestPaths(): Record<string, any> {
     '/api/{orgSlug}/guardrails': {
       get: {
         summary: 'List the workspace guardrail library',
-        description: 'Built-in checks and custom judge/require-tool checks, ordered by name, with who each applies to.',
+        description: 'The built-in checks the workspace enables, ordered by name, with who each applies to.',
         operationId: 'listGuardrails',
         parameters: [
           ORG_SLUG_PARAM,

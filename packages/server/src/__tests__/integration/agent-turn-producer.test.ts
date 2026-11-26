@@ -3987,11 +3987,10 @@ describe('agent turn completion', () => {
   afterEach(() => {
   });
 
-  it('stamps the tool ledger onto the terminal reply the guardrail reads', async () => {
+  it('stamps the tool ledger onto the terminal reply the guardrails read', async () => {
     // The middle of the ledger chain: the guest produces `tools_used` and the
-    // `requireTool` guardrail consumes `payload.toolsUsed` off the
-    // thread_response row. This is the hop between them, which nothing covered
-    // — the guardrail passed on an absent ledger, so a break here was silent.
+    // output guardrail context carries `payload.toolsUsed` off the
+    // thread_response row. This is the hop between them.
     const workerId = 'fleet-ledger';
     const runId = await claimedTurnRun(workerId);
     const response = await postAsFleet('/api/workers/complete-agent-turn', {
@@ -4008,10 +4007,10 @@ describe('agent turn completion', () => {
     expect(reply?.action_input.toolsUsed).toEqual(['query_sdk', 'send_message']);
   });
 
-  it('stamps an EMPTY ledger, which is what trips a missing required tool', async () => {
-    // `[]` and absent are different answers downstream: the guardrail passes on
-    // absent (it cannot prove a miss) and trips on empty. A turn that called
-    // nothing must therefore report `[]`, not omit the field.
+  it('stamps an EMPTY ledger for a turn that called nothing', async () => {
+    // `[]` and absent are different answers downstream: absent cannot prove a
+    // miss, empty asserts one. A turn that called nothing must therefore report
+    // `[]`, not omit the field.
     const workerId = 'fleet-ledger-empty';
     const runId = await claimedTurnRun(workerId);
     await postAsFleet('/api/workers/complete-agent-turn', {
@@ -4029,7 +4028,7 @@ describe('agent turn completion', () => {
 
   it('leaves toolsUsed ABSENT when a worker reports none, rather than inventing []', async () => {
     // A completion with no ledger must not be recorded as "called nothing":
-    // that would trip `requireTool` on a turn we have no evidence about.
+    // that would assert a miss on a turn we have no evidence about.
     const workerId = 'fleet-ledger-none';
     const runId = await claimedTurnRun(workerId);
     await postAsFleet('/api/workers/complete-agent-turn', {

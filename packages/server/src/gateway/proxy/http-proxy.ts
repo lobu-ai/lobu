@@ -26,14 +26,7 @@ import {
 } from "../config/network-allowlist.js";
 import type { RevokedTokenStore } from "../auth/revoked-token-store.js";
 import { getRevokedTokenStore } from "../auth/revoked-token-store.js";
-import { recordGuardrailTrip } from "../guardrails/audit.js";
 import type { GrantStore } from "../permissions/grant-store.js";
-import type {
-  PolicyStore,
-  ResolvedJudgeRule,
-} from "../permissions/policy-store.js";
-import { EgressJudge } from "./egress-judge/judge.js";
-import type { JudgeDecision } from "./egress-judge/types.js";
 
 const logger = createLogger("http-proxy");
 
@@ -97,24 +90,6 @@ export function setProxyRevokedTokenStore(
   proxyRevokedTokenStore = store;
 }
 
-// Module-level policy store + lazy egress judge. The judge is only used
-// when a request matches a `judgedDomains` rule — most traffic never
-// touches it.
-let proxyPolicyStore: PolicyStore | null = null;
-let proxyEgressJudge: EgressJudge | null = null;
-
-/**
- * Set the policy store for the HTTP proxy to look up judged-domain rules.
- * Called during gateway initialization. Lazy-constructs the {@link EgressJudge}
- * on first configuration so tests can opt out by never calling this.
- */
-export function setProxyPolicyStore(store: PolicyStore): void {
-  proxyPolicyStore = store;
-  if (!proxyEgressJudge) {
-    proxyEgressJudge = new EgressJudge();
-  }
-}
-
 /**
  * Set the grant store the proxy consults when resolving per-agent
  * allow/deny grants. Production wires this from `CoreServices`; tests use
@@ -126,24 +101,9 @@ export function setProxyGrantStore(store: GrantStore): void {
 }
 
 /**
- * Replace the lazy {@link EgressJudge} — tests inject a fake client here
- * so the proxy can be exercised end-to-end without hitting a real model.
- */
-export function setProxyEgressJudge(judge: EgressJudge): void {
-  proxyEgressJudge = judge;
-}
-
-/**
- * Outcome of a full access decision. When the judge is consulted,
- * `judge` carries the verdict so the caller can surface the reason to
- * the client and emit a structured audit log.
- */
-type AccessDecision = EgressDecision<JudgeDecision>;
-
-/**
  * Domain access check for one proxied request. The decision order itself —
  * global denylist → per-agent deny grant → global allowlist → per-agent allow
- * grant → LLM judge → deny — is `decideEgress` in
+ * grant → deny — is `decideEgress` in
  * `@lobu/connector-sdk/egress-policy`, shared with every other egress
  * enforcement point. This function only binds the proxy's stores to it.
  */
@@ -151,14 +111,8 @@ async function checkDomainAccess(
   config: ResolvedNetworkConfig,
   hostname: string,
   agentId: string | undefined,
-  organizationId: string | undefined,
-  requestContext?: {
-    method?: string;
-    path?: string;
-    conversationId?: string;
-    userId?: string;
-  }
-): Promise<AccessDecision> {
+  organizationId: string | undefined
+): Promise<EgressDecision> {
   // Pass `organizationId` explicitly — `GrantStore` falls back to the ALS
   // org context when omitted, but the raw Node HTTP proxy never sets ALS
   // and the WHERE clause would drop its `organization_id` predicate,
@@ -192,77 +146,7 @@ async function checkDomainAccess(
         }
       : undefined;
 
-  // PolicyStore is keyed by `(orgId, agentId)`; without an org id we refuse
-  // to consult it — falling through to an unkeyed lookup would let another
-  // tenant's policy decide our verdict.
-  //
-  // Every judge whose domain selector covers the host runs, and any deny
-  // wins: an exact rule never shadows a covering wildcard (or the reverse).
-  // A policy that cannot be read returns `null`, which `decideEgress` turns
-  // into a deny — the judged plane fails closed.
-  const policyStore = proxyPolicyStore;
-  const egressJudge = proxyEgressJudge;
-  const judge =
-    policyStore && egressJudge && agentId && organizationId
-      ? async (host: string) => {
-          let rules: ResolvedJudgeRule[];
-          try {
-            rules = await policyStore.resolve(organizationId, agentId, host);
-          } catch (error) {
-            logger.error(
-              `Egress judge policy lookup failed for ${host} (agent: ${agentId}); denying`,
-              { error: error instanceof Error ? error.message : String(error) }
-            );
-            return null;
-          }
-          if (rules.length === 0) return null;
-          const decisions = await Promise.all(
-            rules.map((rule) =>
-              egressJudge.decide(
-                {
-                  agentId,
-                  organizationId,
-                  hostname: host,
-                  method: requestContext?.method,
-                  path: requestContext?.path,
-                },
-                rule
-              )
-            )
-          );
-          for (const decision of decisions) {
-            if (decision.verdict === "allow") continue;
-            // Egress denials share the guardrail audit trail: a judge DENY writes a
-            // `guardrail-trip` event (stage `egress`) just like message-pipeline
-            // guardrails, one per denying judge. Enforcement stays here in the
-            // proxy — this is audit only. Fire-and-forget: `recordGuardrailTrip`
-            // never rejects, so we don't await it on the egress hot path.
-            void recordGuardrailTrip({
-              organizationId,
-              agentId,
-              conversationId: requestContext?.conversationId,
-              userId: requestContext?.userId,
-              stage: "egress",
-              guardrail: decision.judgeName,
-              reason: decision.reason,
-              metadata: {
-                hostname: host,
-                verdict: decision.verdict,
-                judgeSource: decision.source,
-              },
-            });
-          }
-          const denial = decisions.find((d) => d.verdict !== "allow");
-          return { allowed: !denial, decision: denial ?? decisions[0]! };
-        }
-      : undefined;
-
-  return decideEgress<JudgeDecision>({
-    hostname,
-    global: config,
-    tenant,
-    judge,
-  });
+  return decideEgress({ hostname, global: config, tenant });
 }
 
 interface ProxyCredentials {
@@ -289,8 +173,6 @@ export const __testOnly = {
    */
   reset: () => {
     proxyGrantStore = null;
-    proxyPolicyStore = null;
-    proxyEgressJudge = null;
     proxyRevokedTokenStore = null;
     dnsLookupOverride = null;
     upstreamRequestTimeoutMs = 30_000;
@@ -485,10 +367,10 @@ function logAccessDecision(
   hostname: string,
   deploymentName: string,
   agentId: string | undefined,
-  decision: AccessDecision
+  decision: EgressDecision
 ): void {
-  // Audit log only fires for non-trivial decisions — every judge
-  // invocation and every denial. Globally-allowed fast-path requests are
+  // Audit log only fires for non-trivial decisions — grant decisions and
+  // every denial. Globally-allowed fast-path requests are
   // the common case on busy gateways and flooding the log with them turns
   // a useful audit stream into noise (and costs serialization per req).
   if (decision.allowed && decision.source === "global") {
@@ -501,22 +383,12 @@ function logAccessDecision(
     agentId,
     allowed: decision.allowed,
     source: decision.source,
-    ...(decision.judge
-      ? {
-          judgeName: decision.judge.judgeName,
-          judgeVerdict: decision.judge.verdict,
-          judgeReason: decision.judge.reason,
-          judgeSource: decision.judge.source,
-          judgeLatencyMs: decision.judge.latencyMs,
-          policyHash: decision.judge.policyHash,
-        }
-      : {}),
   });
 }
 
 /**
- * Strip CR/LF and trim to a safe length so judge-provided reasons can't
- * inject extra HTTP response headers via the status line.
+ * Strip CR/LF and trim to a safe length so a reason can't inject extra HTTP
+ * response headers via the status line.
  */
 function escapeHeaderValue(value: string): string {
   return value
@@ -602,18 +474,12 @@ async function handleConnect(
 
   const { deploymentName, tokenData } = auth;
 
-  // Check domain access: global config → grant store → LLM egress judge.
-  // TLS CONNECT tunneling means we cannot see the method or path — the
-  // judge decides on hostname alone.
+  // Check domain access: global config → grant store.
   const decision = await checkDomainAccess(
     config,
     hostname,
     tokenData.agentId,
-    tokenData.organizationId,
-    {
-      conversationId: tokenData.conversationId,
-      userId: tokenData.userId,
-    }
+    tokenData.organizationId
   );
   logAccessDecision(
     "CONNECT",
@@ -623,7 +489,7 @@ async function handleConnect(
     decision
   );
   if (!decision.allowed) {
-    const reason = decision.judge?.reason ?? `Domain not allowed: ${hostname}`;
+    const reason = `Domain not allowed: ${hostname}`;
     logger.warn(
       `Blocked CONNECT to ${hostname} (deployment: ${deploymentName}) - ${reason}`
     );
@@ -742,20 +608,12 @@ async function handleProxyRequest(
 
   const { deploymentName, tokenData } = auth;
 
-  // Check domain access: global config → grant store → LLM egress judge.
-  // Plain HTTP: method and path are visible and are passed through to the
-  // judge so policies can reason about specific endpoints.
+  // Check domain access: global config → grant store.
   const decision = await checkDomainAccess(
     config,
     hostname,
     tokenData.agentId,
-    tokenData.organizationId,
-    {
-      method: req.method,
-      path: parsedUrl.pathname + parsedUrl.search,
-      conversationId: tokenData.conversationId,
-      userId: tokenData.userId,
-    }
+    tokenData.organizationId
   );
   logAccessDecision(
     req.method ?? "?",
@@ -765,7 +623,7 @@ async function handleProxyRequest(
     decision
   );
   if (!decision.allowed) {
-    const reason = decision.judge?.reason ?? `Domain not allowed: ${hostname}`;
+    const reason = `Domain not allowed: ${hostname}`;
     const safeReason = escapeHeaderValue(reason);
     logger.warn(
       `Blocked request to ${hostname} (deployment: ${deploymentName}) - ${reason}`
@@ -875,11 +733,7 @@ async function handleConnectRequestFallback(
     config,
     hostname,
     tokenData.agentId,
-    tokenData.organizationId,
-    {
-      conversationId: tokenData.conversationId,
-      userId: tokenData.userId,
-    }
+    tokenData.organizationId
   );
   logAccessDecision(
     "CONNECT",
@@ -889,7 +743,7 @@ async function handleConnectRequestFallback(
     decision
   );
   if (!decision.allowed) {
-    const reason = decision.judge?.reason ?? `Domain not allowed: ${hostname}`;
+    const reason = `Domain not allowed: ${hostname}`;
     const safeReason = escapeHeaderValue(reason);
     res.statusMessage = safeReason;
     res.writeHead(403, {

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { CircuitBreaker } from "../proxy/egress-judge/circuit-breaker.js";
+import { CircuitBreaker } from "../inference/circuit-breaker.js";
 
 describe("CircuitBreaker", () => {
   test("is closed by default", () => {
     const breaker = new CircuitBreaker(3, 1000);
-    expect(breaker.canProceed("policy-a")).toBe(true);
-    expect(breaker.isOpen("policy-a")).toBe(false);
+    expect(breaker.canProceed("key-a")).toBe(true);
+    expect(breaker.isOpen("key-a")).toBe(false);
   });
 
   test("stays closed below the failure threshold", () => {
@@ -33,7 +33,7 @@ describe("CircuitBreaker", () => {
     expect(breaker.isOpen("p")).toBe(false);
   });
 
-  test("isolates failures per policy hash", () => {
+  test("isolates failures per key", () => {
     const breaker = new CircuitBreaker(2, 1000);
     breaker.onFailure("p1");
     breaker.onFailure("p1");
@@ -52,6 +52,16 @@ describe("CircuitBreaker", () => {
     expect(breaker.canProceed("p")).toBe(false);
     breaker.onSuccess("p");
     expect(breaker.canProceed("p")).toBe(true);
+  });
+
+  test("a success resets the failure count", () => {
+    const breaker = new CircuitBreaker(3, 1000);
+    breaker.onFailure("p");
+    breaker.onFailure("p");
+    breaker.onSuccess("p");
+    breaker.onFailure("p");
+    breaker.onFailure("p");
+    expect(breaker.isOpen("p")).toBe(false);
   });
 
   test("half-opens after cooldown and reopens on a failed probe", async () => {

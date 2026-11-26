@@ -1,47 +1,25 @@
-import type { JudgeVerdict } from "./types.js";
-
-interface Entry {
-  verdict: JudgeVerdict;
+interface Entry<T> {
+  verdict: T;
   expiresAt: number;
 }
 
 /**
- * Small LRU with absolute TTL. Keyed by `(orgId, policyHash, request
- * signature)` — the orgId scopes verdicts to a tenant so org A's "allow"
- * for `api.example.com` cannot satisfy org B's identical request, even when
- * the composed policy text hashes the same. A policy edit invalidates
- * prior verdicts automatically — the hash changes, the cache misses.
+ * Small LRU with absolute TTL. The caller's key must scope a verdict to its
+ * tenant and to everything the verdict depends on, so an edit to any of them
+ * misses the cache instead of reusing a stale verdict.
  *
  * Scale budget: expected to sit in the low thousands of entries. When the
  * map grows past `maxEntries`, the oldest-touched key is evicted.
  */
-export class VerdictCache {
-  private entries = new Map<string, Entry>();
+export class VerdictCache<T> {
+  private entries = new Map<string, Entry<T>>();
 
   constructor(
     private readonly ttlMs: number,
     private readonly maxEntries: number
   ) {}
 
-  static key(parts: {
-    orgId: string;
-    policyHash: string;
-    hostname: string;
-    method?: string;
-    path?: string;
-  }): string {
-    // A JSON tuple, not a delimiter join: no field's content can bleed into
-    // its neighbour, so two different requests can never share a verdict.
-    return JSON.stringify([
-      parts.orgId,
-      parts.policyHash,
-      parts.hostname.toLowerCase(),
-      parts.method?.toUpperCase() ?? "",
-      parts.path ?? "",
-    ]);
-  }
-
-  get(key: string): JudgeVerdict | undefined {
+  get(key: string): T | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     if (entry.expiresAt <= Date.now()) {
@@ -55,7 +33,7 @@ export class VerdictCache {
     return entry.verdict;
   }
 
-  set(key: string, verdict: JudgeVerdict): void {
+  set(key: string, verdict: T): void {
     if (this.entries.has(key)) {
       this.entries.delete(key);
     } else if (this.entries.size >= this.maxEntries) {

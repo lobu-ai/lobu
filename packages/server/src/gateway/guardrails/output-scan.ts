@@ -40,7 +40,7 @@ async function outputGuardrailsFor(
     organizationId,
     agentGuardrailPrincipal(agentId)
   );
-  return buildGuardrailsByStage(guardrails, registry, organizationId).output;
+  return buildGuardrailsByStage(guardrails, registry).output;
 }
 
 export interface OutputScanContext {

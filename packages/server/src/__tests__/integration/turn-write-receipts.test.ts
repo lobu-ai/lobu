@@ -754,8 +754,8 @@ describe('send_message: an audience guardrail asks only where more people will s
     )) as Record<string, unknown>;
     expect(approved.error, JSON.stringify(approved)).toEqual(expect.any(String));
     expect(posted).not.toHaveBeenCalled();
-    // Admission and the approve recheck read the stored channel; the claim reads the edited one.
-    expect(lookups.map((lookup) => lookup.channel)).toEqual(['C_RECEIPTS', 'C_RECEIPTS', 'C_SHARED']);
+    // Admission reads the stored channel; the approve recheck reads the edited one, before any lock.
+    expect(lookups.map((lookup) => lookup.channel)).toEqual(['C_RECEIPTS', 'C_SHARED']);
     expect((await sendRuns()).find((run) => run.id === run_id)).toMatchObject({ status: 'cancelled', approval_status: 'rejected' });
   });
 

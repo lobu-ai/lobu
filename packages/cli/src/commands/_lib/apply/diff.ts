@@ -47,7 +47,6 @@ import {
   type DesiredView,
   type RecordedGuardrail,
   type RecordedSkill,
-  recordGuardrailConfig,
   recordSkill,
 } from "./desired-state.js";
 import {
@@ -2342,8 +2341,8 @@ const GUARDRAIL_FIELDS = ["config", "applies_to", "enabled"] as const;
 type GuardrailField = (typeof GUARDRAIL_FIELDS)[number];
 
 /**
- * The compared fields of a declaration, a stored row or a record: a judge's
- * policy as its digest (a record holds no more) and subjects in one order.
+ * The compared fields of a declaration, a stored row or a record, with
+ * subjects in one order.
  */
 function comparableGuardrail(
   guardrail: Pick<RecordedGuardrail, "applies_to" | "enabled"> & {
@@ -2351,7 +2350,7 @@ function comparableGuardrail(
   }
 ): Record<GuardrailField, unknown> {
   return {
-    config: recordGuardrailConfig(guardrail.config as Record<string, unknown>),
+    config: guardrail.config,
     applies_to: sortGuardrailSubjects(guardrail.applies_to),
     enabled: guardrail.enabled,
   };

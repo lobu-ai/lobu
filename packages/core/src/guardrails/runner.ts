@@ -37,11 +37,10 @@ export async function runGuardrails<S extends GuardrailStage>(
 
 /**
  * Like {@link runGuardrails} but takes already-resolved {@link Guardrail}
- * instances instead of names. Used by the gateway's per-agent aggregator, which
- * produces a mix of registry-backed built-ins and per-agent/skill judge
- * guardrails that cannot be registered on the shared (collision-prone, global)
- * registry. Same parallel-race + first-trip short-circuit + fail-open-on-throw
- * semantics as the name-based path.
+ * instances instead of names. Used by the gateway's aggregator, which renames
+ * each registry-backed built-in after the library row that enables it. Same
+ * parallel-race + first-trip short-circuit + fail-open-on-throw semantics as
+ * the name-based path.
  */
 export async function runGuardrailInstances<S extends GuardrailStage>(
   stage: S,

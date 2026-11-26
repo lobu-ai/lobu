@@ -18,10 +18,7 @@ import type { AccountToolContext, InboundToolCall } from './registry';
  * already pass the outbound MCP proxy's pre-tool stage, and that lane must not
  * change. Unlike the proxy, this fails closed: when the guardrails cannot be
  * looked up (the library read or the registry), the call is refused with
- * `INTERNAL` rather than executed unchecked. A judge provider failure (error,
- * timeout, missing model, open circuit) is not that case: `JudgeRunner` turns
- * it into a deny verdict, so it is a `PERMISSION` trip with a `guardrail-trip`
- * audit row, the same as a policy denial.
+ * `INTERNAL` rather than executed unchecked.
  *
  * Invariant: every workspace a tool call acts in with the caller's identity
  * passes this check before its first read or write there. Only the addressing

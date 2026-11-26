@@ -383,15 +383,15 @@ manual-only Automation.
 ### Guardrails (checks on what agents say and do)
 
 Guardrails live in the workspace guardrail library, not on an agent. Declare
-them in the top-level `guardrails` array; each sets exactly one of `builtin`,
-`judge` or `requireTool`, and applies to every agent unless `appliesTo` names
-some.
+them in the top-level `guardrails` array; each names one built-in check
+(`secret-scan`, `pii-scan` or `forbidden-tools`) and applies to every agent
+unless `appliesTo` names some.
 
 ```ts
 const noSecrets = defineGuardrail({ name: "no-secrets", builtin: "secret-scan" });
-const noRefunds = defineGuardrail({
-  name: "no-refunds",
-  judge: { stage: "output", policy: "Never promise a refund." },
+const noPii = defineGuardrail({
+  name: "no-pii",
+  builtin: "pii-scan",
   appliesTo: [{ agent: "support" }],
 });
 ```

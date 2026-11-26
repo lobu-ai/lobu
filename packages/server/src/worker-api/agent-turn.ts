@@ -1041,9 +1041,9 @@ export async function completeAgentTurnRun(c: Context<{ Bindings: Env }>) {
     const ownerFirstError = typeof body.first_error === 'string' ? stripNul(body.first_error).trim() : '';
     await insertAgentTurnResponse(tx, run, {
       // `tools_used` is forwarded as sent, NOT defaulted to `[]`. Absent and
-      // empty are different claims downstream: `requireTool` passes on absent
-      // (it cannot prove a miss) and trips on empty. Turning a worker that
-      // reported nothing into "called nothing" would invent that claim. The
+      // empty are different claims downstream: absent cannot prove a miss, empty
+      // asserts one. Turning a worker that reported nothing into "called
+      // nothing" would invent that claim. The
       // guest always sends the array, so absent means a genuinely older worker.
       //
       // Per-input workers scope this ledger to the owner input; each steered

@@ -65,9 +65,9 @@ export class ProviderRegistryService {
    * When a load FAILED, the earliest time we will try again. A failure used to
    * set `loadAttempted` permanently, so one transient miss — a config volume
    * not mounted yet, a blip fetching a remote registry — disabled the registry
-   * for the life of the process. Callers that fail closed on an unreadable
-   * registry (the egress judge) would then deny every request forever with no
-   * path back short of a restart. Retry on a cooldown so a transient failure
+   * for the life of the process. A caller that fails closed on an unreadable
+   * registry would then deny every request forever with no path back short of
+   * a restart. Retry on a cooldown so a transient failure
    * heals, without hot-looping on a registry that is genuinely absent.
    */
   private retryLoadAfter = 0;

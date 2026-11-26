@@ -47,7 +47,7 @@ export interface AgentMetadata {
    * in-memory stores that predate per-tenant scoping; populated by the
    * postgres-backed store. The public Agent API route reads this to stamp
    * worker tokens with the agent's org so the egress proxy can scope
-   * per-tenant gates (grants, judge cache, judge policy).
+   * per-tenant gates (grants).
    */
   organizationId?: string;
   createdAt: number;

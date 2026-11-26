@@ -1134,7 +1134,7 @@ export function skillFromFile(path: string, opts?: { name?: string }): Skill {
 /**
  * A workspace guardrail: a content check the runtime enforces on the agents it
  * applies to. `lobu apply` writes each into the workspace guardrail library by
- * name. Set exactly one of `builtin`, `judge` or `requireTool`.
+ * name.
  *
  * Writing the library needs an owner/admin web session or a personal access
  * token with the `guardrails:write` scope (set `LOBU_API_TOKEN`); a CLI login
@@ -1147,21 +1147,8 @@ export interface Guardrail {
    * 64 characters. Fixed once created: renaming creates a new guardrail.
    */
   name: string;
-  /** A built-in check, enforced at every stage the built-in implements. */
-  builtin?: "secret-scan" | "pii-scan" | "forbidden-tools";
-  /** An LLM judge with its own policy. */
-  judge?: {
-    stage: "input" | "output" | "pre-tool" | "egress";
-    policy: string;
-    /** `<provider>/<model>`; the organization's default model when omitted. */
-    model?: string;
-    /** Stage `pre-tool` only: judge only calls to these tools. */
-    tools?: string[];
-    /** Stage `egress` only (required there): the domain patterns it governs. */
-    domains?: string[];
-  };
-  /** Fail an output that comes from a turn that never called one of `tools`. */
-  requireTool?: { tools: string[] };
+  /** The built-in check, enforced at every stage the built-in implements. */
+  builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
   /** The agents it applies to, by id. Omit for every agent in the workspace. */
   appliesTo?: Array<{ agent: string }>;
   /** Default true. */

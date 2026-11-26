@@ -14,6 +14,7 @@
  */
 
 import { isManualUserEdit } from '../../auth/direct-user-context';
+import { policyRuleUsingClassifier } from '../../authz/policy-classify';
 import {
   ClassifyContentAction,
   CreateClassifierAction,
@@ -26,6 +27,7 @@ import {
 import type { Static } from '@sinclair/typebox';
 import type { DbClient } from '../../db/client';
 import { getDb, pgTextArray } from '../../db/client';
+import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';
@@ -224,6 +226,22 @@ async function handleDelete(
   ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
+
+  // A policy rule's classify condition names the classifier by slug; deleting
+  // it would silently turn that condition unknown.
+  const [classifier] = await sql<{ slug: string }>`
+    SELECT slug FROM classify_facet
+    WHERE id = ${args.classifier_id} AND organization_id = ${ctx.organizationId}
+  `;
+  if (classifier) {
+    const ruleId = await policyRuleUsingClassifier(sql, ctx.organizationId, classifier.slug);
+    if (ruleId !== null) {
+      throw new ToolUserError(
+        `Classifier "${classifier.slug}" is used by policy rule ${ruleId}; remove its classify condition first.`,
+        400
+      );
+    }
+  }
 
   const result = await sql`
     UPDATE classify_facet

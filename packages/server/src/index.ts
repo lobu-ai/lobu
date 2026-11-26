@@ -1171,8 +1171,8 @@ app.delete("/api/:orgSlug/connections/:id", mcpAuth, async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Agent permissions ("Guardrails" is the separate LLM-judge surface; this is the
-// deterministic write-gate envelope). Returns the ORG FLOOR rows (principal_kind
+// Agent permissions ("Guardrails" is the separate built-in-check surface; this is
+// the deterministic write-gate envelope). Returns the ORG FLOOR rows (principal_kind
 // NULL) and THIS AGENT's rows across all three write classes, so the UI can show
 // the floor as a non-loosenable baseline and the agent's overrides on top.
 app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {

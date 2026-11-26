@@ -488,8 +488,7 @@ export class MessageConsumer {
           );
           const list = buildGuardrailsByStage(
             guardrails,
-            this.guardrailRegistry,
-            data.organizationId
+            this.guardrailRegistry
           ).input;
           if (list.length > 0) {
             const outcome = await runGuardrailInstances("input", list, {

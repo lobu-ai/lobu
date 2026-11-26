@@ -1,6 +1,8 @@
 /**
- * Guardrails reader cutover (`20261125140000_workspace_guardrails_reader_cutover.sql`)
- * and its custom config normalization (`20261125160000_workspace_guardrails_custom_config_keys.sql`).
+ * Guardrails reader cutover (`20261125140000_workspace_guardrails_reader_cutover.sql`),
+ * its custom config normalization (`20261125160000_workspace_guardrails_custom_config_keys.sql`)
+ * and the upgrade refusal once custom checks retired
+ * (`20261125210000_refuse_custom_guardrails.sql`).
  *
  * The backfill moves every agent's built-in toggles (`agents.guardrails`) and
  * custom checks (`agents.guardrails_inline`) into the workspace guardrail
@@ -13,15 +15,14 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { isBuiltinGuardrailConfig } from '@lobu/core/contracts/workspace-guardrails';
 import { type DbClient, getDb } from '../../../db/client';
 import { loadMigrationUpSection } from '../../../db/migration-loader';
-import { egressJudgeRules } from '../../../gateway/permissions/policy-store';
 import { agentGuardrailPrincipal, resolveGuardrails } from '../../../guardrails/workspace-guardrails';
 import { createTestOrganization } from '../../setup/test-fixtures';
 
 const MIGRATION = '20261125140000_workspace_guardrails_reader_cutover.sql';
 const NORMALIZATION = '20261125160000_workspace_guardrails_custom_config_keys.sql';
+const REFUSAL = '20261125210000_refuse_custom_guardrails.sql';
 
 function resolveMigrationsDir(): string {
   let dir = __dirname;
@@ -79,6 +80,7 @@ async function insertAgent(
 
 const up = () => loadMigrationUpSection(resolveMigrationsDir(), MIGRATION);
 const normalize = () => loadMigrationUpSection(resolveMigrationsDir(), NORMALIZATION);
+const refuse = () => loadMigrationUpSection(resolveMigrationsDir(), REFUSAL);
 
 const judge = (name: string, policy: string, extra: Record<string, unknown> = {}) => ({
   name,
@@ -245,10 +247,7 @@ describe('workspace guardrails reader cutover migration', () => {
       ]);
       const read = async () => {
         const rows = await resolveGuardrails(tx as unknown as DbClient, orgId, agentGuardrailPrincipal(agent));
-        return {
-          rows: Object.fromEntries(rows.map((row) => [row.name, row])),
-          egress: egressJudgeRules(rows).map((rule) => rule.judgeName),
-        };
+        return { rows: Object.fromEntries(rows.map((row) => [row.name, row])) };
       };
       await tx.unsafe(up());
       const backfilled = await read();
@@ -259,18 +258,15 @@ describe('workspace guardrails reader cutover migration', () => {
       return { backfilled, normalized, rerun };
     });
 
-    // The backfill's output reads every stray-keyed check as a built-in, so
-    // the egress judge governs nothing.
+    // The backfill copied each check's stray `builtin` key.
     for (const c of cases) {
-      expect(isBuiltinGuardrailConfig(result.backfilled.rows[c.name]!.config)).toBe(true);
+      expect(Object.hasOwn(result.backfilled.rows[c.name]!.config, 'builtin')).toBe(true);
     }
-    expect(result.backfilled.egress).toEqual([]);
 
     for (const c of cases) {
       expect(result.normalized.rows[c.name]?.config).toEqual(c.config);
       expect(result.normalized.rows[c.name]).toMatchObject({ enabled: true, revision: 2 });
     }
-    expect(result.normalized.egress).toEqual(['egress-gate']);
     // A genuine built-in and a check without stray keys stay untouched.
     expect(result.normalized.rows['secret-scan']?.config).toEqual({ builtin: 'secret-scan' });
     expect(result.normalized.rows['secret-scan']?.revision).toBe(1);
@@ -278,5 +274,38 @@ describe('workspace guardrails reader cutover migration', () => {
     expect(result.normalized.rows.plain?.revision).toBe(1);
     // Idempotent: a second run finds nothing to normalize.
     expect(result.rerun).toEqual(result.normalized);
+  });
+
+  it('refuses the upgrade while any custom check remains, archived included, and deletes nothing', async () => {
+    const orgId = (await createTestOrganization()).id;
+    const custom = synth('guardrail');
+
+    const result = await inRollback(async (tx) => {
+      const attempt = () =>
+        tx.savepoint((sp: Sql) => sp.unsafe(refuse())).then(
+          () => null,
+          (err: unknown) => err as { message?: string }
+        );
+      await tx`
+        INSERT INTO workspace_guardrails (id, organization_id, name, config)
+        VALUES (${synth('guardrail')}, ${orgId}, 'secret-scan', ${tx.json({ builtin: 'secret-scan' })})
+      `;
+      const builtinsOnly = await attempt();
+      await tx`
+        INSERT INTO workspace_guardrails (id, organization_id, name, config, archived_at)
+        VALUES (${custom}, ${orgId}, 'no-refunds',
+                ${tx.json({ kind: 'judge', stage: 'output', policy: 'Never promise refunds.' })}, now())
+      `;
+      const withArchivedCustom = await attempt();
+      const [{ count }] = await tx<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM workspace_guardrails WHERE organization_id = ${orgId}
+      `;
+      return { builtinsOnly, withArchivedCustom, count };
+    });
+
+    expect(result.builtinsOnly).toBeNull();
+    expect(result.withArchivedCustom?.message).toContain(`${orgId}/no-refunds`);
+    expect(result.withArchivedCustom?.message).toMatch(/Custom guardrail checks are retired/);
+    expect(result.count).toBe(2);
   });
 });
