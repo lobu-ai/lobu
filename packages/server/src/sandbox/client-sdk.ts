@@ -419,6 +419,7 @@ export function buildClientSDK(
 			// follows the caller's role, or an Automation script's creator role.
 			const scoped = validateAndScopeQuery(querySql, workspaceCtx.organizationId, {
 				window,
+				includeCatalog: true,
 				userId: authzScopeFromToolContext(workspaceCtx).principal,
 				personalMemoryPrincipal: authzScopeFromToolContext(workspaceCtx).personalMemoryPrincipal,
 				safeColumns: SAFE_COLUMN_DEFS,

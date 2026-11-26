@@ -43,6 +43,13 @@ import {
   SAFE_COLUMN_DEFS,
   validateTableQuery,
 } from './table-schema';
+import {
+  buildSqlCatalogCtes,
+  isSqlCatalogRelation,
+  rewriteSqlCatalog,
+  SQL_CATALOG_COLUMNS,
+  type SqlCatalogRelation,
+} from './sql-catalog';
 import { getErrorMessage } from "@lobu/core";
 
 /** A named SQL data source: { name, query } or keyed as Record<string, { query }> */
@@ -204,9 +211,13 @@ function assertNoForbiddenFunctions(root: unknown): void {
  * fail OPEN — a deeply-nested `public.oauth_tokens` past the cap would slip
  * past and bypass scoping. The `seen` set bounds the walk on cyclic graphs.
  */
-function collectSchemaQualifiedTables(root: unknown): string[] {
+function collectSchemaQualifiedTables(root: unknown): Array<{ schema: string; name: string; hasCatalog: boolean }> {
   const seen = new Set<object>();
-  const hits: string[] = [];
+  const hits: Array<{ schema: string; name: string; hasCatalog: boolean }> = [];
+  const nameOf = (identifier: unknown): string => {
+    const name = identName(identifier) ?? '?';
+    return (identifier as { quoted?: boolean })?.quoted ? name : name.toLowerCase();
+  };
   const stack: unknown[] = [root];
   while (stack.length > 0) {
     const node = stack.pop();
@@ -219,7 +230,11 @@ function collectSchemaQualifiedTables(root: unknown): string[] {
     }
     const obj = node as Record<string, unknown>;
     if (obj.schema != null && obj.name != null && Object.hasOwn(obj, 'catalog')) {
-      hits.push(`${identName(obj.schema) ?? '?'}.${identName(obj.name) ?? '?'}`);
+      hits.push({
+        schema: nameOf(obj.schema),
+        name: nameOf(obj.name),
+        hasCatalog: obj.catalog != null,
+      });
     }
     for (const key of Object.keys(obj)) stack.push(obj[key]);
   }
@@ -379,7 +394,7 @@ function extractTableRefs(
   const qualified = collectSchemaQualifiedTables(root);
   if (qualified.length > 0) {
     throw new ToolUserError(
-      `Schema-qualified table references are not allowed: ${[...new Set(qualified)].join(', ')}`,
+      `Schema-qualified table references are not allowed: ${[...new Set(qualified.map(({ schema, name }) => `${schema}.${name}`))].join(', ')}`,
       400,
       'VALIDATION'
     );
@@ -426,6 +441,8 @@ export function validateAndScopeQuery(
   organizationId: string,
   options?: {
     safeColumns?: Map<string, ColumnDef[]>;
+    /** Enable caller-visible virtual metadata for the interactive SQL entry points. */
+    includeCatalog?: boolean;
     /**
      * Tables the caller may NOT reference (rejected even though they're in the
      * global allowlist). Used to keep auth/identity tables (oauth_tokens,
@@ -489,8 +506,26 @@ export function validateAndScopeQuery(
 
   // Schema-level validation via SQL parser (rejects unknown tables/columns, mutations, etc.)
   const safeColumns = options?.safeColumns ?? SAFE_COLUMN_DEFS;
-  const queryableTableNames = new Set(safeColumns.keys());
-  const validation = validateTableQuery(trimmed, safeColumns);
+  const catalogRefs: SqlCatalogRelation[] = [];
+  if (options?.includeCatalog && /information_schema/i.test(trimmed)) {
+    for (const { schema, name, hasCatalog } of collectSchemaQualifiedTables(parseRoot(trimmed))) {
+      if (schema === 'information_schema' && !hasCatalog && isSqlCatalogRelation(name)) {
+        catalogRefs.push(name);
+      }
+    }
+  }
+  const catalogTables = new Set(catalogRefs);
+  const rewritten = catalogTables.size ? rewriteSqlCatalog(trimmed, catalogRefs) : trimmed;
+  const validationColumns = catalogTables.size ? new Map(safeColumns) : safeColumns;
+  for (const name of catalogTables) {
+    validationColumns.set(name, SQL_CATALOG_COLUMNS[name]);
+  }
+  const queryableTableNames = new Set(validationColumns.keys());
+  const validation = validateTableQuery(rewritten, validationColumns, {
+    includeCatalog: options?.includeCatalog,
+    restrictedTables: options?.restrictedTables,
+    catalogTables,
+  });
   if (!validation.valid) {
     throw new ToolUserError(validation.errors.join('; '), 400, 'VALIDATION');
   }
@@ -498,10 +533,18 @@ export function validateAndScopeQuery(
   // COMPLETE table extraction (union of getTableNames + raw walk, CTE names
   // excluded). Drives the unknown-table check, the admin gate, AND org-scoping,
   // so an expression-nested table is caught by all three.
-  const tableRefs = extractTableRefs(trimmed, queryableTableNames);
+  const tableRefs = extractTableRefs(rewritten, queryableTableNames);
   const unknown = tableRefs.filter((t) => !queryableTableNames.has(t));
   if (unknown.length > 0) {
-    throw new ToolUserError(formatUnknownTablesError(unknown, queryableTableNames), 400, 'VALIDATION');
+    throw new ToolUserError(
+      formatUnknownTablesError(
+        unknown,
+        [...safeColumns.keys()].filter((name) => !options?.restrictedTables?.has(name)),
+        options?.includeCatalog
+      ),
+      400,
+      'VALIDATION'
+    );
   }
 
   if (options?.restrictedTables) {
@@ -516,15 +559,17 @@ export function validateAndScopeQuery(
     }
   }
 
-  return {
-    ...buildScopedQuery(
-      trimmed,
-      tableRefs,
-      { ...options?.window, organizationId, userId: options?.userId ?? null, personalMemoryPrincipal: options?.personalMemoryPrincipal ?? null },
-      options
-    ),
-    tableRefs,
-  };
+  const scoped = buildScopedQuery(
+    rewritten,
+    tableRefs.filter((name) => !isSqlCatalogRelation(name) || !catalogTables.has(name)),
+    { ...options?.window, organizationId, userId: options?.userId ?? null, personalMemoryPrincipal: options?.personalMemoryPrincipal ?? null },
+    options
+  );
+  if (catalogTables.size) {
+    const ctes = buildSqlCatalogCtes(catalogTables, safeColumns, options?.restrictedTables, scoped.params);
+    scoped.sql = prependScopedCtes(scoped.sql, ctes);
+  }
+  return { ...scoped, tableRefs };
 }
 
 // ============================================
@@ -1046,21 +1091,22 @@ export function buildScopedQuery(
 
   // Combine CTEs with user query
   if (ctes.length === 0) return { sql: processedQuery, params, scope };
+  return { sql: prependScopedCtes(processedQuery, ctes), params, scope };
+}
 
-  const cteStr = `WITH ${ctes.join(',\n')}`;
+function prependScopedCtes(query: string, ctes: string[]): string {
   // Strip leading line/block comments before deciding how to merge: a
   // `-- note\nWITH x AS (…) …` query is still a WITH, and prepending a second
   // WITH keyword would emit invalid SQL (`WITH … \n -- note \n WITH x …`).
   // Comments are cosmetic, so dropping the leading ones is safe.
-  const body = stripLeadingComments(processedQuery).trim();
+  const body = stripLeadingComments(query).trim();
 
   // If the user query is itself a WITH, splice our CTEs in front of its CTE list
   // (single WITH keyword); otherwise prepend our WITH block.
-  const finalSql = /^WITH\b/i.test(body)
-    ? `${cteStr},\n${body.replace(/^WITH\s+/i, '')}`
-    : `${cteStr}\n${body}`;
-
-  return { sql: finalSql, params, scope };
+  const withClause = /^WITH\s+(?:RECURSIVE\s+)?/i.exec(body)?.[0];
+  return withClause
+    ? `${withClause}${ctes.join(',\n')},\n${body.slice(withClause.length)}`
+    : `WITH ${ctes.join(',\n')}\n${body}`;
 }
 
 // ============================================
