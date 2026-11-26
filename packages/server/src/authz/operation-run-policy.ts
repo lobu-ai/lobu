@@ -267,6 +267,7 @@ export async function applyRunConnectorPolicyAtClaim(params: {
       title: title(operationCardLabel({ operation_name: resolved?.operation.name }, run.action_key)),
       content: message, semanticType: 'operation', runId,
       connectorKey: run.connector_key, connectionId: run.connection_id,
+      automationId: run.automation_id == null ? null : Number(run.automation_id),
       interactionType: 'approval', interactionStatus: blocked ? 'rejected' : 'pending',
       interactionInput: isSourceFeedRead(run.run_metadata) ? null : run.action_input,
       metadata: { ...metadata, ...(resolved ? { operation_name: resolved.operation.name } : {}), status, run_id: runId, action_key: run.action_key, operation_key: run.action_key },

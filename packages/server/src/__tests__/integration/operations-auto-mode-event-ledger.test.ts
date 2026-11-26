@@ -54,6 +54,7 @@ type LedgerRow = {
 	supersedes_event_id: string | null;
 	superseded_by: string | null;
 	connection_id: string | null;
+	automation_id: string | null;
 	metadata: Record<string, unknown>;
 };
 
@@ -65,7 +66,7 @@ async function operationLedger(
 	return (await sql`
 		SELECT id, origin_id, title, semantic_type, interaction_type, interaction_status,
 		       interaction_input, interaction_output, interaction_error,
-		       supersedes_event_id, superseded_by, connection_id, metadata
+		       supersedes_event_id, superseded_by, connection_id, automation_id, metadata
 		FROM events
 		WHERE organization_id = ${orgId}
 		  AND run_id = ${runId}
@@ -474,6 +475,16 @@ describe("operation ledger under Auto policy", () => {
 			.toMatchObject({ statement: "The window asked for this value." });
 		expect(await cancel(withdrawn)).toMatchObject({ cancelled: true });
 		expect((await sql`SELECT approval_status FROM runs WHERE id = ${withdrawn}`)[0].approval_status).toBe("withdrawn");
+
+		// Held under the server-stamped Automation context, the confirmed run's
+		// card chain names that Automation, as its run row does.
+		const actingCtx: ToolContext = { ...runnerCtx, actingAutomationId: automationId, actingRunId: Number(window.id) };
+		const attributed = await execute("attributed", actingCtx);
+		expect(await confirm(attributed, actingCtx)).toMatchObject({ run_id: attributed, status: "completed" });
+		expect((await operationLedger(orgId, attributed)).map((card) => [card.title, Number(card.automation_id)])).toEqual([
+			["Echo — dispatched", automationId],
+			["Echo — completed", automationId],
+		]);
 
 		// A replacement processor's PAT can be stricter than the PAT that held
 		// the Check, even when both act as the same Automation in later windows.

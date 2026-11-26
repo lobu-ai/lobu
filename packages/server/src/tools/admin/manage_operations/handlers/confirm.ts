@@ -186,13 +186,14 @@ export async function handleConfirm(
 			claimed_by: string | null;
 			run_metadata: Record<string, unknown> | null;
 			action_input: Record<string, unknown> | null;
+			automation_id: number | null;
 		}>`
 			UPDATE runs
 			SET approval_status = 'auto',
 				run_metadata = COALESCE(run_metadata, '{}'::jsonb) || jsonb_build_object(${POLICY_CHECK_METADATA_KEY}::text, ${tx.json(check)}::jsonb)
 				${dispatchSet}
 			WHERE id = ${run.id} AND approval_status = 'check' AND status = 'pending'
-			RETURNING status, claimed_by, run_metadata, action_input
+			RETURNING status, claimed_by, run_metadata, action_input, automation_id
 		`;
 		if (!released) throw new Error(`Locked check run ${run.id} could not be released.`);
 		const input = released.action_input ?? {};
@@ -206,6 +207,7 @@ export async function handleConfirm(
 			policy: { ...policy, check },
 			principal,
 			failedMessage: null,
+			automationId: released.automation_id == null ? null : Number(released.automation_id),
 		});
 		return {
 			release: {

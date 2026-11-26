@@ -103,6 +103,7 @@ export async function queueAgentAsk(params: {
 				content: params.body,
 				semanticType: "operation",
 				runId,
+				automationId: params.ctx.actingAutomationId ?? null,
 				interactionType: "approval",
 				interactionStatus: "pending",
 				interactionInputSchema: params.inputSchema,

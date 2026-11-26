@@ -1215,6 +1215,17 @@ describe("notify input_schema — agent asks a human", () => {
 		expect(summary).toContain(
 			"The tone is too promotional for this discussion.",
 		);
+		// The ask card and its rejection both name the asking Automation.
+		const cards = await sql`
+			SELECT interaction_status, automation_id FROM events
+			WHERE organization_id = ${orgId} AND run_id = ${sent.run_id}
+			  AND semantic_type = 'operation'
+			ORDER BY id
+		`;
+		expect(cards.map((card) => [card.interaction_status, Number(card.automation_id)])).toEqual([
+			["pending", automationId],
+			["rejected", automationId],
+		]);
 	});
 
 	it("cannot attach a caller-supplied ask to another organization's Automation history", async () => {
