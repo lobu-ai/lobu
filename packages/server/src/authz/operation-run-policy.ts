@@ -12,7 +12,7 @@ import { insertEvent } from '../utils/insert-event';
 import { allowlistRefusal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
 import { resolvePolicyPrincipal } from './policy-principal';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
-import { storedPolicyClassify } from './policy-classify';
+import { type PolicyClassifyLookup, storedPolicyClassify } from './policy-classify';
 import type { DestinationLookup } from './destination-audience';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
@@ -73,7 +73,7 @@ async function loadPolicyRun(sql: DbClient, organizationId: string, runId: numbe
 }
 
 async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run: PolicyRun, destination: DestinationLookup | undefined,
-  implementationStep = false): Promise<ConnectorPolicyResult> {
+  implementationStep = false, edit?: RunInputEdit): Promise<ConnectorPolicyResult> {
   if (run.run_type !== 'action' || run.connection_id == null || !run.action_key) return unavailable();
   const resolved = await getOperationForConnection(organizationId, Number(run.connection_id), run.action_key, sql);
   const mayVerify = resolved?.connection.status === 'pending_auth' && run.action_key === BROWSER_VERIFY_OPERATION
@@ -84,8 +84,8 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql,
     appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep,
-    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true, input: run.action_input, destination,
-    classify: { live: false, results: storedPolicyClassify(run.run_metadata) } });
+    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true, input: edit?.input ?? run.action_input, destination,
+    classify: edit?.classify ?? { live: false, results: storedPolicyClassify(run.run_metadata) } });
 }
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {
@@ -131,6 +131,13 @@ export async function sourceReadRecoveryAllowed(organizationId: string, runId: n
     && runsWithoutHold((await resolveSourceReadAccess(sql, organizationId, run)).effect);
 }
 
+/** An approver's edited input, decided before it replaces the stored one. */
+interface RunInputEdit {
+  input: Record<string, unknown>;
+  /** Seeded with the stored results; `live` only outside any transaction. */
+  classify: PolicyClassifyLookup;
+}
+
 /** Resolve execution authority from persisted provenance, never from the worker's input. */
 export async function resolveRunConnectorPolicy(params: {
   organizationId: string;
@@ -138,6 +145,8 @@ export async function resolveRunConnectorPolicy(params: {
   sql?: DbClient;
   /** Who sees the stored input's destination; `live` only outside any transaction. */
   destination?: DestinationLookup;
+  /** Decide a held public action's edited input instead of the stored one. */
+  edit?: RunInputEdit;
 }): Promise<ConnectorPolicyResult | null> {
   const sql = params.sql ?? getDb();
   const run = await loadPolicyRun(sql, params.organizationId, params.runId);
@@ -154,7 +163,8 @@ export async function resolveRunConnectorPolicy(params: {
     && run.policy_principal_kind === null && run.parent_run_id === null) return null;
 
   const parentMarker = run.run_metadata?.[CONNECTOR_PARENT_RUN_METADATA_KEY];
-  if (parentMarker === undefined) return resolvePublicRunPolicy(sql, params.organizationId, run, params.destination);
+  if (parentMarker === undefined) return resolvePublicRunPolicy(sql, params.organizationId, run, params.destination, false, params.edit);
+  if (params.edit) return unavailable();
   if (!Number.isSafeInteger(parentMarker) || Number(parentMarker) !== Number(run.parent_run_id)
     || Number(parentMarker) >= Number(run.id) || Number(parentMarker) < 1) return unavailable();
   const parent = await loadPolicyRun(sql, params.organizationId, Number(parentMarker));

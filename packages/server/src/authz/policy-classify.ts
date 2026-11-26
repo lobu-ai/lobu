@@ -6,8 +6,10 @@
  * result is stored on the run (`run_metadata.policy_classify`) and replayed at
  * claim, approval and dispatch; a result that is missing there is unknown.
  * Discovery never calls the model. Neither the judged text nor the model's
- * reasoning is stored.
+ * reasoning is stored: each result carries a hash of the text it judged, and
+ * answers only for an input whose field still hashes the same.
  */
+import { createHash } from "node:crypto";
 import { createLogger } from "@lobu/core";
 import type { DbClient } from "../db/client";
 import { resolveCompletionTarget } from "../gateway/inference/gateway-completion";
@@ -32,6 +34,8 @@ const ACTION_BUDGET_MS = 3_000;
 export interface PolicyClassifyResult {
 	rule: number;
 	condition: number;
+	/** sha256 of the judged field's text; null when the input had none. */
+	text: string | null;
 	result: ClassifyOutcome;
 	model: string | null;
 	classifier: string | null;
@@ -55,6 +59,11 @@ export interface PolicyClassifyRequest {
 
 const OUTCOMES: readonly ClassifyOutcome[] = ["holds", "not", "unknown"];
 
+function textHash(input: Record<string, unknown> | null | undefined, field: string): string | null {
+	const text = input ? policyConditionText(input, field) : undefined;
+	return text === undefined ? null : createHash("sha256").update(text).digest("hex");
+}
+
 /** The results stored on a run, ignoring anything malformed (which then reads as unknown). */
 export function storedPolicyClassify(metadata: Record<string, unknown> | null | undefined): PolicyClassifyResult[] {
 	const raw = metadata?.[POLICY_CLASSIFY_METADATA_KEY];
@@ -65,16 +74,25 @@ export function storedPolicyClassify(metadata: Record<string, unknown> | null | 
 			entry !== null &&
 			Number.isSafeInteger(entry.rule) &&
 			Number.isSafeInteger(entry.condition) &&
+			typeof entry.text === "string" &&
 			OUTCOMES.includes(entry.result),
 	);
 }
 
-/** Answer a rule's classify condition from known results; unknown when absent. */
+/**
+ * Answer a rule's classify condition for `input` from known results; unknown
+ * when absent, or when the result judged other text (an approver's edit).
+ */
 export function classifiedFrom(
 	results: readonly PolicyClassifyResult[],
-): (rule: EntityApprovalPolicy, index: number) => ClassifyOutcome {
-	return (rule, index) =>
-		results.find((entry) => entry.rule === rule.id && entry.condition === index)?.result ?? "unknown";
+	input: Record<string, unknown> | null | undefined,
+): (rule: EntityApprovalPolicy, index: number, condition: PolicyClassifyCondition) => ClassifyOutcome {
+	return (rule, index, condition) => {
+		const text = textHash(input, condition.field);
+		if (text === null) return "unknown";
+		return results.find((entry) => entry.rule === rule.id && entry.condition === index && entry.text === text)?.result ??
+			"unknown";
+	};
 }
 
 /**
@@ -94,8 +112,8 @@ export async function classifyPolicyConditions(
 	try {
 		return await Promise.all(
 			requests.map(async ({ rule, index, condition }): Promise<PolicyClassifyResult> => {
-				const unknown = { rule: rule.id, condition: index, result: "unknown" as const };
 				const text = policyConditionText(input, condition.field);
+				const unknown = { rule: rule.id, condition: index, text: textHash(input, condition.field), result: "unknown" as const };
 				if (text === undefined || condition.model === undefined) {
 					return { ...unknown, model: condition.model ?? null, classifier: null };
 				}

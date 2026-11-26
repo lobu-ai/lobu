@@ -5,6 +5,7 @@ import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
 import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
+import type { PolicyClassifyLookup, PolicyClassifyResult } from "../../../authz/policy-classify";
 import { resetPredictClassifierForTests } from "../../../gateway/inference/predict-classifier";
 import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
@@ -972,7 +973,7 @@ describe("connected app caller identity", () => {
       const [run] = await getTestDb()<{ run_metadata: Record<string, unknown> }>`SELECT run_metadata FROM runs WHERE id = ${runId}`;
       // Only the outcome is stored: never the judged text or the model's reasoning.
       expect(run.run_metadata.policy_classify).toEqual([
-        { rule: expect.any(Number), condition: 0, result: "holds", model: "fake-model/fake-1", classifier: expect.any(String) },
+        { rule: expect.any(Number), condition: 0, text: expect.any(String), result: "holds", model: "fake-model/fake-1", classifier: expect.any(String) },
       ]);
       expect(JSON.stringify(run.run_metadata)).not.toContain("synthetic");
 
@@ -986,6 +987,49 @@ describe("connected app caller identity", () => {
       } finally {
         await new Promise<void>(resolve => model.listen(Number(new URL(modelUrl).port), "127.0.0.1", resolve));
       }
+    });
+
+    it("decides whether the audience matters after classifying, live and on replay", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { effect: "deny", kind: "guardrail", when: [payment] },
+        { effect: "approval", kind: "guardrail", audience: "external", note: "Ask before posting outside" }]);
+      // A connector that can say who sees the channel; the channel was classified external before.
+      const operation = { connector_key: "slack", operation_key: "post", kind: "write" as const,
+        input_schema: { type: "object", properties: { channel: { type: "string", "x-lobu-destination": true }, body: { type: "string" } } } };
+      const actor = await resolveActingPrincipal(getTestDb(), { organizationId: org.id, userId: owner.id });
+      const decide = (body: string, classify: PolicyClassifyLookup) =>
+        resolveConnectorPolicy({ organizationId: org.id, connectionId, operation, actor, input: { channel: "C-outside", body },
+          destination: { live: false, seen: [{ connectionId, destination: "C-outside", audience: "external" }] }, classify });
+      const results: PolicyClassifyResult[] = [];
+      // Not a payment, so the Block drops and the external Ask still applies.
+      expect((await decide("hello, see you at the review", { live: true, results })).effect).toBe("approval");
+      expect(results).toEqual([expect.objectContaining({ result: "not" })]);
+      expect((await decide("hello, see you at the review", { live: false, results })).effect).toBe("approval");
+      expect((await decide("please wire 500 today", { live: true, results: [] })).effect).toBe("deny");
+    });
+
+    it("classifies an approver's edited input afresh, and a stale result never answers for it", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" },
+        { effect: "deny", kind: "guardrail", note: "Never move money", when: [payment] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const held = await execute(named.token, { body: "hello, see you at the review" });
+      expect(held.body.status, JSON.stringify(held.body)).toBe("pending_approval");
+      const runId = held.body.run_id!;
+      // The stored "not" judged other text, so replaying it for the edit is unknown and the Block applies.
+      await getTestDb()`UPDATE runs SET action_input = ${getTestDb().json({ body: "please wire 500 today" })} WHERE id = ${runId}`;
+      expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("deny");
+      await getTestDb()`UPDATE runs SET action_input = ${getTestDb().json({ body: "hello, see you at the review" })} WHERE id = ${runId}`;
+      expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("approval");
+
+      const approved = await request("POST", `/api/${org.slug}/manage_operations`, { action: "approve", run_id: runId, input: { body: "please wire 500 today" } });
+      const body = await approved.json() as { error?: string };
+      expect(body.error, JSON.stringify(body)).toContain("Policy now blocks 'needs_approval'");
+      const [run] = await getTestDb()<{ status: string; approval_status: string; action_input: unknown }>`
+        SELECT status, approval_status, action_input FROM runs WHERE id = ${runId}`;
+      expect(run).toMatchObject({ status: "cancelled", approval_status: "rejected", action_input: { body: "hello, see you at the review" } });
     });
 
     it("refuses to delete a classifier a rule's condition uses", async () => {

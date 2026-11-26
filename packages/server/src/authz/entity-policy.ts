@@ -1470,6 +1470,9 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	return rows.length > 0;
 }
 
+/** Every audience a decision can see: none to classify, then narrowest to widest. */
+const AUDIENCES = [undefined, "private", "workspace", "external", "unknown"] as const;
+
 /** Connector decisions share one evaluator across admission, discovery and inspection. */
 export async function resolveConnectorPolicy(
 	args: Omit<
@@ -1497,36 +1500,40 @@ export async function resolveConnectorPolicy(
 		args.skipCallerAllowlists ? [] : loadCallerActionAllowlists(args.organizationId, args.actor, args.appPrincipalId, args.sql),
 	]);
 	const evaluation = { ...args, policies, allowlists };
+	// Classify first: which rules hold decides whether the audience matters.
+	const lookup = args.classify;
+	if (lookup?.live && args.input) {
+		const wanted: PolicyClassifyRequest[] = [];
+		const stored = classifiedFrom(lookup.results, args.input);
+		// The widest audience reaches every rule, so this collects every unanswered condition.
+		evaluateConnectorPolicy({
+			...evaluation,
+			destinationAudience: "unknown",
+			classified: (rule, index, condition) => {
+				const outcome = stored(rule, index, condition);
+				if (outcome === "unknown") wanted.push({ rule, index, condition });
+				return outcome;
+			},
+		});
+		// Ask the model only when an answer could change the decision for some audience.
+		const couldChange = AUDIENCES.some((destinationAudience) => {
+			const at = { ...evaluation, destinationAudience, classified: stored };
+			return evaluateConnectorPolicy({ ...at, unknownConditions: "strict" }).effect !==
+				evaluateConnectorPolicy({ ...at, unknownConditions: "lenient" }).effect;
+		});
+		if (wanted.length > 0 && couldChange) {
+			lookup.results.push(...(await classifyPolicyConditions(args.organizationId, wanted, args.input)));
+		}
+	}
+	const classified = { ...evaluation, classified: lookup && classifiedFrom(lookup.results, args.input) };
 	// Ask the connector only when an audience rule could change the result.
-	const destinationAudience = destinationAudienceMatters(evaluation)
+	const destinationAudience = destinationAudienceMatters(classified)
 		? await classifyDestination({
 			organizationId: args.organizationId, connectionId: args.connectionId, operation: args.operation,
 			input: args.input, lookup: args.destination,
 		})
 		: undefined;
-	const audienced = { ...evaluation, destinationAudience };
-	const lookup = args.classify;
-	if (!lookup) return evaluateConnectorPolicy(audienced);
-	const known = () => classifiedFrom(lookup.results);
-	if (lookup.live && args.input) {
-		const wanted: PolicyClassifyRequest[] = [];
-		const stored = known();
-		const strict = evaluateConnectorPolicy({
-			...audienced,
-			unknownConditions: "strict",
-			classified: (rule, index, condition) => {
-				const outcome = stored(rule, index);
-				if (outcome === "unknown") wanted.push({ rule, index, condition });
-				return outcome;
-			},
-		});
-		// Ask the model only when an answer could change the decision.
-		if (wanted.length === 0) return strict;
-		const lenient = evaluateConnectorPolicy({ ...audienced, unknownConditions: "lenient", classified: stored });
-		if (lenient.effect === strict.effect) return strict;
-		lookup.results.push(...(await classifyPolicyConditions(args.organizationId, wanted, args.input)));
-	}
-	return evaluateConnectorPolicy({ ...audienced, classified: known() });
+	return evaluateConnectorPolicy({ ...classified, destinationAudience });
 }
 
 /** Reconstruct the original requester from a durable operation, never its reviewer. */
