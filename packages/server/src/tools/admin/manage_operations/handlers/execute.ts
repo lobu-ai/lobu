@@ -995,6 +995,14 @@ export async function handleExecute(
 	// Rules stop agents, apps and Automations, never a person in the web app.
 	// A delegated step answers to the parent run's requester instead.
 	const person = !delegation && isPersonInWebApp(ctx);
+	// Classify the same normalized input that the run persists and replays.
+	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
+	input = preparedFiles.input;
+	if (preparedFiles.claims.length > 0) {
+		const fileValidationError = validateOperationInput(operation, input);
+		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
+		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
+	}
 	// Classify conditions run here, before any run lock; the run keeps their
 	// results so claim, approval and dispatch replay them.
 	const classify: PolicyClassifyLookup = { live: true, results: [] };
@@ -1050,13 +1058,8 @@ export async function handleExecute(
 	if (deviceAccess === "refuse") {
 		return withFailureCode({ error: DEVICE_ACCESS_REFUSED }, "PERMISSION");
 	}
-	const preparedFiles = await prepareOperationFiles(input, operation.input_schema, ctx);
-	input = preparedFiles.input;
-	if (preparedFiles.claims.length > 0) {
-		const fileValidationError = validateOperationInput(operation, input);
-		if (fileValidationError) throw new ToolUserError(`Invalid stored file metadata: ${fileValidationError}`, 422);
-		runMetadata = { ...runMetadata, input_files: preparedFiles.claims };
-	}
+	// Denied operations must not publish a copy of an adopted run artifact.
+	await preparedFiles.publishAdoptions();
 	const notificationContext: ActionApprovalNotificationContext = {
 		...await resolveApprovalChatOrigin(ctx),
 		requesterUserId: visibilityUserId ?? ctx.userId ?? null,

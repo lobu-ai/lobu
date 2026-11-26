@@ -1,12 +1,19 @@
 import { serve } from "@hono/node-server";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileInputSchema } from "@lobu/connector-sdk";
 import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
 import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
 import type { PolicyClassifyLookup, PolicyClassifyResult } from "../../../authz/policy-classify";
-import { resetPredictClassifierForTests } from "../../../gateway/inference/predict-classifier";
+import { predictClassifier, resetPredictClassifierForTests } from "../../../gateway/inference/predict-classifier";
+import { ArtifactStore } from "../../../gateway/files/artifact-store";
+import { ingestInputFiles } from "../../../gateway/files/input-files";
+import * as gateway from "../../../lobu/gateway";
 import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
@@ -898,7 +905,8 @@ describe("connected app caller identity", () => {
             res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
           };
           const verdict = (value: string | null) => JSON.stringify({ value, reasoning: "synthetic" });
-          if (text.includes("slow")) setTimeout(() => reply(verdict("payment")), 4_000);
+          if (text.includes("transport-failure")) res.writeHead(503).end();
+          else if (text.includes("slow")) setTimeout(() => reply(verdict("payment")), 4_000);
           else if (text.includes("garbage")) reply("I think it is a payment.");
           else if (text.includes("abstain")) reply(verdict(null));
           else if (text.includes("wire")) reply(verdict("payment"));
@@ -930,6 +938,58 @@ describe("connected app caller identity", () => {
     }
     const exact = () => ({ connection_id: connectionId, operation_key: "app-policy::needs_approval" });
     const payment = { classify: "topic", field: "/body", is: ["payment"] };
+
+    it("recovers after provider resolution fails during a half-open probe", async () => {
+      await addClassifier();
+      await addModelProvider();
+      const predict = (text: string) => predictClassifier({ organizationId: org.id, classifier: "topic", model: "fake-model/fake-1", text });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        expect(await predict(`transport-failure ${attempt}`)).toMatchObject({ ok: false, error: "unavailable" });
+      }
+      expect(await predict("hello before cooldown")).toMatchObject({ ok: false, error: "unavailable" });
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 30_001);
+      try {
+        await getTestDb()`UPDATE inference_providers SET deleted_at = now() WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+        expect(await predict("hello during probe")).toMatchObject({ ok: false, error: "no_model_provider" });
+        await getTestDb()`UPDATE inference_providers SET deleted_at = NULL WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+        expect(await predict("hello before retry")).toMatchObject({ ok: false, error: "unavailable" });
+        clock.mockReturnValue(now + 90_002);
+        expect(await predict("hello after recovery")).toMatchObject({ ok: true, value: "chitchat" });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it.each(["", "/payload", "/payload/image"])("replays classification of prepared file input at %j", async (field) => {
+      await addClassifier();
+      await addModelProvider();
+      const sql = getTestDb();
+      await sql`UPDATE connector_definitions SET actions_schema = ${sql.json({ needs_approval: {
+        name: "Needs approval", kind: "write", input_schema: { type: "object", properties: {
+          payload: { type: "object", properties: { image: fileInputSchema({ maxBytes: 1024, contentTypes: ["image/png"] }) } },
+        } },
+      } })} WHERE organization_id = ${org.id} AND key = 'app-policy'`;
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "deny", kind: "guardrail", when: [{ ...payment, field }] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const directory = await mkdtemp(join(tmpdir(), "policy-classify-files-"));
+      const store = new ArtifactStore(directory);
+      const services = vi.spyOn(gateway, "getLobuCoreServices").mockReturnValue({ getArtifactStore: () => store });
+      try {
+        const [file] = await ingestInputFiles([{ name: "photo.png", mimeType: "image/png", data: Buffer.from("photo") }],
+          { organizationId: org.id, userId: owner.id, isAuthenticated: true }, store, baseUrl);
+        const admitted = await execute(named.token, { payload: { image: { $file: file.$file } } });
+        expect(admitted.body, JSON.stringify(admitted.body)).toMatchObject({ run_id: expect.any(Number) });
+        const runId = admitted.body.run_id!;
+        const [run] = await sql`SELECT action_input, run_metadata FROM runs WHERE id = ${runId}`;
+        expect(run.action_input).toEqual({ payload: { image: file } });
+        expect(run.run_metadata.policy_classify).toEqual([expect.objectContaining({ result: "not" })]);
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("auto");
+      } finally {
+        services.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
 
     it("refuses a classify condition the workspace cannot run, naming the field, and stores the default model", async () => {
       const before = await snapshot();

@@ -159,7 +159,10 @@ async function callModel(
 ): Promise<PredictClassifierResult> {
   const classifierHash = classifier.hash;
   const target = await resolveCompletionTarget(organizationId, model).catch(() => null);
-  if (!target) return { ok: false, error: "no_model_provider", classifierHash };
+  if (!target) {
+    breaker.onFailure(breakerKey);
+    return { ok: false, error: "no_model_provider", classifierHash };
+  }
   const nonce = randomBytes(12).toString("hex");
   const open = `<<<TEXT-${nonce}>>>`;
   const close = `<<<END-${nonce}>>>`;

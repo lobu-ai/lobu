@@ -382,6 +382,8 @@ export class ArtifactStore {
   }
 
   async publish(params: {
+    /** A server-generated UUID reserved while preparing an operation input. */
+    artifactId?: string;
     buffer: Buffer;
     filename: string;
     contentType?: string;
@@ -399,7 +401,7 @@ export class ArtifactStore {
         `Artifact exceeds the ${MAX_ARTIFACT_BYTES}-byte storage limit`,
       );
     }
-    const artifactId = randomUUID();
+    const artifactId = params.artifactId ?? randomUUID();
     const filename = sanitizeFilename(params.filename);
     const contentType = params.contentType || "application/octet-stream";
     const createdAt = Date.now();

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { type FileInputOptions, MAX_CONNECTOR_FILE_BYTES } from '@lobu/connector-sdk';
 import { runArtifactBinding, type ArtifactStore, type StoredArtifactMetadata } from '../gateway/files/artifact-store';
 import { inputArtifactId, inputFileBinding, MAX_INPUT_FILES, storedInputFile } from '../gateway/files/input-files';
@@ -123,17 +124,7 @@ async function adoptRunArtifact(params: {
   ctx: ToolContext;
   binding: string;
   maxBytes: number;
-  publicGatewayUrl: string;
-  /**
-   * Runs against the SOURCE metadata, before the copy is published: a gate that
-   * rejected afterwards would leave an orphan in the caller's own `input:`
-   * namespace, referenced by no claim. Throwing from here publishes nothing.
-   *
-   * Per file, not per operation — in a multi-file input an already-adopted copy
-   * still outlives a later file's rejection, same as an uploaded input does.
-   */
-  accept: (metadata: { contentType: string; size: number }) => void;
-}): Promise<{ metadata: StoredArtifactMetadata; bytes: Buffer } | null> {
+}): Promise<{ metadata: StoredArtifactMetadata; publish: () => Promise<unknown> } | null> {
   const stored = await params.store.inspect(params.artifactId);
   const runId = stored?.binding ? RUN_BINDING.exec(stored.binding)?.[1] : undefined;
   if (!runId) return null;
@@ -150,22 +141,17 @@ async function adoptRunArtifact(params: {
   });
   if (!source) return null;
 
-  params.accept(source.metadata);
-
-  const published = await params.store.publish({
-    buffer: source.bytes,
-    filename: source.metadata.filename,
-    contentType: source.metadata.contentType,
-    publicGatewayUrl: params.publicGatewayUrl,
-    binding: params.binding,
-  });
-  // Everything but the id and the binding carries over verbatim: the adopted
-  // copy must present the SAME filename, media type, size and digest, so a
-  // connector's contentTypes gate and the claim's sha256 pin behave identically
-  // whether the file was uploaded or adopted.
+  const artifactId = randomUUID();
   return {
-    metadata: { ...source.metadata, artifactId: published.artifactId, binding: params.binding },
-    bytes: source.bytes,
+    metadata: { ...source.metadata, artifactId, binding: params.binding },
+    publish: () => params.store.publish({
+      artifactId,
+      buffer: source.bytes,
+      filename: source.metadata.filename,
+      contentType: source.metadata.contentType,
+      publicGatewayUrl: resolvePublicGatewayUrl(),
+      binding: params.binding,
+    }),
   };
 }
 
@@ -175,9 +161,13 @@ export async function prepareOperationFiles(
   schema: Schema | undefined,
   ctx: ToolContext,
   store?: ArtifactStore,
-): Promise<{ input: Record<string, unknown>; claims: FileClaim[] }> {
+): Promise<{ input: Record<string, unknown>; claims: FileClaim[]; publishAdoptions: () => Promise<void> }> {
   const claims: FileClaim[] = [];
-  if (!hasFiles(input) && !JSON.stringify(schema ?? {}).includes('"x-lobu-file"')) return { input, claims };
+  const adoptions: Array<() => Promise<unknown>> = [];
+  const publishAdoptions = async () => {
+    for (const publish of adoptions) await publish();
+  };
+  if (!hasFiles(input) && !JSON.stringify(schema ?? {}).includes('"x-lobu-file"')) return { input, claims, publishAdoptions };
   let totalBytes = 0;
   let fileCount = 0;
   const prepared = await rewriteFiles(input, schema ?? {}, async (value, path, schemas) => {
@@ -194,9 +184,6 @@ export async function prepareOperationFiles(
       }
       maxBytes = Math.min(maxBytes, Number(declaration.maxBytes));
     }
-    // One rule for both paths. Adoption applies it BEFORE publishing its copy,
-    // so a rejected file never leaves an orphan behind; the direct path applies
-    // it below, where it has always run.
     const accept = (metadata: { contentType: string; size: number }) => {
       for (const declaration of declarations) {
         const contentTypes = (declaration as unknown as FileInputOptions).contentTypes;
@@ -209,8 +196,7 @@ export async function prepareOperationFiles(
       }
     };
     const binding = artifactId ? inputFileBinding(ctx) : undefined;
-    let adoptedArtifactId: string | undefined;
-    let file = artifactId
+    let file: { metadata: Pick<StoredArtifactMetadata, "artifactId" | "filename" | "contentType" | "size" | "sha256"> } | null = artifactId
       ? await storeOrThrow(store).read(artifactId, { binding, maxBytes })
       : readInlineFile(value, maxBytes);
     if (!file && artifactId) {
@@ -225,27 +211,23 @@ export async function prepareOperationFiles(
         ctx,
         binding: binding!,
         maxBytes,
-        publicGatewayUrl: resolvePublicGatewayUrl(),
-        accept,
       });
       if (adopted) {
-        adoptedArtifactId = adopted.metadata.artifactId;
+        adoptions.push(adopted.publish);
         file = adopted;
       }
     }
     if (!file) throw new ToolUserError('File is unavailable, outside this caller’s scope, or exceeds the connector limit. Upload it again in this workspace.', 422);
-    // Idempotent for an adopted file: `accept` ran on the same metadata before
-    // the copy was published, and re-running it changes nothing.
     accept(file.metadata);
     totalBytes += file.metadata.size;
     if (!artifactId) return value;
     // The claim names the ADOPTED copy: it is the one bound to this caller, and
     // the one `resolveOperationFiles` will read back under the `input:` binding.
-    claims.push({ path, artifactId: adoptedArtifactId ?? artifactId, binding: binding!, sha256: file.metadata.sha256, maxBytes });
+    claims.push({ path, artifactId: file.metadata.artifactId, binding: binding!, sha256: file.metadata.sha256, maxBytes });
     // Approval cards show storage metadata, never caller-invented filenames/hashes.
     return storedInputFile(file.metadata);
   });
-  return { input: prepared, claims };
+  return { input: prepared, claims, publishAdoptions };
 }
 
 /** Called only with server-stamped metadata from an authorized action run. */

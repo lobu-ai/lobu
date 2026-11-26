@@ -412,6 +412,9 @@ describe('adopting a run-produced artifact as connector file input', () => {
     const original = await store.read(artifactId, { binding: `run:${runId}` });
     expect(original?.bytes).toEqual(BYTES);
 
+    // Preparation reserves a reference without copying bytes before admission.
+    expect(await store.inspect(adoptedId)).toBeNull();
+    await prepared.publishAdoptions();
     // And the adopted copy resolves to the same bytes on execution.
     const resolved = await resolveOperationFiles(prepared.input, JSON.parse(JSON.stringify({ input_files: prepared.claims })), store);
     expect((resolved as { image: { base64: string } }).image.base64).toBe(BYTES.toString('base64'));

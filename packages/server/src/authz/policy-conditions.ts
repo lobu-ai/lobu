@@ -214,7 +214,8 @@ export function policyConditionText(input: Record<string, unknown>, pointer: str
 	const tokens = pointerTokens(pointer);
 	const value = tokens === null ? undefined : resolvePointer(input, tokens);
 	if (value === undefined) return undefined;
-	return typeof value === "string" ? value : JSON.stringify(value) ?? "";
+	// JSONB can reorder object keys between admission and replay.
+	return typeof value === "string" ? value : stableStringify(value);
 }
 
 /** A stored or requested condition list, as one comparable key ("" for none). */
