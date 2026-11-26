@@ -199,6 +199,49 @@ describe("approval notification live state", () => {
 		]);
 	});
 
+	it("lists approvals next to notifications whose resource id is not numeric", async () => {
+		const sql = getTestDb();
+		const org = await createTestOrganization({ slug: "acme" });
+		const user = await createTestUser();
+		await addUserToOrganization(user.id, org.id, "owner");
+		await seedApprovalNotification({
+			organizationId: org.id,
+			userId: user.id,
+			actionKey: "entity_change",
+			title: "Merge duplicates",
+		});
+		// Invitations point at text invitation ids, not event ids.
+		const invitation = await createTestEvent({
+			organization_id: org.id,
+			title: "You're invited",
+			content: "Join the workspace",
+			semantic_type: "notification",
+			metadata: {
+				notification_type: "invitation_received",
+				resource_type: "invitation",
+				resource_id: "inv0000000000000000000000000test1",
+			},
+		});
+		await sql`
+			INSERT INTO notification_targets (event_id, user_id)
+			VALUES (${invitation.id}, ${user.id})
+		`;
+		// Give the planner enough events to drive the proposal lookup by index.
+		for (let i = 0; i < 40; i++) {
+			await createTestEvent({ organization_id: org.id, title: `filler ${i}`, content: "x" });
+		}
+		await sql`ANALYZE events`;
+		await sql`ANALYZE notification_targets`;
+
+		const options = { organizationId: org.id, userId: user.id, limit: 50 };
+		const listed = (await listNotifications(options)).notifications;
+		expect(listed.map((n) => [n.title, n.approval_status]).sort()).toEqual([
+			["Merge duplicates", "pending"],
+			["You're invited", null],
+		]);
+		expect(await getUnreadCount(org.id, user.id)).toBe(2);
+	});
+
 	it("resolves a pending approval whose review card is unreachable as expired", async () => {
 		const sql = getTestDb();
 		const org = await createTestOrganization({ slug: "acme" });
