@@ -1,9 +1,16 @@
+import type { SuggestedPrompt } from "@lobu/core";
 import { describe, expect, mock, test } from "bun:test";
+import {
+  createTestLoopPolicy,
+  insertAgentTurnRun,
+} from "../../__tests__/setup/test-fixtures.js";
 import { InteractionService } from "../interactions.js";
 import {
   registerChatInteractionFanout,
   UnifiedThreadResponseConsumer,
 } from "../platform/unified-thread-consumer.js";
+import { readCurrentSuggestion } from "../suggestions/persist-suggestion.js";
+import { resetTestDatabase, seedAgentRow } from "./helpers/db-setup.js";
 
 const basePayload = {
   messageId: "m1",
@@ -345,27 +352,71 @@ describe("UnifiedThreadResponseConsumer dead-letters instead of silent drops", (
 });
 
 describe("UnifiedThreadResponseConsumer API guardrail bookkeeping", () => {
-  test("includes chip text in the API output scan", async () => {
-    const { consumer } = createConsumer();
-    const scanner = consumer.outputGuardrail;
-    scanner.registry = {};
-    scanner.settingsStore = {};
-    scanner.scanFinal = mock(async () => null);
-    consumer.finalizeSuggestions = mock(async () => undefined);
-    await consumer.handleThreadResponse({
-      id: "job-chips-scan",
-      data: {
-        ...basePayload,
-        platform: "api",
-        teamId: "api",
-        finalText: "Safe reply",
-        suggestions: [{ title: "Private label", message: "Private message" }],
-        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
-      },
-    });
-    expect(scanner.scanFinal.mock.calls[0][0]).toContain("Private label");
-    expect(scanner.scanFinal.mock.calls[0][0]).toContain("Private message");
-  });
+  test.each(["title", "message"] as const)(
+    "blocks a secret in a chip %s before delivery and clears stored chips",
+    async (field) => {
+      await resetTestDatabase();
+      const organizationId = "org-1";
+      const agentId = "agent-1";
+      const conversationId = "api:conv-chips";
+      await seedAgentRow(agentId, { organizationId });
+      await createTestLoopPolicy(organizationId, "reply_out", {
+        principalKind: "agent",
+        principalId: agentId,
+        note: "Secret scan",
+        condition: [{ scan: "secrets", field: "/text" }],
+      });
+
+      const delivered: { text: string; prompts: SuggestedPrompt[] | null }[] = [];
+      const { consumer } = createConsumer({
+        renderer: {
+          async handleCompletion({ finalText }: { finalText: string }) {
+            const suggestion = await readCurrentSuggestion(
+              organizationId,
+              conversationId
+            );
+            delivered.push({
+              text: finalText,
+              prompts: suggestion?.prompts ?? null,
+            });
+          },
+        },
+      });
+      const safeChip = { title: "Continue", message: "Show the next step" };
+      const unsafeChip = { ...safeChip, [field]: "Use AKIAIOSFODNN7EXAMPLE" };
+
+      const turns = [["safe", safeChip], ["unsafe", unsafeChip]] as const;
+      for (const [messageId, chip] of turns) {
+        const turnRunId = await insertAgentTurnRun({
+          organizationId,
+          agentId,
+          conversationId,
+          messageId,
+        });
+        await consumer.handleThreadResponse({
+          id: `job-chips-${messageId}`,
+          data: {
+            ...basePayload,
+            messageId,
+            conversationId,
+            platform: "api",
+            teamId: "api",
+            finalText: "Safe reply",
+            processedMessageIds: [messageId],
+            suggestions: [chip],
+            turnRunId,
+            platformMetadata: { agentId, organizationId },
+          },
+        });
+      }
+
+      expect(delivered).toEqual([
+        { text: "Safe reply", prompts: [safeChip] },
+        { text: "Message blocked by guardrail: Secret scan", prompts: null },
+      ]);
+      expect(await readCurrentSuggestion(organizationId, conversationId)).toBeNull();
+    }
+  );
 
   test("a pod without the SSE owner persists no chips before re-queueing", async () => {
     const { consumer } = createConsumer();
@@ -383,33 +434,6 @@ describe("UnifiedThreadResponseConsumer API guardrail bookkeeping", () => {
       },
     })).rejects.toThrow(/not owned by this gateway instance/);
     expect(consumer.finalizeSuggestions).not.toHaveBeenCalled();
-  });
-
-  test("persists chips only after the scan, and none when it trips", async () => {
-    const { consumer } = createConsumer();
-    const order: string[] = [];
-    const scanner = consumer.outputGuardrail;
-    scanner.registry = {};
-    scanner.settingsStore = {};
-    scanner.scanFinal = mock(async () => {
-      order.push("scan");
-      return { guardrail: "secret-scan", reason: "secret" };
-    });
-    consumer.finalizeSuggestions = mock(async (_data: unknown, prompts: unknown[]) => {
-      order.push(`persist:${prompts.length}`);
-    });
-    await consumer.handleThreadResponse({
-      id: "job-chips-trip",
-      data: {
-        ...basePayload,
-        platform: "api",
-        teamId: "api",
-        finalText: "Reply",
-        suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
-        platformMetadata: { agentId: "agent-1", organizationId: "org-1" },
-      },
-    });
-    expect(order).toEqual(["scan", "persist:0"]);
   });
 });
 

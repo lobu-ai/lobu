@@ -304,10 +304,8 @@ async function handleSend(
   // consumer scans BOTH finalText AND error (a provider/runtime error can carry
   // secrets), so scan both terminal texts here too. Fails open (returns the
   // text) on infra error, matching the renderer path.
-  const guardrailRegistry = coreServices?.getGuardrailRegistry?.() ?? undefined;
   const scanTerminalText = async (text: string): Promise<string> => {
     const trip = await runOutputGuardrailScan(
-      guardrailRegistry,
       text,
       {
         agentId: args.agent_id,

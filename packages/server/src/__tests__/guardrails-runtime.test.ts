@@ -3,9 +3,7 @@
  *
  * Each block constructs the real service (ChatResponseBridge / MessageConsumer
  * / McpProxy), or drives Lobu's own `/mcp` endpoint for the inbound pre-tool
- * stage, wires the same registry the production gateway uses, seeds
- * the workspace guardrail library (`resolveGuardrails` decides what runs for
- * the agent), and drives the public method that handles the corresponding
+ * stage, seeds the workspace policies and drives the public method for that
  * stage. Assertions cover:
  *
  *   - the block message is delivered (chat target / queue / JSON-RPC reply)
@@ -18,7 +16,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateWorkerToken, GuardrailRegistry, MCP_PROTOCOL_VERSION, mintGatewayMcpToken } from '@lobu/core';
+import { generateWorkerToken, MCP_PROTOCOL_VERSION, mintGatewayMcpToken } from '@lobu/core';
 import { deriveAppPrincipalId } from '../auth/app-principal';
 import { AgentSettingsStore } from '../gateway/auth/settings/agent-settings-store';
 import { McpProxy } from '../gateway/auth/mcp/proxy';
@@ -28,12 +26,11 @@ import { UnifiedThreadResponseConsumer } from '../gateway/platform/unified-threa
 import {
   flushPendingGuardrailAudits,
 } from '../gateway/guardrails/audit';
-import { registerBuiltinGuardrails } from '../gateway/guardrails/builtins';
 import { MessageConsumer } from '../gateway/orchestration/message-consumer';
 import type {
   DeploymentManager,
 } from '../gateway/orchestration/deployment-manager';
-import * as gateway from '../lobu/gateway';
+import * as entityPolicy from '../authz/entity-policy';
 import { orgContext } from '../lobu/stores/org-context';
 import { createPostgresAgentConfigStore } from '../lobu/stores/postgres-stores';
 import { initWorkspaceProvider } from '../workspace';
@@ -46,7 +43,7 @@ import {
   createTestOAuthClient,
   createTestOrganization,
   createTestUser,
-  createTestWorkspaceGuardrail,
+  createTestLoopPolicy,
   seedSystemEntityTypes,
 } from './setup/test-fixtures';
 import { post } from './setup/test-helpers';
@@ -153,11 +150,8 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    await createTestWorkspaceGuardrail({
-      organizationId: orgId,
-      name: 'secret-scan',
-      config: { builtin: 'secret-scan' },
-      appliesTo: [{ kind: 'agent', id: agentId }],
+    await createTestLoopPolicy(orgId, 'reply_out', {
+      principalKind: 'agent', principalId: agentId, note: 'secret-scan', condition: [{ scan: 'secrets', field: '/text' }],
     });
   });
 
@@ -171,9 +165,6 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     const manager = createManager(target, agentId, orgId);
     const bridge = new ChatResponseBridge(manager as any);
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
 
     const payload = {
       messageId: 'm1',
@@ -220,7 +211,7 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('secret-scan');
+    expect(rows[0]!.metadata.reason).toBe('secret-scan');
     expect(rows[0]!.metadata.stage).toBe('output');
     expect(rows[0]!.metadata.agent_id).toBe(agentId);
     expect(rows[0]!.metadata.conversation_id).toBe('123');
@@ -246,9 +237,6 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     };
     const bridge = new ChatResponseBridge(manager as any);
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
 
     const payload = {
       messageId: 'm1',
@@ -276,7 +264,7 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('secret-scan');
+    expect(rows[0]!.metadata.reason).toBe('secret-scan');
   });
 
   it('scans payload.finalText at completion for a post-once (Slack) reply with no local stream (cross-replica)', async () => {
@@ -303,9 +291,6 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     };
     const bridge = new ChatResponseBridge(manager as any);
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
 
     const payload = {
       messageId: 'm1',
@@ -331,12 +316,11 @@ describe('ChatResponseBridge — wired output guardrail', () => {
         text: expect.stringContaining('Message blocked by guardrail'),
       }),
     ]);
-    expect(posted[0]?.text).toMatch(/openai-key/);
 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('secret-scan');
+    expect(rows[0]!.metadata.reason).toBe('secret-scan');
   });
 
   it('scans finalText at completion for a LIVE-STREAMING (telegram) reply — catches a secret longer than the per-delta window', async () => {
@@ -349,9 +333,6 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     const manager = createManager(target, agentId, orgId); // telegram = live-streaming
     const bridge = new ChatResponseBridge(manager as any);
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
 
     // A JWT well over the 512-char per-delta window — only the full-text
     // completion scan can see it whole. No handleDelta is called.
@@ -377,12 +358,11 @@ describe('ChatResponseBridge — wired output guardrail', () => {
       p.text?.startsWith('Message blocked by guardrail')
     );
     expect(blockPost).toBeDefined();
-    expect(blockPost!.text).toMatch(/jwt/);
 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('secret-scan');
+    expect(rows[0]!.metadata.reason).toBe('secret-scan');
   });
 
   // Finding 2 (grok [medium]) — FIXED: the per-stream state machine
@@ -394,9 +374,6 @@ describe('ChatResponseBridge — wired output guardrail', () => {
     const manager = createManager(target, agentId, orgId);
     const bridge = new ChatResponseBridge(manager as any);
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
 
     const base = {
       channelId: '123',
@@ -466,8 +443,6 @@ class TestableMessageConsumer extends MessageConsumer {
   }
 }
 
-/** `pii-scan` is the built-in that runs at the input stage. */
-const INPUT_PII_SCAN = { builtin: 'pii-scan' } as const;
 
 describe('MessageConsumer — wired input guardrail', () => {
   let orgId: string;
@@ -480,11 +455,8 @@ describe('MessageConsumer — wired input guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    await createTestWorkspaceGuardrail({
-      organizationId: orgId,
-      name: 'no-pii',
-      config: INPUT_PII_SCAN,
-      appliesTo: [{ kind: 'agent', id: agentId }],
+    await createTestLoopPolicy(orgId, 'message_in', {
+      principalKind: 'agent', principalId: agentId, note: 'no-pii', condition: [{ scan: 'pii', field: '/text' }],
     });
   });
 
@@ -538,10 +510,8 @@ describe('MessageConsumer — wired input guardrail', () => {
     // by default which would try to connect.
     (consumer as any).queue = fakeQueue;
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
     const settingsStore = new AgentSettingsStore(createPostgresAgentConfigStore());
-    consumer.setGuardrails(registry, settingsStore);
+    consumer.setAgentSettingsStore(settingsStore);
 
     await orgContext.run({ organizationId: orgId }, async () => {
       await consumer.invokeHandleMessage({
@@ -577,12 +547,12 @@ describe('MessageConsumer — wired input guardrail', () => {
     expect(workerEnqueues.length).toBe(0);
     expect(threadResponses.length).toBe(1);
     expect(threadResponses[0]!.data.error).toMatch(/Message rejected:/);
-    expect(threadResponses[0]!.data.error).toMatch(/Potential PII detected \(email\)/);
+    expect(threadResponses[0]!.data.error).toContain('no-pii');
 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'input');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('no-pii');
+    expect(rows[0]!.metadata.reason).toBe('no-pii');
   });
 
   it('audits with the required payload organization when platform metadata omits it', async () => {
@@ -613,10 +583,8 @@ describe('MessageConsumer — wired input guardrail', () => {
     const consumer = new TestableMessageConsumer(fakeDeployments);
     (consumer as any).queue = fakeQueue;
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
     const settingsStore = new AgentSettingsStore(createPostgresAgentConfigStore());
-    consumer.setGuardrails(registry, settingsStore);
+    consumer.setAgentSettingsStore(settingsStore);
 
     await orgContext.run({ organizationId: orgId }, async () => {
       await consumer.invokeHandleMessage({
@@ -641,21 +609,21 @@ describe('MessageConsumer — wired input guardrail', () => {
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'input');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('no-pii');
+    expect(rows[0]!.metadata.reason).toBe('no-pii');
   });
 
   it.each([
-    ['is disabled', 'disable'],
+    ['was removed', 'remove'],
     ['applies only to another agent', 'retarget'],
-  ] as const)('does not run a library guardrail that %s', async (_label, change) => {
+  ] as const)('does not run an input rule that %s', async (_label, change) => {
     const db = getTestDb();
-    if (change === 'disable') {
-      await db`UPDATE workspace_guardrails SET enabled = false WHERE organization_id = ${orgId}`;
+    if (change === 'remove') {
+      await db`DELETE FROM write_approval_policies WHERE hook = 'message_in' AND organization_id = ${orgId}`;
     } else {
       const other = await createTestAgent({ organizationId: orgId });
       await db`
-        UPDATE workspace_guardrail_subjects SET principal_id = ${other.agentId}
-        WHERE organization_id = ${orgId}
+        UPDATE write_approval_policies SET principal_id = ${other.agentId}
+        WHERE hook = 'message_in' AND organization_id = ${orgId}
       `;
     }
 
@@ -696,10 +664,7 @@ describe('MessageConsumer — wired input guardrail', () => {
 
     const consumer = new TestableMessageConsumer(fakeDeployments);
     (consumer as any).queue = fakeQueue;
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    consumer.setGuardrails(
-      registry,
+    consumer.setAgentSettingsStore(
       new AgentSettingsStore(createPostgresAgentConfigStore())
     );
 
@@ -752,11 +717,8 @@ describe('McpProxy — wired pre-tool guardrail', () => {
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    await createTestWorkspaceGuardrail({
-      organizationId: orgId,
-      name: 'forbidden-tools',
-      config: { builtin: 'forbidden-tools' },
-      appliesTo: [{ kind: 'agent', id: agentId }],
+    await createTestLoopPolicy(orgId, 'tool_call', {
+      principalKind: 'agent', principalId: agentId, note: 'forbidden-tools', toolPatterns: ['delete_branch', 'delete_repo', 'drop_table'],
     });
   });
 
@@ -778,12 +740,9 @@ describe('McpProxy — wired pre-tool guardrail', () => {
 
     const settingsStore = new AgentSettingsStore(createPostgresAgentConfigStore());
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
 
     const proxy = new McpProxy(fakeConfigService as any, {
       agentSettingsStore: settingsStore,
-      guardrailRegistry: registry,
     });
 
     // Mint a real worker token (uses ENCRYPTION_KEY set by global setup).
@@ -833,10 +792,9 @@ describe('McpProxy — wired pre-tool guardrail', () => {
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'pre-tool');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('forbidden-tools');
+    expect(rows[0]!.metadata.reason).toBe('forbidden-tools');
     // Reason is recorded in the audit row even though it's not surfaced
     // to the worker — operators need it.
-    expect(rows[0]!.metadata.reason).toMatch(/delete_repo/);
   });
 
   it('rejects a JSON-RPC BATCH wrapping a forbidden tools/call instead of forwarding it unguarded', async () => {
@@ -861,12 +819,9 @@ describe('McpProxy — wired pre-tool guardrail', () => {
       createPostgresAgentConfigStore()
     );
 
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
 
     const proxy = new McpProxy(fakeConfigService as any, {
       agentSettingsStore: settingsStore,
-      guardrailRegistry: registry,
     });
 
     const token = generateWorkerToken('u1', 'conv-1', 'deployment-1', {
@@ -958,9 +913,6 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
       platformRegistry as any,
       sse as any
     ) as any;
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    consumer.setOutputGuardrails(registry);
     return consumer;
   }
 
@@ -971,11 +923,8 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
     const agent = await createTestAgent({ organizationId: orgId });
     agentId = agent.agentId;
 
-    await createTestWorkspaceGuardrail({
-      organizationId: orgId,
-      name: 'secret-scan',
-      config: { builtin: 'secret-scan' },
-      appliesTo: [{ kind: 'agent', id: agentId }],
+    await createTestLoopPolicy(orgId, 'reply_out', {
+      principalKind: 'agent', principalId: agentId, note: 'secret-scan', condition: [{ scan: 'secrets', field: '/text' }],
     });
   });
 
@@ -1020,10 +969,7 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
     );
   });
 
-  // VERIFY Finding 3 (grok [low]): when platformMetadata omits organizationId
-  // (as the agent-threads/messaging-api dispatch paths do), a trip still BLOCKS
-  // but writes NO audit row. PASS = the audit gap is real.
-  it('VERIFY-F3: a trip with no organizationId blocks but drops the audit row', async () => {
+  it('blocks and audits when the queue supplies the organization outside the payload', async () => {
     const { sse, events } = createCapturingSse();
     const consumer = createConsumer(sse);
 
@@ -1049,10 +995,10 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
     const complete = events.find((e) => e.event === 'complete');
     expect(complete!.payload.finalText).toContain('Message blocked by guardrail');
 
-    // But no audit row lands (org unresolvable).
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
-    expect(rows.length).toBe(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.metadata.agent_id).toBe(agentId);
   });
 
   it('blocks a secret in the terminal finalText, broadcasts the block message instead, audits the trip', async () => {
@@ -1090,7 +1036,7 @@ describe('UnifiedThreadResponseConsumer — wired output guardrail (API path)', 
     await flushPendingGuardrailAudits();
     const rows = await fetchGuardrailEvents(orgId, 'output');
     expect(rows.length).toBe(1);
-    expect(rows[0]!.metadata.guardrail).toBe('secret-scan');
+    expect(rows[0]!.metadata.reason).toBe('secret-scan');
     expect(rows[0]!.metadata.stage).toBe('output');
     expect(rows[0]!.metadata.agent_id).toBe(agentId);
   });
@@ -1207,8 +1153,6 @@ afterEach(async () => {
  * Lobu's own tools, so the inbound wiring is driven by a pre-tool check this
  * suite registers alongside the built-ins: it denies every call it sees.
  */
-const DENY_EVERY_CALL = 'test-deny-every-call';
-const PRE_TOOL_DENY = { builtin: DENY_EVERY_CALL } as never;
 
 /** A hosted web app's OAuth client, and the app key its tokens act as. */
 async function hostedApp(host: string) {
@@ -1287,14 +1231,6 @@ function expectBlocked(result: ToolCallResult) {
 }
 
 describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools", () => {
-  const registry = new GuardrailRegistry();
-  registerBuiltinGuardrails(registry);
-  registry.register({
-    name: DENY_EVERY_CALL,
-    stage: 'pre-tool',
-    run: async () => ({ tripped: true, reason: 'inbound-deny-reason' }),
-  });
-  let services: ReturnType<typeof vi.spyOn>;
   let userId: string;
   let orgA: { id: string; slug: string };
   let orgB: { id: string; slug: string };
@@ -1327,9 +1263,6 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     await initWorkspaceProvider();
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
-    services = vi
-      .spyOn(gateway, 'getLobuCoreServices')
-      .mockReturnValue({ getGuardrailRegistry: () => registry } as never);
     orgA = await createTestOrganization({ slug: 'inbound-guardrails-a' });
     orgB = await createTestOrganization({ slug: 'inbound-guardrails-b' });
     const user = await createTestUser({ email: 'inbound-guardrails@example.test' });
@@ -1341,30 +1274,20 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     other = await hostedApp('chat.inbound-other.test');
     nested = await hostedApp('chat.inbound-nested.test');
 
-    await createTestWorkspaceGuardrail({
-      organizationId: orgA.id,
-      name: 'a-deny',
-      config: PRE_TOOL_DENY,
-      appliesTo: [{ kind: 'app', id: blocked.appKey }],
+    await createTestLoopPolicy(orgA.id, 'tool_call', {
+      principalKind: 'app', principalId: blocked.appKey, note: 'a-deny',
     });
     // Applies to `other` but passes any Lobu tool: only a lookup failure can
     // make it block.
-    await createTestWorkspaceGuardrail({
-      organizationId: orgA.id,
-      name: 'a-forbidden-tools',
-      config: { builtin: 'forbidden-tools' },
-      appliesTo: [{ kind: 'app', id: other.appKey }],
+    await createTestLoopPolicy(orgA.id, 'tool_call', {
+      principalKind: 'app', principalId: other.appKey, note: 'a-forbidden-tools', toolPatterns: ['delete_branch', 'delete_repo', 'drop_table'],
     });
-    await createTestWorkspaceGuardrail({
-      organizationId: orgB.id,
-      name: 'b-deny',
-      config: PRE_TOOL_DENY,
-      appliesTo: [{ kind: 'app', id: nested.appKey }],
+    await createTestLoopPolicy(orgB.id, 'tool_call', {
+      principalKind: 'app', principalId: nested.appKey, note: 'b-deny',
     });
   });
 
   afterAll(async () => {
-    services.mockRestore();
     await getTestDb()`TRUNCATE agents CASCADE`;
   });
 
@@ -1377,7 +1300,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     const rows = await fetchGuardrailEvents(orgA.id, 'pre-tool');
     expect(rows).toHaveLength(1);
     expect(rows[0]!.metadata).toMatchObject({
-      guardrail: 'a-deny',
+      reason: 'a-deny',
       stage: 'pre-tool',
       agent_id: null,
       app_id: blocked.appKey,
@@ -1401,11 +1324,8 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
   });
 
   it("does not apply app subjects to an agent's gateway MCP calls", async () => {
-    const everyApp = await createTestWorkspaceGuardrail({
-      organizationId: orgA.id,
-      name: 'a-every-app',
-      config: PRE_TOOL_DENY,
-      appliesTo: [{ kind: 'app', id: null }],
+    const everyApp = await createTestLoopPolicy(orgA.id, 'tool_call', {
+      principalKind: 'app', principalId: null, note: 'a-every-app',
     });
     try {
       const workerToken = mintGatewayMcpToken(
@@ -1424,7 +1344,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
       expectRan(await agentCall('query_sql', PROBE));
       expectBlocked(await (await scopedSession(other.clientId))('query_sql', PROBE));
     } finally {
-      await getTestDb()`DELETE FROM workspace_guardrails WHERE id = ${everyApp.id}`;
+      await getTestDb()`DELETE FROM write_approval_policies WHERE id = ${everyApp.id}`;
     }
   });
 
@@ -1432,8 +1352,9 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     await flushPendingGuardrailAudits();
     const tripsBefore = (await fetchGuardrailEvents(orgA.id, 'pre-tool')).length;
     const call = await scopedSession(other.clientId);
-    services.mockReturnValueOnce({ getGuardrailRegistry: () => undefined } as never);
-    const result = await call('query_sql', PROBE);
+    const lookup = vi.spyOn(entityPolicy, 'listEntityApprovalPolicies')
+      .mockRejectedValueOnce(new Error('Test policy lookup failure'));
+    const result = await call('query_sql', PROBE).finally(() => lookup.mockRestore());
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('guardrails could not be checked');
     expect(result.structuredContent?.rows).toBeUndefined();
@@ -1471,7 +1392,7 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
     const tripsInB = await fetchGuardrailEvents(orgB.id, 'pre-tool');
     expect(tripsInB.length).toBeGreaterThanOrEqual(3);
     for (const trip of tripsInB) {
-      expect(trip.metadata).toMatchObject({ guardrail: 'b-deny', app_id: nested.appKey, agent_id: null });
+      expect(trip.metadata).toMatchObject({ reason: 'b-deny', app_id: nested.appKey, agent_id: null });
     }
   });
   /** A bare `/mcp` session for the app blocked only in B, granted A and B. */
@@ -1535,11 +1456,8 @@ describe("Inbound MCP — app-targeted pre-tool guardrails on Lobu's own tools",
       provider: 'google',
       authData: { GOOGLE_CLIENT_ID: 'synthetic-client-id', GOOGLE_CLIENT_SECRET: 'synthetic-client-secret' },
     });
-    await createTestWorkspaceGuardrail({
-      organizationId: managed.id,
-      name: 'managed-deny',
-      config: PRE_TOOL_DENY,
-      appliesTo: [{ kind: 'app', id: nested.appKey }],
+    await createTestLoopPolicy(managed.id, 'tool_call', {
+      principalKind: 'app', principalId: nested.appKey, note: 'managed-deny',
     });
     const previous = process.env.LOBU_MANAGED_AUTH_ORGS;
     process.env.LOBU_MANAGED_AUTH_ORGS = managed.slug;

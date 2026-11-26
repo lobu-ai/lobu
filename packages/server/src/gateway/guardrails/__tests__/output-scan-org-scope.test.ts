@@ -7,21 +7,17 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { GuardrailRegistry } from "@lobu/core";
-import { createTestWorkspaceGuardrail } from "../../../__tests__/setup/test-fixtures.js";
+import { createTestLoopPolicy } from "../../../__tests__/setup/test-fixtures.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "../../__tests__/helpers/db-setup.js";
-import { registerBuiltinGuardrails } from "../builtins.js";
-import { OutputGuardrailScanner, runOutputGuardrailScan } from "../output-scan.js";
+import { hasOutputGuardrails, runOutputGuardrailScan } from "../output-scan.js";
 
 const SECRET_REPLY = "your key is sk-abcdefghij0123456789AB";
 
 describe("output guardrail scan org scoping", () => {
-  const registry = new GuardrailRegistry();
-  registerBuiltinGuardrails(registry);
 
   beforeAll(async () => {
     await ensureDbForGatewayTests();
@@ -31,32 +27,27 @@ describe("output guardrail scan org scoping", () => {
     await resetTestDatabase();
     await seedAgentRow("lobu-builder", { organizationId: "org-a" });
     await seedAgentRow("lobu-builder", { organizationId: "org-b" });
-    await createTestWorkspaceGuardrail({
-      organizationId: "org-a",
-      name: "secret-scan",
-      config: { builtin: "secret-scan" },
-      appliesTo: [{ kind: "agent", id: "lobu-builder" }],
+    await createTestLoopPolicy("org-a", 'reply_out', {
+      principalKind: 'agent', principalId: "lobu-builder", note: 'secret-scan', condition: [{ scan: 'secrets', field: '/text' }],
     });
   });
 
   test("only the caller's org's library decides the scan", async () => {
     const scan = (organizationId: string) =>
-      runOutputGuardrailScan(registry, SECRET_REPLY, {
+      runOutputGuardrailScan(SECRET_REPLY, {
         agentId: "lobu-builder",
         organizationId,
         userId: "U1",
         platform: "slack",
       });
 
-    expect(await scan("org-a")).toMatchObject({ guardrail: "secret-scan" });
+    expect(await scan("org-a")).toMatchObject({ reason: "secret-scan" });
     expect(await scan("org-b")).toBeNull();
   });
 
   test("hasOutputGuardrails reads the caller's org", async () => {
-    const scanner = new OutputGuardrailScanner();
-    scanner.setGuardrails(registry);
 
-    expect(await scanner.hasOutputGuardrails("lobu-builder", "org-a")).toBe(true);
-    expect(await scanner.hasOutputGuardrails("lobu-builder", "org-b")).toBe(false);
+    expect(await hasOutputGuardrails({ agentId: "lobu-builder", organizationId: "org-a" })).toBe(true);
+    expect(await hasOutputGuardrails({ agentId: "lobu-builder", organizationId: "org-b" })).toBe(false);
   });
 });

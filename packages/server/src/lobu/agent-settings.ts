@@ -115,9 +115,9 @@ const MOVED_SETTINGS: Record<string, string> = {
 	skillsConfig:
 		"skillsConfig was removed from agent settings: skills live in the workspace skill library. Read them with manage_skills.",
 	guardrails:
-		"guardrails was removed from agent settings: guardrails live in the workspace guardrail library. Read them with GET /api/:org/guardrails or client.guardrails, write them with PUT /api/:org/guardrails[/:id] or defineGuardrail in lobu.config.ts, or edit them in Settings → Policies.",
+		"guardrails moved to Settings → Policies. Use an agent loop rule for the appropriate hook.",
 	guardrailsInline:
-		"guardrailsInline was removed from agent settings: custom checks live in the workspace guardrail library. Read them with GET /api/:org/guardrails or client.guardrails, write them with PUT /api/:org/guardrails[/:id] or defineGuardrail in lobu.config.ts, or edit them in Settings → Policies.",
+		"guardrails moved to Settings → Policies. Use an agent loop rule for the appropriate hook.",
 };
 
 /** The 422 message for the first moved key in `updates`, or null. */

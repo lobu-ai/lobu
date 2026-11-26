@@ -457,6 +457,21 @@ OAuth/MCP admin tokens cannot grant it, and worker/agent identities cannot use
 it. Policy tokens do not approve pending operation runs. `lobu.config.js` and
 `lobu apply` do not yet manage this collection.
 
+The collection defaults to `hook=operation`. Add `hook=message_in`,
+`hook=reply_out`, or `hook=tool_call` to manage one agent loop hook. Each
+hook and principal scope has its own `{ revision, rules }` collection. For a
+loop hook, `principal_kind=agent` selects all agents and
+`principal_id=<agent-id>` selects one agent in the workspace. Agent
+collections require an owner/admin web session.
+
+Loop rules use `effect: "log"` or `effect: "deny"` and may carry `note`
+and `when`. The rule's `hook`, when supplied, must match the collection.
+Message and reply conditions can inspect `/text`. Tool-call conditions can
+inspect `/arguments`, and only tool-call rules accept `tools`, an optional
+list of 1–50 exact names or namespace wildcards such as `github__*`. An
+omitted `tools` list matches every tool. Invalid selections or rules return
+HTTP 400, and unauthorized requests return HTTP 403.
+
 For binary inputs, use `fileInputSchema` from `@lobu/connector-sdk` on the
 file-valued field, for example `image: fileInputSchema({ maxBytes: 5 * 1024 *
 1024, contentTypes: ["image/png", "image/jpeg"] })`. Callers pass a reusable

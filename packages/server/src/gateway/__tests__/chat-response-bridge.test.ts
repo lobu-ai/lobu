@@ -1,9 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
-import { GuardrailRegistry } from "@lobu/core";
 import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
-import { createTestWorkspaceGuardrail } from "../../__tests__/setup/test-fixtures.js";
-import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
+import { createTestLoopPolicy } from "../../__tests__/setup/test-fixtures.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -388,20 +386,14 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
     await ensureDbForGatewayTests();
     await resetTestDatabase();
     await seedAgentRow("agent-1", { organizationId: "org-1" });
-    await createTestWorkspaceGuardrail({
-      organizationId: "org-1",
-      name: "secret-scan",
-      config: { builtin: "secret-scan" },
-      appliesTo: [{ kind: "agent", id: "agent-1" }],
+    await createTestLoopPolicy("org-1", 'reply_out', {
+      principalKind: 'agent', principalId: "agent-1", note: 'secret-scan', condition: [{ scan: 'secrets', field: '/text' }],
     });
   }
 
   test("blocks secrets contained only in follow-up chips", async () => {
     await seedSecretScan();
     const { bridge, postSuggestion } = chipsHarness();
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
     await bridge.handleCompletion({
       ...chipsPayload,
       suggestions: [{ title: "Use key", message: "Use AKIAIOSFODNN7EXAMPLE" }],
@@ -412,9 +404,6 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
   test("posts no chips for a reply an output guardrail blocked", async () => {
     await seedSecretScan();
     const { bridge, postSuggestion } = chipsHarness();
-    const registry = new GuardrailRegistry();
-    registerBuiltinGuardrails(registry);
-    bridge.setGuardrails(registry);
     await bridge.handleCompletion(
       { ...chipsPayload, finalText: "here is the key AKIAIOSFODNN7EXAMPLE" },
       "s"
@@ -423,6 +412,7 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
   });
 
   test("guardrail-blocked completion posts the block and no answer", async () => {
+    await seedSecretScan();
     const { target, plainPosts } = createStreamingTarget();
     const slackPost = mock(async () => ({ ok: true, ts: "1.1" }));
     const { manager } = createHarness(target, "slack", slackPost, {
@@ -431,24 +421,18 @@ describe("ChatResponseBridge.handleCompletion — multi-replica finalText", () =
       publicGatewayUrl: "https://app.lobu.com/lobu",
     });
     const bridge = new ChatResponseBridge(manager as any);
-    const scanner = (bridge as any).outputGuardrail;
-    scanner.hasOutputGuardrails = async () => true;
-    scanner.scanFinal = async () => ({
-      guardrail: "test-output",
-      reason: "unsafe output",
-    });
 
     await bridge.handleCompletion(
       {
         ...slackPayload,
-        finalText: "unsafe answer",
+        finalText: "Use AKIAIOSFODNN7EXAMPLE",
         processedMessageIds: ["m1"],
       },
       "s"
     );
 
     expect(slackPost).not.toHaveBeenCalled();
-    expect(plainPosts).toEqual(["Message blocked by guardrail: unsafe output"]);
+    expect(plainPosts).toEqual(["Message blocked by guardrail: secret-scan"]);
   });
 
   test("in-band reply suppresses the terminal Slack post", async () => {

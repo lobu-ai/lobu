@@ -3,7 +3,6 @@ import type {
   LegacyAutomationExecutionConfig,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { ManageEntitySchemaArgs } from "@lobu/core/contracts/tools/manage-entity-schema";
-import type { GuardrailSubject } from "@lobu/core/contracts/workspace-guardrails";
 
 /**
  * Shared structural types + tiny helpers used across the apply pipeline
@@ -115,17 +114,4 @@ export function referencedConnectorKeys(connectors: {
     ...connectors.authProfiles.map((p) => p.connector),
     ...connectors.connections.map((c) => c.connector),
   ]);
-}
-
-/** Subjects in one order, so a declaration and the stored row compare equal. */
-export function sortGuardrailSubjects(
-  subjects: readonly GuardrailSubject[]
-): GuardrailSubject[] {
-  const key = (s: GuardrailSubject) =>
-    s.principal_kind === null
-      ? ""
-      : `${s.principal_kind}:${s.principal_id ?? ""}`;
-  return [...subjects].sort((a, b) =>
-    key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0
-  );
 }

@@ -104,8 +104,7 @@ export async function requireOrganizationSettingsAdmin(c: Context) {
  * not one exchanged from a token. OAuth apps, PATs, and agent/worker tokens are
  * refused even with `mcp:admin`, so a connected app cannot widen its own
  * access. `acceptScopedToken` also admits an org-bound PAT carrying that
- * human-minted scope (`policies:write` for organization connector rules,
- * `guardrails:write` for the guardrail library), which only such a session can
+ * human-minted scope (such as `policies:write` for organization connector rules), which only such a session can
  * mint; it never reaches other settings.
  */
 export function requireHumanWorkspaceAdmin(

@@ -105,12 +105,6 @@
       "import": "./dist/contracts/tools/manage-classifiers.js",
       "require": "./dist/contracts/tools/manage-classifiers.js"
     },
-    "./contracts/workspace-guardrails": {
-      "types": "./dist/contracts/workspace-guardrails.d.ts",
-      "bun": "./src/contracts/workspace-guardrails.ts",
-      "import": "./dist/contracts/workspace-guardrails.js",
-      "require": "./dist/contracts/workspace-guardrails.js"
-    },
     "./contracts/agent-settings": {
       "types": "./dist/contracts/agent-settings.d.ts",
       "bun": "./src/contracts/agent-settings.ts",

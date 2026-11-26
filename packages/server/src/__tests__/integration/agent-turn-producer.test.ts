@@ -5680,7 +5680,7 @@ describe('existing team bot replay (single-workspace Slack, unlinked channel sen
         getProviderCatalogService: () => catalog,
         syncNetworkConfigGrants: async () => {},
       } as never);
-      consumer.setGuardrails(undefined, settingsStore);
+      consumer.setAgentSettingsStore(settingsStore);
       await consumer.start();
       const { org, deliver, posts } = await startTeamBot('compatible/compatible-model');
       responses = new UnifiedThreadResponseConsumer(new RunsQueue(), {} as never, {} as never);
