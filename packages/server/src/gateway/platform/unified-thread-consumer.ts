@@ -10,12 +10,11 @@ import {
   getCurrentSpan,
   getTraceparent,
   runInSpanContext,
-  type GuardrailRegistry,
   type SuggestedPrompt,
 } from "@lobu/core";
 import type { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import { readPlatformMetadata } from "../connections/platform-metadata.js";
-import { OutputGuardrailScanner } from "../guardrails/output-scan.js";
+import { hasOutputGuardrails, runOutputGuardrailScan } from "../guardrails/output-scan.js";
 import type {
   IMessageQueue,
   QueueJob,
@@ -80,14 +79,6 @@ export class UnifiedThreadResponseConsumer {
   private chatResponseBridge?: ChatResponseBridge;
   private interactionService?: InteractionService;
   private chatInteractionFanoutCleanup?: () => void;
-  /**
-   * Output-stage guardrails for the API/SSE path. The ChatResponseBridge runs
-   * output guardrails for chat platforms, but pure API/SSE rows (web SPA +
-   * programmatic Agent API) route through ApiResponseRenderer, which has no
-   * guardrail hook — so without this, secret-scan/pii-scan configured via
-   * `defineAgent` never run on the API surface (the primary web chat surface).
-   */
-  private readonly outputGuardrail = new OutputGuardrailScanner();
 
   constructor(
     private queue: IMessageQueue,
@@ -131,14 +122,6 @@ export class UnifiedThreadResponseConsumer {
     this.chatResponseBridge = bridge;
   }
 
-  /**
-   * Wire output-stage guardrails for the API/SSE path. Without a registry the
-   * API path behaves as before. Chat rows are unaffected — the
-   * ChatResponseBridge owns their output scanning.
-   */
-  setOutputGuardrails(registry?: GuardrailRegistry): void {
-    this.outputGuardrail.setGuardrails(registry);
-  }
 
   /**
    * Wire the cross-pod fan-out for CHAT-PLATFORM interaction cards. Registers a
@@ -513,14 +496,14 @@ export class UnifiedThreadResponseConsumer {
       }
     }
 
-    // Output-stage guardrails for the API/SSE path (see `outputGuardrail`).
+    // Output-stage guardrails for the API/SSE path (API and browser clients).
     // Scoped to API rows — chat rows route through ChatResponseBridge, which
     // owns their output scanning, so scanning them here would double-enforce.
     // Runs on the owning pod (terminal rows are owner-gated above) — or, on a
     // row's final attempt, on whichever pod renders it locally. Either way the
     // authoritative finalText scan is replica-safe: it scans the WHOLE terminal
     // text in one place, so unlike a delta it cannot be split across pods.
-    if (isApiRow && this.outputGuardrail.enabled) {
+    if (isApiRow) {
       const md = readPlatformMetadata(data.platformMetadata);
       const agentId = md.agentId;
       if (agentId) {
@@ -534,12 +517,12 @@ export class UnifiedThreadResponseConsumer {
         // guardrails stream normally — `hasOutputGuardrails` returns false.
         if (data.delta) {
           if (
-            await this.outputGuardrail.hasOutputGuardrails(
+            await hasOutputGuardrails({
               agentId,
-              md.organizationId,
-              md.source,
-              data.conversationId,
-            )
+              organizationId: md.organizationId,
+              source: md.source,
+              conversationId: data.conversationId,
+            })
           )
             return;
         } else if (data.error || data.processedMessageIds?.length) {
@@ -559,7 +542,7 @@ export class UnifiedThreadResponseConsumer {
             ]),
           ].join("\n");
           if (terminalText) {
-            const trip = await this.outputGuardrail.scanFinal(terminalText, {
+            const trip = await runOutputGuardrailScan(terminalText, {
               source: md.source,
               agentId,
               organizationId: md.organizationId,

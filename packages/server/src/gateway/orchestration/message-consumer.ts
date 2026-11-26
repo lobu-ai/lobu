@@ -7,23 +7,14 @@ import {
 	generateWorkerToken,
 	getErrorMessage,
 	getTraceparent,
-	type GuardrailRegistry,
 	type MessagePayload,
 	OrchestratorError,
 	recordError,
-	runGuardrailInstances,
 	runInSpanContext,
 	SpanStatusCode,
 } from "@lobu/core";
-import { buildGuardrailsByStage } from "../guardrails/aggregator.js";
-import { getDb } from "../../db/client.js";
-import {
-  agentGuardrailPrincipal,
-  resolveGuardrails,
-} from "../../guardrails/workspace-guardrails.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
-import { recordGuardrailTrip } from "../guardrails/audit.js";
 import { agentLoopPrincipal, evaluateLoopPolicy } from "../guardrails/loop-policy.js";
 import type {
   IMessageQueue,
@@ -128,7 +119,6 @@ export class MessageConsumer {
   private agentTurnMcp?: AgentTurnDeps["mcp"];
   private agentTurnArtifacts?: AgentTurnDeps["artifacts"];
   private agentTurnInstructions?: AgentTurnDeps["instructions"];
-  private guardrailRegistry?: GuardrailRegistry;
   private recordRunInput: typeof recordAgentRunInput;
   constructor(
     deploymentManager: DeploymentManager,
@@ -167,18 +157,7 @@ export class MessageConsumer {
     this.agentTurnInstructions = instructions;
   }
 
-  /**
-   * Inject guardrail infrastructure post-construction. Called by the
-   * Orchestrator after CoreServices has built the registry — the consumer
-   * is constructed earlier than CoreServices is wired up, so a setter
-   * matches the existing `injectCoreServices` pattern on the orchestrator.
-   * Calling with no args is a no-op (guardrails simply don't run).
-   */
-  setGuardrails(
-    registry?: GuardrailRegistry,
-    settingsStore?: AgentSettingsStore
-  ): void {
-    this.guardrailRegistry = registry;
+  setAgentSettingsStore(settingsStore?: AgentSettingsStore): void {
     this.agentSettingsStore = settingsStore;
   }
 
@@ -475,65 +454,7 @@ export class MessageConsumer {
       // The trip is captured here but DELIVERED below (outside the fail-open
       // try-catch) so a delivery failure can't be swallowed into dispatch.
       let inputTrip: { reason: string; guardrail: string } | null = null;
-      if (
-        this.guardrailRegistry &&
-        data.organizationId &&
-        data.agentId &&
-        data.messageText
-      ) {
-        try {
-          const guardrails = await resolveGuardrails(
-            getDb(),
-            data.organizationId,
-            agentGuardrailPrincipal(data.agentId)
-          );
-          const list = buildGuardrailsByStage(
-            guardrails,
-            this.guardrailRegistry
-          ).input;
-          if (list.length > 0) {
-            const outcome = await runGuardrailInstances("input", list, {
-              agentId: data.agentId,
-              userId: data.userId,
-              message: data.messageText,
-              platform: data.platform,
-              conversationId: effectiveConversationId,
-            });
-            if (outcome.tripped) {
-              void recordGuardrailTrip({
-                organizationId: data.organizationId,
-                agentId: data.agentId,
-                userId: data.userId,
-                conversationId: effectiveConversationId,
-                stage: "input",
-                guardrail: outcome.tripped.guardrail,
-                reason: outcome.tripped.reason,
-                metadata: outcome.tripped.metadata,
-              });
-              // Capture the trip; the rejection is DELIVERED below, outside this
-              // fail-open try-catch. Delivering here would let a delivery
-              // failure be caught by the catch and fall through to dispatch the
-              // blocked input — the opposite of what a trip must do.
-              inputTrip = {
-                reason: outcome.tripped.reason ?? "blocked by policy",
-                guardrail: outcome.tripped.guardrail,
-              };
-            }
-          }
-        } catch (err) {
-          // Fail open on store/registry-level errors — the runner already
-          // fail-opens on per-guardrail throws.
-          logger.warn(
-            {
-              agentId: data.agentId,
-              err: getErrorMessage(err),
-            },
-            "Input guardrail check failed — proceeding without guardrails"
-          );
-        }
-      }
-
-      if (!inputTrip && data.organizationId && data.agentId) {
+      if (data.organizationId && data.agentId) {
         try {
           inputTrip = await evaluateLoopPolicy({
             organizationId: data.organizationId,

@@ -1640,7 +1640,7 @@ describe("mapProjectToDesiredState", () => {
     const agent = { ...defineAgent({ id: "a" }), guardrails: ["secret-scan"] };
     expect(() =>
       mapProjectToDesiredState(defineConfig({ agents: [agent] }), env)
-    ).toThrow(/declares guardrails.*defineGuardrail/);
+    ).toThrow(/declares guardrails.*Settings → Policies/);
   });
 
   test("maps starters, and leaves them undeclared when absent", () => {

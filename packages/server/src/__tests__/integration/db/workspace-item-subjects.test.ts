@@ -1,5 +1,5 @@
 /**
- * Workspace skills and guardrails apply to principals through subject rows.
+ * Workspace skills apply to principals through subject rows.
  * These tables are trust boundaries: a subject must never bind an item of
  * another workspace, name an agent outside its workspace, or outlive the agent
  * it names (agent ids are reusable, so a leftover row would apply to the next
@@ -13,44 +13,15 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestOrganization } from '../../setup/test-fixtures';
 
-interface ItemTable {
-  label: string;
-  parent: string;
-  subjects: string;
-  itemColumn: string;
-  insertItem(orgId: string, name: string, id?: string): Promise<string>;
-}
-
 const synthId = (prefix: string) => `${prefix}-${randomBytes(6).toString('hex')}`;
 
-const tables: ItemTable[] = [
-  {
-    label: 'skills',
-    parent: 'workspace_skills',
-    subjects: 'workspace_skill_subjects',
-    itemColumn: 'skill_id',
-    async insertItem(orgId, name, id = synthId('skill')) {
-      await getTestDb()`
-        INSERT INTO workspace_skills (id, organization_id, name, description, content)
-        VALUES (${id}, ${orgId}, ${name}, 'Synthetic skill', 'Do the synthetic thing.')
-      `;
-      return id;
-    },
-  },
-  {
-    label: 'guardrails',
-    parent: 'workspace_guardrails',
-    subjects: 'workspace_guardrail_subjects',
-    itemColumn: 'guardrail_id',
-    async insertItem(orgId, name, id = synthId('guardrail')) {
-      await getTestDb()`
-        INSERT INTO workspace_guardrails (id, organization_id, name, config)
-        VALUES (${id}, ${orgId}, ${name}, ${JSON.stringify({ builtin: 'secret-scan' })}::jsonb)
-      `;
-      return id;
-    },
-  },
-];
+async function insertSkill(orgId: string, name: string, id = synthId('skill')) {
+  await getTestDb()`
+    INSERT INTO workspace_skills (id, organization_id, name, description, content)
+    VALUES (${id}, ${orgId}, ${name}, 'Synthetic skill', 'Do the synthetic thing.')
+  `;
+  return id;
+}
 
 async function pgError(run: () => Promise<unknown>): Promise<{ code?: string; constraint_name?: string; message: string }> {
   try {
@@ -61,7 +32,7 @@ async function pgError(run: () => Promise<unknown>): Promise<{ code?: string; co
   throw new Error('expected the statement to be rejected');
 }
 
-describe.each(tables)('workspace $label subjects', (table) => {
+describe('workspace skill subjects', () => {
   let orgId: string;
   let otherOrgId: string;
 
@@ -72,15 +43,15 @@ describe.each(tables)('workspace $label subjects', (table) => {
     principalId: string | null,
   ) =>
     getTestDb().unsafe(
-      `INSERT INTO ${table.subjects} (${table.itemColumn}, organization_id, principal_kind, principal_id)
+      `INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
        VALUES ($1, $2, $3, $4)`,
       [itemId, subjectOrgId, kind, principalId],
     );
 
   const subjectRows = async (itemId: string) =>
     (await getTestDb().unsafe(
-      `SELECT principal_kind, principal_id FROM ${table.subjects}
-       WHERE ${table.itemColumn} = $1 ORDER BY principal_kind NULLS FIRST, principal_id NULLS FIRST`,
+      `SELECT principal_kind, principal_id FROM workspace_skill_subjects
+       WHERE skill_id = $1 ORDER BY principal_kind NULLS FIRST, principal_id NULLS FIRST`,
       [itemId],
     )) as unknown as { principal_kind: string | null; principal_id: string | null }[];
 
@@ -94,23 +65,23 @@ describe.each(tables)('workspace $label subjects', (table) => {
   });
 
   it("rejects a subject that claims another workspace's item", async () => {
-    const foreignItem = await table.insertItem(otherOrgId, 'foreign-item');
+    const foreignItem = await insertSkill(otherOrgId, 'foreign-item');
     const err = await pgError(() => insertSubject(orgId, foreignItem, null, null));
     expect(err.code).toBe('23503');
-    expect(err.message).toContain(`${table.subjects}_`);
+    expect(err.message).toContain('workspace_skill_subjects_');
     // The same item is bindable from its own workspace.
     await insertSubject(otherOrgId, foreignItem, null, null);
     expect(await subjectRows(foreignItem)).toEqual([{ principal_kind: null, principal_id: null }]);
   });
 
   it('rejects an agent subject naming a missing agent or another workspace agent', async () => {
-    const item = await table.insertItem(orgId, 'agent-scoped');
+    const item = await insertSkill(orgId, 'agent-scoped');
     await createTestAgent({ organizationId: otherOrgId, agentId: 'other-org-agent' });
 
     for (const agentId of ['missing-agent', 'other-org-agent']) {
       const err = await pgError(() => insertSubject(orgId, item, 'agent', agentId));
       expect(err.code).toBe('23503');
-      expect(err.constraint_name).toBe(`${table.subjects}_agent_fkey`);
+      expect(err.constraint_name).toBe('workspace_skill_subjects_agent_fkey');
     }
 
     // A rebind to a missing agent is rejected the same way.
@@ -118,12 +89,12 @@ describe.each(tables)('workspace $label subjects', (table) => {
     await insertSubject(orgId, item, 'agent', 'own-agent');
     const rebind = await pgError(() =>
       getTestDb().unsafe(
-        `UPDATE ${table.subjects} SET principal_id = 'missing-agent' WHERE ${table.itemColumn} = $1`,
+        `UPDATE workspace_skill_subjects SET principal_id = 'missing-agent' WHERE skill_id = $1`,
         [item],
       ),
     );
     expect(rebind.code).toBe('23503');
-    expect(rebind.constraint_name).toBe(`${table.subjects}_agent_fkey`);
+    expect(rebind.constraint_name).toBe('workspace_skill_subjects_agent_fkey');
 
     // Everyone, any-agent and app subjects name no agent row.
     await insertSubject(orgId, item, null, null);
@@ -143,12 +114,12 @@ describe.each(tables)('workspace $label subjects', (table) => {
   });
 
   it("deleting an agent removes its subject rows, and recreating the id doesn't bring them back", async () => {
-    const item = await table.insertItem(orgId, 'cascade-check');
+    const item = await insertSkill(orgId, 'cascade-check');
     await createTestAgent({ organizationId: orgId, agentId: 'reused-agent' });
     await createTestAgent({ organizationId: orgId, agentId: 'kept-agent' });
     // The same agent id in another workspace keeps its own rows.
     await createTestAgent({ organizationId: otherOrgId, agentId: 'reused-agent' });
-    const otherItem = await table.insertItem(otherOrgId, 'cascade-check');
+    const otherItem = await insertSkill(otherOrgId, 'cascade-check');
     await insertSubject(orgId, item, 'agent', 'reused-agent');
     await insertSubject(orgId, item, 'agent', 'kept-agent');
     await insertSubject(orgId, item, 'agent', null);
@@ -168,7 +139,7 @@ describe.each(tables)('workspace $label subjects', (table) => {
 
   it('an agent delete waits for an in-flight subject insert, then removes it', async () => {
     const sql = getTestDb();
-    const item = await table.insertItem(orgId, 'race-check');
+    const item = await insertSkill(orgId, 'race-check');
     await createTestAgent({ organizationId: orgId, agentId: 'racing-agent' });
 
     // The delete runs on its own connection so it can wait on the insert's lock.
@@ -178,7 +149,7 @@ describe.each(tables)('workspace $label subjects', (table) => {
       await deleter`SELECT 1`;
       const { deleting } = await sql.begin(async (tx) => {
         await tx.unsafe(
-          `INSERT INTO ${table.subjects} (${table.itemColumn}, organization_id, principal_kind, principal_id)
+          `INSERT INTO workspace_skill_subjects (skill_id, organization_id, principal_kind, principal_id)
            VALUES ($1, $2, 'agent', 'racing-agent')`,
           [item, orgId],
         );
@@ -204,18 +175,18 @@ describe.each(tables)('workspace $label subjects', (table) => {
 
   it('enforces the name grammar and keeps unarchived names unique', async () => {
     for (const bad of ['Upper', 'under_score', 'dot.name', '-lead', 'trail-', 'double--hyphen', '', 'a'.repeat(65)]) {
-      const err = await pgError(() => table.insertItem(orgId, bad));
+      const err = await pgError(() => insertSkill(orgId, bad));
       expect(err.code, bad).toBe('23514');
     }
-    await table.insertItem(orgId, 'a'.repeat(64));
-    const first = await table.insertItem(orgId, 'triage-2');
+    await insertSkill(orgId, 'a'.repeat(64));
+    const first = await insertSkill(orgId, 'triage-2');
 
-    const duplicate = await pgError(() => table.insertItem(orgId, 'triage-2'));
+    const duplicate = await pgError(() => insertSkill(orgId, 'triage-2'));
     expect(duplicate.code).toBe('23505');
     // Another workspace may use the name, and archiving frees it.
-    await table.insertItem(otherOrgId, 'triage-2');
-    await getTestDb().unsafe(`UPDATE ${table.parent} SET archived_at = now() WHERE id = $1`, [first]);
-    await table.insertItem(orgId, 'triage-2');
+    await insertSkill(otherOrgId, 'triage-2');
+    await getTestDb().unsafe(`UPDATE workspace_skills SET archived_at = now() WHERE id = $1`, [first]);
+    await insertSkill(orgId, 'triage-2');
   });
 });
 

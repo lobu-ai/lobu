@@ -345,3 +345,6 @@ export type {
   SkillConfig,
   SkillsConfig,
 } from "./contracts/agent-settings";
+
+/** Stage recorded by a guardrail audit event. */
+export type GuardrailStage = "input" | "output" | "pre-tool";

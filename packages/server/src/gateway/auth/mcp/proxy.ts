@@ -1,7 +1,6 @@
 import {
 	createLogger,
 	getErrorMessage,
-	type GuardrailRegistry,
 	type WorkerTokenData,
 } from "@lobu/core";
 import type { Context } from "hono";
@@ -50,7 +49,6 @@ export class McpProxy {
 	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
 	readonly agentSettingsStore?: AgentSettingsStore;
 	/** @internal Used by the route-handler modules (proxy-forward, proxy-rest-routes). */
-	readonly guardrailRegistry?: GuardrailRegistry;
 	/**
 	 * @internal The tool registry's authorization read-only classifier for the
 	 * embedded Lobu server, used by `recordAgentTurnToolCall`. Absent means no
@@ -64,10 +62,8 @@ export class McpProxy {
 		readonly configService: McpConfigSource,
 		options: {
 			toolCache?: McpToolCache;
-			/** Source of per-agent guardrail enable lists for the pre-tool stage. */
+			/** Resolves the workspace of legacy deployment tokens. */
 			agentSettingsStore?: AgentSettingsStore;
-			/** Shared registry of guardrails; pre-tool stage entries are queried. */
-			guardrailRegistry?: GuardrailRegistry;
 			/** See `isReadOnlyLobuTool`. */
 			isReadOnlyLobuTool?: (toolName: string) => boolean;
 		},
@@ -75,7 +71,6 @@ export class McpProxy {
 		this.isReadOnlyLobuTool = options.isReadOnlyLobuTool;
 		this.toolCache = options.toolCache;
 		this.agentSettingsStore = options.agentSettingsStore;
-		this.guardrailRegistry = options.guardrailRegistry;
 		this.upstream = new McpUpstreamClient();
 		this.app = new Hono();
 		this.setupRoutes();
@@ -285,8 +280,7 @@ export class McpProxy {
 	* (`handleProxyRequest`) and the REST `handleCallTool` — so neither can
 	* bypass the stage. Operation authorization runs in the upstream handlers.
 	*
-	* Fails OPEN on store/registry-level errors (per-guardrail throws already
-	* fail open in the runner).
+	* Agent requests fail open if the policy check fails.
 	*
 	* @internal Public only for the route-handler modules.
 	*/
@@ -302,9 +296,8 @@ export class McpProxy {
 		toolArgs: Record<string, unknown>,
 		namespace: string,
 	): Promise<boolean> {
-		if (!this.guardrailRegistry) return false;
 		try {
-			// The library is per workspace. Per-job tokens carry the org; legacy
+			// Policies are per workspace. Per-job tokens carry the org; legacy
 			// deployment-lifetime tokens may not, so fall back to the agent's org.
 			const organizationId =
 				tokenData.organizationId ??
@@ -317,7 +310,6 @@ export class McpProxy {
 				return false;
 			}
 			const tripped = await evaluatePreToolGuardrails({
-				registry: this.guardrailRegistry,
 				organizationId,
 				principal: agentLoopPrincipal(agentId, tokenData.source, tokenData.conversationId),
 				namespace,
@@ -333,8 +325,6 @@ export class McpProxy {
 			);
 			return true;
 		} catch (err) {
-			// Fail open on store/registry-level errors — the runner already
-			// fail-opens on per-guardrail throws.
 			logger.warn(
 				{
 					agentId,

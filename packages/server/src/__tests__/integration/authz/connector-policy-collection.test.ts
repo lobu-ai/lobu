@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileInputSchema } from "@lobu/connector-sdk";
-import { __resetEncryptionKeyCacheForTests, GuardrailRegistry } from "@lobu/core";
+import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
 import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
@@ -16,7 +16,7 @@ import { ingestInputFiles } from "../../../gateway/files/input-files";
 import * as gateway from "../../../lobu/gateway";
 import { flushPendingGuardrailAudits } from "../../../gateway/guardrails/audit";
 import { evaluatePreToolGuardrails } from "../../../gateway/guardrails/pre-tool";
-import { OutputGuardrailScanner } from "../../../gateway/guardrails/output-scan";
+import { hasOutputGuardrails, runOutputGuardrailScan } from "../../../gateway/guardrails/output-scan";
 import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
@@ -415,12 +415,55 @@ describe("connector policy collection", () => {
   });
 });
 
-describe("loop rules during the guardrail transition", () => {
+describe("hook-scoped loop policy collections", () => {
+  it("isolates revisions and atomically replaces only the selected agent's hook rules", async () => {
+    const agent = "agent-loop-rule-fixture";
+    await createTestAgent({ organizationId: org.id, agentId: agent });
+    const otherOrg = await createTestOrganization();
+    await createTestAgent({ organizationId: otherOrg.id, agentId: "foreign-agent-loop-rule-fixture" });
+    const operation = await snapshot();
+    const tool = `${path()}?hook=tool_call&principal_kind=agent&principal_id=${agent}`;
+    const reply = `${path()}?hook=reply_out&principal_kind=agent&principal_id=${agent}`;
+    const initialResponse = await request("GET", tool);
+    expect(initialResponse.status).toBe(200);
+    const initial = await initialResponse.json();
+    const emptyReply = await (await request("GET", reply)).json();
+    expect(initial.revision).not.toBe(emptyReply.revision);
+    const update = (route: string, rules: unknown[], revision = initial.revision) =>
+      request("PUT", route, { revision, rules });
+    const rule = { hook: "tool_call", effect: "deny", tools: ["github__*", "admin.tools.list"] };
+    expect((await update(reply, [], initial.revision)).status).toBe(409);
+    expect((await update(reply, [rule], emptyReply.revision)).status).toBe(400);
+    expect((await update(tool, [{ ...rule, effect: "auto" }])).status).toBe(400);
+    for (const tools of [[], ["github*"], Array.from({ length: 51 }, (_, index) => `tool-${index}`)]) {
+      expect((await update(tool, [{ ...rule, tools }])).status).toBe(400);
+    }
+    expect((await update(tool, [{ ...rule, operation_key: "github__delete_repo" }])).status).toBe(400);
+    expect((await request("GET", `${path()}?hook=invalid`)).status).toBe(400);
+    expect((await request("GET", `${path()}?principal_kind=agent&principal_id=${agent}`)).status).toBe(400);
+    expect((await request("GET", tool.replace(agent, "foreign-agent-loop-rule-fixture"))).status).toBe(400);
+    const pat = await createTestPAT(owner.id, org.id, { scope: "mcp:read policies:write" });
+    expect((await request("GET", tool, undefined, pat.token)).status).toBe(403);
+    expect((await request("GET", `${path()}?hook=tool_call`, undefined, pat.token)).status).toBe(200);
+
+    const saved = await update(tool, [rule]);
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    const current = await saved.json();
+    expect(current.rules).toEqual([{ ...rule, id: expect.any(Number), kind: "guardrail", tools: ["admin.tools.list", "github__*"] }]);
+    expect(await snapshot()).toEqual(operation);
+    expect(await (await request("GET", reply)).json()).toEqual(emptyReply);
+    expect((await update(tool, [], initial.revision)).status).toBe(409);
+    expect(await (await update(tool, current.rules, current.revision)).json()).toEqual(current);
+    const withoutAgentId = await request("GET", `${path()}?hook=tool_call&principal_kind=agent`);
+    expect(withoutAgentId.status).toBe(200);
+    expect((await withoutAgentId.json()).rules).toEqual([]);
+  });
+});
+
+describe("loop policy runtime", () => {
   it("keeps reply rules out of operation replacements and buffers only blocking replies", async () => {
     const agent = "reply-policy-agent";
     await createTestAgent({ organizationId: org.id, agentId: agent });
-    const scanner = new OutputGuardrailScanner();
-    scanner.setGuardrails(new GuardrailRegistry());
     const rule = {
       resourceClass: "connector_action" as const,
       hook: "reply_out" as const,
@@ -429,25 +472,22 @@ describe("loop rules during the guardrail transition", () => {
       kind: "guardrail" as const,
       condition: [{ field: "/text", op: "contains", value: "synthetic phrase" }],
     };
-    const unavailable = await request("GET", `${path()}?hook=reply_out&principal_kind=agent&principal_id=${agent}`);
-    expect(unavailable.status).toBe(404);
-
     const before = await snapshot();
     const log = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "log" } });
     const ctx = { organizationId: org.id, agentId: agent, userId: owner.id, platform: "lobu" };
-    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(false);
-    expect(await scanner.scanFinal("synthetic phrase", ctx)).toBeNull();
+    expect(await hasOutputGuardrails(ctx)).toBe(false);
+    expect(await runOutputGuardrailScan("synthetic phrase", ctx)).toBeNull();
 
     const block = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "deny" } });
     expect(block.id).toBe(log.id);
-    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(true);
-    expect(await scanner.scanFinal("unrestricted reply", ctx)).toBeNull();
-    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
-    expect(await scanner.scanFinal("synthetic phrase", { ...ctx, agentId: "different-agent" })).toBeNull();
+    expect(await hasOutputGuardrails(ctx)).toBe(true);
+    expect(await runOutputGuardrailScan("unrestricted reply", ctx)).toBeNull();
+    expect(await runOutputGuardrailScan("synthetic phrase", ctx)).not.toBeNull();
+    expect(await runOutputGuardrailScan("synthetic phrase", { ...ctx, agentId: "different-agent" })).toBeNull();
     expect(await snapshot()).toEqual(before);
     const replaced = await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }] });
     expect(replaced.status).toBe(200);
-    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
+    expect(await runOutputGuardrailScan("synthetic phrase", ctx)).not.toBeNull();
     await flushPendingGuardrailAudits();
   });
 
@@ -466,7 +506,6 @@ describe("loop rules during the guardrail transition", () => {
     const namespaced = await upsertEntityApprovalPolicy(org.id, { ...rule, toolPatterns: ["github__*"] });
     expect(exact.id).not.toBe(namespaced.id);
     const call = (toolName: string, id = agent, namespace?: string) => evaluatePreToolGuardrails({
-      registry: undefined,
       organizationId: org.id,
       principal: { kind: "agent", id, ownerAgentId: null },
       userId: owner.id,

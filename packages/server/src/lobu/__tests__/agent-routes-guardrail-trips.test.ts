@@ -105,11 +105,11 @@ beforeEach(async () => {
 describe('retired agent settings keys answer 422 naming their new home', () => {
   test.each([
     { key: 'skillsConfig', value: { skills: [] }, names: 'manage_skills' },
-    { key: 'guardrails', value: ['secret-scan'], names: 'client.guardrails' },
+    { key: 'guardrails', value: ['secret-scan'], names: 'Settings → Policies' },
     {
       key: 'guardrailsInline',
       value: [{ name: 'tone', enabled: true, stage: 'output', policy: 'deny' }],
-      names: 'client.guardrails',
+      names: 'Settings → Policies',
     },
   ])('refuses $key and persists nothing', async ({ key, value, names }) => {
     // A caller still sending the old key learns where it went instead of

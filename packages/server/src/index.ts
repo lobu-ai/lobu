@@ -113,10 +113,6 @@ import {
 	publicRestGetViewShell,
 	publicRestSearchKnowledge,
 	restGetAutomations,
-	restGetGuardrail,
-	restPutGuardrail,
-	restDeleteGuardrail,
-	restListGuardrails,
 	restGetViewShell,
 	restHealth,
 	restInvokeEventAction,
@@ -1085,11 +1081,6 @@ app.patch(
 	restUpdateContentClassification,
 );
 app.get("/api/:orgSlug/automations", mcpAuth, restGetAutomations);
-app.get("/api/:orgSlug/guardrails", mcpAuth, restListGuardrails);
-app.get("/api/:orgSlug/guardrails/:id", mcpAuth, restGetGuardrail);
-app.put("/api/:orgSlug/guardrails", mcpAuth, restPutGuardrail);
-app.put("/api/:orgSlug/guardrails/:id", mcpAuth, restPutGuardrail);
-app.delete("/api/:orgSlug/guardrails/:id", mcpAuth, restDeleteGuardrail);
 app.get("/api/:orgSlug/public/automations", publicRestGetAutomations);
 
 async function handleContentDistribution(c: Context<{ Bindings: Env }>) {
@@ -1171,8 +1162,7 @@ app.delete("/api/:orgSlug/connections/:id", mcpAuth, async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Agent permissions ("Guardrails" is the separate built-in-check surface; this is
-// the deterministic write-gate envelope). Returns the ORG FLOOR rows (principal_kind
+// Agent permissions. Returns the ORG FLOOR rows (principal_kind
 // NULL) and THIS AGENT's rows across all three write classes, so the UI can show
 // the floor as a non-loosenable baseline and the agent's overrides on top.
 app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {

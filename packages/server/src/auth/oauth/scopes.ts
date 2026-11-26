@@ -64,15 +64,8 @@ export const POLICY_WRITE_SCOPE = 'policies:write';
  */
 export const ENTITY_MANUAL_EDIT_SCOPE = 'entities:manual_edit';
 
-/**
- * Human-minted, org-bound authority to write the workspace guardrail library
- * (`PUT`/`DELETE /api/:orgSlug/guardrails`), e.g. for `lobu apply`. Never an
- * OAuth/MCP grant, and refused to agent and worker tokens.
- */
-export const GUARDRAILS_WRITE_SCOPE = 'guardrails:write';
-
 /** Scopes only a person in a web session may put on a PAT. */
-export const HUMAN_MINTED_PAT_SCOPES = [POLICY_WRITE_SCOPE, ENTITY_MANUAL_EDIT_SCOPE, GUARDRAILS_WRITE_SCOPE] as const;
+export const HUMAN_MINTED_PAT_SCOPES = [POLICY_WRITE_SCOPE, ENTITY_MANUAL_EDIT_SCOPE] as const;
 
 /** A human-minted scope that admits a PAT to one human-only write surface. */
 export type HumanMintedPatScope = (typeof HUMAN_MINTED_PAT_SCOPES)[number];

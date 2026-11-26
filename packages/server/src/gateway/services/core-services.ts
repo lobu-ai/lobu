@@ -5,7 +5,6 @@ import {
 	type AgentConnectionStore,
 	CommandRegistry,
 	createLogger,
-	GuardrailRegistry,
 	getErrorMessage,
 	moduleRegistry,
 	type ProviderRegistryEntry,
@@ -57,7 +56,6 @@ import { createGatewayStateAdapter } from "../connections/state-adapter.js";
 import type { RuntimeProviderCredentialResolver } from "../embedded.js";
 import { ArtifactStore } from "../files/artifact-store.js";
 import { WorkerGateway } from "../worker-dispatch/worker-gateway.js";
-import { registerBuiltinGuardrails } from "../guardrails/builtins.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import { QueueProducer, RunsQueue } from "../infrastructure/queue/index.js";
 import { sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
@@ -179,12 +177,6 @@ export class CoreServices {
 	// ============================================================================
 	private commandRegistry?: CommandRegistry;
 
-	// ============================================================================
-	// Guardrails — runtime registry of input/output/pre-tool checks. Populated
-	// with built-ins at boot; downstream packages can register more by calling
-	// `getGuardrailRegistry().register(...)` after `initialize()` returns.
-	// ============================================================================
-	private guardrailRegistry?: GuardrailRegistry;
 
 	// ============================================================================
 	// Agent Sub-Stores (injectable — host can provide its own implementations)
@@ -249,11 +241,6 @@ export class CoreServices {
 	async initialize(): Promise<void> {
 		logger.debug("Initializing core services...");
 
-		// 0. Guardrail registry — populated before any service that may invoke
-		// `runGuardrails()` is constructed (McpProxy, MessageConsumer, etc.).
-		this.guardrailRegistry = new GuardrailRegistry();
-		registerBuiltinGuardrails(this.guardrailRegistry);
-		logger.debug("Guardrail registry initialized with built-ins");
 
 		// 1. Queue (foundation for everything else)
 		await this.initializeQueue();
@@ -788,7 +775,6 @@ export class CoreServices {
 		this.mcpProxy = new McpProxy(this.mcpConfigService, {
 			toolCache: mcpToolCache,
 			agentSettingsStore: this.agentSettingsStore,
-			guardrailRegistry: this.guardrailRegistry,
 			isReadOnlyLobuTool: this.options?.isReadOnlyLobuTool,
 		});
 		logger.debug("MCP proxy initialized");
@@ -1061,9 +1047,6 @@ export class CoreServices {
 		return this.agentMetadataStore;
 	}
 
-	getGuardrailRegistry(): GuardrailRegistry | undefined {
-		return this.guardrailRegistry;
-	}
 
 	getCommandRegistry(): CommandRegistry {
 		if (!this.commandRegistry)

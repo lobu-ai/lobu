@@ -882,7 +882,7 @@ curl -X POST "$LOBU_API_BASE/api/v1/agents/{agentId}/messages" \\
     // This docs endpoint is cold and low-traffic, and by request time every
     // module is already loaded, so `import()` resolves from cache with no
     // measurable cost — while keeping the cycle out of the static graph.
-    const { generateGuardrailRestPaths, generateStrictToolPaths } = await import(
+    const { generateStrictToolPaths } = await import(
       "../../utils/openapi-generator.js"
     );
     // The Agent API base is read off THIS request, so the document is correct
@@ -908,7 +908,6 @@ curl -X POST "$LOBU_API_BASE/api/v1/agents/{agentId}/messages" \\
       // the gateway mount and says so per path.
       paths: mergeOpenApiPaths(
         toolPaths,
-        generateGuardrailRestPaths(),
         withPathServers(
           base.paths ?? {},
           agentApiServer,

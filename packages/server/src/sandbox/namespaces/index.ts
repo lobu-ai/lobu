@@ -13,7 +13,6 @@ export { buildDevicesNamespace } from "./devices";
 export { buildEntitiesNamespace } from "./entities";
 export { buildEntitySchemaNamespace } from "./entity-schema";
 export { buildFeedsNamespace } from "./feeds";
-export { buildGuardrailsNamespace } from "./guardrails";
 export { buildInferenceProvidersNamespace } from "./inference-providers";
 export { buildKnowledgeNamespace } from "./knowledge";
 export { buildMetricsNamespace } from "./metrics";
