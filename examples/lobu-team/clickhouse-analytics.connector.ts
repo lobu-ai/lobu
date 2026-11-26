@@ -233,6 +233,7 @@ const CALLER_QUERY_CODES = new Map<string, string | null>([
     "a parameterized view lists no columns until it is called with its arguments, e.g. SELECT * FROM db.view(name = 'value'); its {name:Type} placeholders are in system.tables.create_table_query",
   ],
   ["179", null], // MULTIPLE_EXPRESSIONS_FOR_ALIAS
+  ["206", null], // ALIAS_REQUIRED: a subquery or table function needs an alias
   [
     "184", // ILLEGAL_AGGREGATION
     "ClickHouse substitutes an alias wherever its name appears, so give an aggregate an alias that is not a column name, e.g. sum(n) AS total_n",
@@ -455,7 +456,7 @@ export default class ClickHouseAnalyticsConnector extends ConnectorRuntime<
   > = {
     key: "clickhouse.analytics",
     name: "ClickHouse analytics",
-    version: "2.0.3",
+    version: "2.0.4",
     description:
       "Run governed read-only SQL against an organization-owned ClickHouse analytics endpoint. Discover accessible tables and columns with SELECT from system.tables and system.columns; information_schema requires separate grants. A parameterized view (its create_table_query has {name:Type} placeholders) lists no columns; call it with arguments, e.g. SELECT * FROM db.view(name = 'value'). An alias is visible everywhere in the query, so never alias an aggregate with the name of a column it reads.",
     authSchema: {
