@@ -12,7 +12,8 @@ import { serializeSigned } from 'hono/utils/cookie';
 import { hashClientSecret } from '../../auth/oauth/clients';
 import { NON_PUBLIC_OAUTH_SCOPES } from '../../auth/oauth/scopes';
 import { slugify, type MessagePayload } from '@lobu/core';
-import type { WorkspaceGuardrailConfig } from '@lobu/core/contracts/workspace-guardrails';
+import { upsertEntityApprovalPolicy, type EntityApprovalPolicyInput } from '../../authz/entity-policy';
+import type { LoopPolicyHook } from '../../authz/policy-hooks';
 import { randomBytes } from 'node:crypto';
 import { generateSecureToken, hashToken } from '../../auth/oauth/utils';
 import { pgBigintArray, pgTextArray } from '../../db/client';
@@ -260,33 +261,18 @@ export async function createTestWorkspaceSkill(options: {
   return { id, name: options.name, content };
 }
 
-/**
- * Insert a workspace library guardrail and its subjects directly, for tests
- * that only read the library. `appliesTo` defaults to every principal; pass
- * agent ids to scope it.
- */
-export async function createTestWorkspaceGuardrail(options: {
-  organizationId: string;
-  name: string;
-  config: WorkspaceGuardrailConfig;
-  enabled?: boolean;
-  appliesTo?: Array<{ kind: 'agent' | 'app'; id: string | null }> | 'everyone';
-}): Promise<{ id: string; name: string }> {
-  const sql = getTestDb();
-  const id = `guardrail-${randomBytes(8).toString('hex')}`;
-  await sql`
-    INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled)
-    VALUES (${id}, ${options.organizationId}, ${options.name}, ${sql.json(options.config as never)},
-            ${options.enabled ?? true})
-  `;
-  const subjects = options.appliesTo ?? 'everyone';
-  for (const subject of subjects === 'everyone' ? [{ kind: null, id: null }] : subjects) {
-    await sql`
-      INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
-      VALUES (${id}, ${options.organizationId}, ${subject.kind}, ${subject.id})
-    `;
-  }
-  return { id, name: options.name };
+export function createTestLoopPolicy(
+  organizationId: string,
+  hook: LoopPolicyHook,
+  input: Pick<EntityApprovalPolicyInput, 'principalKind' | 'principalId' | 'condition' | 'toolPatterns' | 'note'>,
+) {
+  return upsertEntityApprovalPolicy(organizationId, {
+    ...input,
+    resourceClass: 'connector_action',
+    hook,
+    kind: 'guardrail',
+    effects: { execute: 'deny' },
+  });
 }
 
 export async function insertChatConnectionRow(opts: {

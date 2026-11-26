@@ -1128,42 +1128,6 @@ export function skillFromFile(path: string, opts?: { name?: string }): Skill {
 }
 
 // ---------------------------------------------------------------------------
-// Guardrails
-// ---------------------------------------------------------------------------
-
-/**
- * A workspace guardrail: a content check the runtime enforces on the agents it
- * applies to. `lobu apply` writes each into the workspace guardrail library by
- * name.
- *
- * Writing the library needs an owner/admin web session or a personal access
- * token with the `guardrails:write` scope (set `LOBU_API_TOKEN`); a CLI login
- * can plan and read guardrails but not write them.
- */
-export interface Guardrail {
-  readonly kind: "guardrail";
-  /**
-   * Library name: lowercase letters, digits and single inner hyphens, at most
-   * 64 characters. Fixed once created: renaming creates a new guardrail.
-   */
-  name: string;
-  /** The built-in check, enforced at every stage the built-in implements. */
-  builtin: "secret-scan" | "pii-scan" | "forbidden-tools";
-  /** The agents it applies to, by id. Omit for every agent in the workspace. */
-  appliesTo?: Array<{ agent: string }>;
-  /** Default true. */
-  enabled?: boolean;
-}
-
-/**
- * Declare a workspace guardrail, e.g.
- * `defineGuardrail({ name: "no-secrets", builtin: "secret-scan" })`.
- */
-export function defineGuardrail(config: Omit<Guardrail, "kind">): Guardrail {
-  return { ...config, kind: "guardrail" };
-}
-
-// ---------------------------------------------------------------------------
 // Project (default export of lobu.config.ts)
 // ---------------------------------------------------------------------------
 
@@ -1222,15 +1186,6 @@ export interface Project {
    * must resolve when applied, so list the views they name in `views`.
    */
   navigation?: NavigationConfig | null;
-  /**
-   * Workspace guardrails, built with {@link defineGuardrail}. Apply converges
-   * each library guardrail of the same name to its declaration, blocking when
-   * someone changed it since this config last applied it. A guardrail this
-   * config created and no longer declares is archived only under `prune`;
-   * guardrails it never created are left alone. Omit to leave the guardrail
-   * library unmanaged.
-   */
-  guardrails?: Guardrail[];
 }
 
 export function defineConfig(config: Omit<Project, "kind">): Project {

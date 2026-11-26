@@ -135,14 +135,6 @@ export function sanitizeSnapshotState(
       "library skills left at current values (a deployment records only each body's digest; re-apply that deployment's config to restore them)"
     );
   }
-  // Library guardrails are not restored either: re-applying the deployment's
-  // config is the way back.
-  if (state.guardrails !== undefined) {
-    state.guardrails = undefined;
-    notes.push(
-      "library guardrails left at current values (re-apply that deployment's config to restore them)"
-    );
-  }
 
   for (const agent of state.agents) {
     // Provider keys are write-only pushes; a snapshot has no values to push.
@@ -201,7 +193,7 @@ export async function rollbackCommand(opts: RollbackOptions): Promise<void> {
   }
 
   const manifest = deployment.manifest;
-  // Rollback leaves the skill and guardrail libraries alone, so the latest
+  // Rollback leaves the skill library alone, so the latest
   // record of them still holds once this run is recorded.
   const libraryRecord = loadLibraryRecord(
     (await client.getLatestDeployment())?.manifest

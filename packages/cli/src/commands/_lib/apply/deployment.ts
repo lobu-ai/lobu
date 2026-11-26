@@ -15,13 +15,9 @@ import type { NavigationConfig } from "@lobu/core/contracts/tools/navigation";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { deepRedactSecrets, REDACTED_SENTINEL } from "@lobu/core";
-import type { WorkspaceGuardrail } from "@lobu/core/contracts/workspace-guardrails";
 import {
-  type DesiredGuardrail,
   type DesiredState,
-  type RecordedGuardrail,
   type RecordedSkill,
-  recordGuardrail,
   recordSkill,
 } from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
@@ -151,11 +147,6 @@ export interface DeploymentManifest {
    */
   skills?: RecordedSkill[];
   /**
-   * The library guardrails this config applied, by id: the rows prune may
-   * archive and the three-way baseline.
-   */
-  guardrails?: RecordedGuardrail[];
-  /**
    * Kind-qualified definition incarnation identities (`entity-type:12`,
    * `automation:b7-…`) this config actually applied — the delete-eligible set.
    */
@@ -220,70 +211,20 @@ export function loadBaselineFromManifest(
 }
 
 /**
- * What a deployment recorded of the workspace libraries (skills, guardrails).
- * A field is undefined before apply managed that library.
+ * The workspace skills recorded by a prior deployment.
  */
 export interface LibraryRecord {
   skills?: RecordedSkill[];
-  guardrails?: RecordedGuardrail[];
 }
 
 export function loadLibraryRecord(
-  manifest: { skills?: unknown[]; guardrails?: unknown[] } | null | undefined
+  manifest: { skills?: unknown[] } | null | undefined
 ): LibraryRecord {
   return {
     ...(Array.isArray(manifest?.skills)
       ? { skills: manifest.skills as RecordedSkill[] }
       : {}),
-    ...(Array.isArray(manifest?.guardrails)
-      ? { guardrails: manifest.guardrails as RecordedGuardrail[] }
-      : {}),
   };
-}
-
-/** The guardrail writes an apply made, from the write responses themselves. */
-export interface GuardrailWriteOutcome {
-  /** Rows this apply created, as each successful create returned them. */
-  created: WorkspaceGuardrail[];
-  /** Ids this apply archived. */
-  archivedIds: string[];
-}
-
-/**
- * The guardrails record a run leaves: each declared guardrail under the id it
- * has in the library, plus the rows an apply created that this config no
- * longer declares and has not archived (only prune archives them, so they
- * stay owned, with the record of how this config left them).
- *
- * Ownership is keyed on id, never on name: a row is `created` only when its
- * id came back from this run's create (`createdIds`) or an earlier record
- * marked that id created. A row adopted by name, or a same-name replacement
- * another editor made, is recorded but never owned.
- */
-export function recordGuardrails(
-  desired: DesiredGuardrail[],
-  library: WorkspaceGuardrail[],
-  previous: RecordedGuardrail[] | undefined,
-  createdIds: ReadonlySet<string> = new Set()
-): RecordedGuardrail[] {
-  const byName = new Map(library.map((row) => [row.name, row]));
-  const owned = new Set([
-    ...createdIds,
-    ...(previous ?? []).filter((record) => record.created).map((r) => r.id),
-  ]);
-  const declared = desired.flatMap((guardrail) => {
-    const row = byName.get(guardrail.name);
-    return row ? [recordGuardrail(row.id, guardrail, owned.has(row.id))] : [];
-  });
-  const declaredNames = new Set(desired.map((guardrail) => guardrail.name));
-  const libraryIds = new Set(library.map((row) => row.id));
-  const kept = (previous ?? []).filter(
-    (record) =>
-      record.created &&
-      !declaredNames.has(record.name) &&
-      libraryIds.has(record.id)
-  );
-  return [...declared, ...kept];
 }
 
 /**
@@ -296,7 +237,6 @@ export function toBaseline(
 ): Baseline {
   const recordedLibrary = {
     ...(library.skills ? { skills: library.skills } : {}),
-    ...(library.guardrails ? { guardrails: library.guardrails } : {}),
   };
   if (!record) {
     return {
@@ -499,7 +439,6 @@ export function buildDeploymentManifest(
       ? { attribution: baseline.attribution, owned: baseline.owned }
       : {}),
     ...(library.skills ? { skills: library.skills } : {}),
-    ...(library.guardrails ? { guardrails: library.guardrails } : {}),
   };
 }
 

@@ -1,7 +1,6 @@
 import { resolveActingPrincipal } from '../authz/entity-policy';
 import { getDb } from '../db/client';
 import { evaluatePreToolGuardrails } from '../gateway/guardrails/pre-tool';
-import { getLobuCoreServices } from '../lobu/gateway';
 import { ToolUserError } from '../utils/errors';
 import logger from '../utils/logger';
 import type { AccountToolContext, InboundToolCall } from './registry';
@@ -64,7 +63,6 @@ async function checkWorkspace(
     if (principal.kind !== 'app' && principal.kind !== 'automation') return;
     if (principal.kind === 'app' && !ctx.userId) throw new Error('A connected-app call has no user');
     const trip = await evaluatePreToolGuardrails({
-      registry: getLobuCoreServices()?.getGuardrailRegistry?.() ?? undefined,
       organizationId,
       principal,
       userId: ctx.userId ?? undefined,

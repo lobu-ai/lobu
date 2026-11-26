@@ -15,14 +15,16 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { type DbClient, getDb } from '../../../db/client';
+import { getDb } from '../../../db/client';
+import { listEntityApprovalPolicies } from '../../../authz/entity-policy';
+import { loopPolicyCutoverComplete } from '../../../authz/policy-hooks';
 import { loadMigrationUpSection } from '../../../db/migration-loader';
-import { agentGuardrailPrincipal, resolveGuardrails } from '../../../guardrails/workspace-guardrails';
 import { createTestOrganization } from '../../setup/test-fixtures';
 
 const MIGRATION = '20261125140000_workspace_guardrails_reader_cutover.sql';
 const NORMALIZATION = '20261125160000_workspace_guardrails_custom_config_keys.sql';
 const REFUSAL = '20261125210000_refuse_custom_guardrails.sql';
+const POLICY_CUTOVER = '20261126040000_backfill_loop_policies.sql';
 
 function resolveMigrationsDir(): string {
   let dir = __dirname;
@@ -55,6 +57,7 @@ async function inRollback<T>(body: (tx: Sql) => Promise<T>): Promise<T> {
       await tx.unsafe(`ALTER TABLE agents
         ADD COLUMN guardrails jsonb DEFAULT '[]'::jsonb,
         ADD COLUMN guardrails_inline jsonb DEFAULT '[]'::jsonb`);
+      await tx`DROP INDEX IF EXISTS write_approval_policies_loop_lookup`;
       result = await body(tx);
       throw new Rollback();
     });
@@ -246,7 +249,11 @@ describe('workspace guardrails reader cutover migration', () => {
         judge('plain', 'Plain policy.'),
       ]);
       const read = async () => {
-        const rows = await resolveGuardrails(tx as unknown as DbClient, orgId, agentGuardrailPrincipal(agent));
+        const rows = await tx<{ name: string; config: Record<string, unknown>; enabled: boolean; revision: number }>`
+          SELECT g.name, g.config, g.enabled, g.revision::int AS revision
+          FROM workspace_guardrails g JOIN workspace_guardrail_subjects s ON s.guardrail_id = g.id
+          WHERE g.organization_id = ${orgId} AND s.principal_kind = 'agent' AND s.principal_id = ${agent}
+        `;
         return { rows: Object.fromEntries(rows.map((row) => [row.name, row])) };
       };
       await tx.unsafe(up());
@@ -307,5 +314,49 @@ describe('workspace guardrails reader cutover migration', () => {
     expect(result.withArchivedCustom?.message).toContain(`${orgId}/no-refunds`);
     expect(result.withArchivedCustom?.message).toMatch(/Custom guardrail checks are retired/);
     expect(result.count).toBe(2);
+  });
+});
+
+describe('loop policy cutover', () => {
+  it('copies active checks to the same agent and enables editing in the same transaction', async () => {
+    const orgId = (await createTestOrganization()).id;
+    const agentId = synth('agent');
+    await inRollback(async (tx) => {
+      await insertAgent(tx, orgId, agentId, ['secret-scan', 'pii-scan', 'forbidden-tools'], []);
+      await tx.unsafe(up());
+      expect(await loopPolicyCutoverComplete(tx)).toBe(false);
+      await tx`
+        INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled, archived_at)
+        VALUES
+          (${synth('guardrail')}, ${orgId}, 'archived', '{"builtin":"secret-scan"}', true, now()),
+          (${synth('guardrail')}, ${orgId}, 'disabled', '{"builtin":"pii-scan"}', false, null)
+      `;
+      // These rows have a distinct subject so an accidental conversion is visible.
+      await tx`
+        INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
+        SELECT id, organization_id, 'agent', NULL FROM workspace_guardrails
+        WHERE organization_id = ${orgId} AND name IN ('disabled', 'archived')
+      `;
+
+      await tx.unsafe(loadMigrationUpSection(resolveMigrationsDir(), POLICY_CUTOVER));
+      expect(await loopPolicyCutoverComplete(tx)).toBe(true);
+      const summaries = async (hook: 'message_in' | 'reply_out' | 'tool_call') => {
+        const policies = await listEntityApprovalPolicies(orgId, 'connector_action', tx, hook);
+        expect(policies.every(rule => rule.principalKind === 'agent' && rule.principalId === agentId &&
+          rule.effects.execute === 'deny' && rule.kind === 'guardrail')).toBe(true);
+        return policies.map(rule => ({ when: rule.condition, tools: rule.toolPatterns }));
+      };
+      expect(await summaries('message_in')).toEqual([
+        { when: [{ scan: 'pii', field: '/text' }], tools: null },
+      ]);
+      expect(await summaries('reply_out')).toEqual(expect.arrayContaining([
+        { when: [{ scan: 'secrets', field: '/text' }], tools: null },
+        { when: [{ scan: 'pii', field: '/text' }], tools: null },
+      ]));
+      expect(await summaries('tool_call')).toEqual(expect.arrayContaining([
+        { when: [{ scan: 'pii', field: '/arguments' }], tools: null },
+        { when: null, tools: ['delete_branch', 'delete_repo', 'drop_table'] },
+      ]));
+    });
   });
 });

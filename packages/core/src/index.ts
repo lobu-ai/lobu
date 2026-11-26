@@ -51,7 +51,6 @@ export * from "./classify-error";
 export * from "./errors";
 export * from "./provider-auth-hints";
 // Guardrail primitive (type + registry + parallel runner + no-op builtin)
-export * from "./guardrails";
 // Shared base for InstructionProvider implementations (server + worker)
 export { BaseInstructionProvider } from "./instruction-provider";
 // Integration types
@@ -114,6 +113,7 @@ export type {
   AgentOptions,
   AuthProfile,
   DeclaredCredential,
+  GuardrailStage,
   HistoryMessage,
   InstructionContext,
   InstructionProvider,

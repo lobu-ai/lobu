@@ -3,7 +3,6 @@ export * from "./deployment-manager.js";
 import {
 	createLogger,
 	getErrorMessage,
-	type GuardrailRegistry,
 	moduleRegistry,
 } from "@lobu/core";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
@@ -51,7 +50,6 @@ export class Orchestrator {
     secretStore: WritableSecretStore,
     providerCatalogService?: ProviderCatalogService,
     grantStore?: GrantStore,
-    guardrailRegistry?: GuardrailRegistry,
     agentSettingsStore?: AgentSettingsStore,
     agentTurnMcp?: AgentTurnDeps["mcp"],
     agentTurnArtifacts?: AgentTurnDeps["artifacts"],
@@ -73,13 +71,7 @@ export class Orchestrator {
       this.deploymentManager.setProviderCatalogService(providerCatalogService);
     }
 
-    // Wire input-stage guardrails into the queue consumer. Both must be
-    // present for the consumer to run anything — the setter is a no-op
-    // otherwise.
-    if (guardrailRegistry && agentSettingsStore) {
-      this.queueConsumer.setGuardrails(guardrailRegistry, agentSettingsStore);
-      logger.debug("Input-stage guardrails wired into MessageConsumer");
-    }
+    this.queueConsumer.setAgentSettingsStore(agentSettingsStore);
 
     // Native turns read the agent's MCP servers and tools through the gateway's
     // existing MCP services.

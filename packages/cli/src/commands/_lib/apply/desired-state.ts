@@ -30,10 +30,6 @@ import type {
   ManageAutomationsArgs,
 } from "@lobu/core/contracts/tools/manage-automations";
 import type { RetainedSource } from "@lobu/core/contracts/tools/source-files";
-import type {
-  GuardrailSubject,
-  WorkspaceGuardrailConfig,
-} from "@lobu/core/contracts/workspace-guardrails";
 import type Ajv from "ajv";
 import type {
   Automation,
@@ -343,50 +339,6 @@ export function recordSkill(skill: DesiredSkill): RecordedSkill {
   };
 }
 
-/**
- * A workspace library guardrail declared with `defineGuardrail`, in the
- * canonical form the server stores. Apply converges the library guardrail of
- * this name to it: the config owns the whole row.
- */
-export interface DesiredGuardrail {
-  name: string;
-  config: WorkspaceGuardrailConfig;
-  /** Agent subjects, sorted: every agent (`principal_id: null`) or one each. */
-  applies_to: GuardrailSubject[];
-  enabled: boolean;
-}
-
-/** A library guardrail as a deployment records it. */
-export interface RecordedGuardrail {
-  /** The library row this config applied. */
-  id: string;
-  /**
-   * True only when an apply of this config created the row. A row it adopted
-   * by name (made in the app, then declared) is compared against this record
-   * but never archived: prune owns only what apply created.
-   */
-  created: boolean;
-  name: string;
-  config: WorkspaceGuardrailConfig;
-  applies_to: GuardrailSubject[];
-  enabled: boolean;
-}
-
-export function recordGuardrail(
-  id: string,
-  guardrail: DesiredGuardrail,
-  created: boolean
-): RecordedGuardrail {
-  return {
-    id,
-    created,
-    name: guardrail.name,
-    config: guardrail.config,
-    applies_to: guardrail.applies_to,
-    enabled: guardrail.enabled,
-  };
-}
-
 export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
@@ -473,12 +425,6 @@ export interface DesiredState {
    * detaches skills this config applied earlier from its agents.
    */
   skills?: DesiredSkill[];
-  /**
-   * Library guardrails declared with `defineGuardrail`. Undefined when the
-   * config leaves guardrails unmanaged (no `guardrails` key) or the run does
-   * not reconcile them (`--only memory`).
-   */
-  guardrails?: DesiredGuardrail[];
   /**
    * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
    * auth-profile + mcp credentials). The CLI surfaces these before mutating

@@ -24,10 +24,6 @@ import {
   isLibrarySkillName,
   LIBRARY_SKILL_NAME_MAX_CHARS,
 } from "@lobu/core/agent-tooling";
-import {
-  type GuardrailSubject,
-  parseGuardrailConfig,
-} from "@lobu/core/contracts/workspace-guardrails";
 import { parseCollectionPresentation } from "@lobu/core/contracts/tools/collection-presentation";
 import {
   RECORD_KEY_ANNOTATION,
@@ -57,7 +53,6 @@ import type {
   Connection,
   ConnectorRef,
   EntityType,
-  Guardrail,
   InferenceCapabilityBlock,
   OrgProvider,
   Project,
@@ -74,7 +69,6 @@ import type {
   DesiredConnection,
   DesiredEntityType,
   DesiredFeed,
-  DesiredGuardrail,
   DesiredOrgProvider,
   DesiredRelationshipType,
   DesiredState,
@@ -83,7 +77,6 @@ import {
   ENTITY_TYPE_DISPLAY_FIELDS,
   type EntityTypeDisplayFields,
   LEGACY_DISPLAY_FIELDS,
-  sortGuardrailSubjects,
 } from "./shared.js";
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
@@ -295,12 +288,9 @@ function mapAgent(
       `Agent "${agent.id}" settings${error?.path ?? ""}: ${error?.message ?? "invalid settings"}`
     );
   }
-  // Guardrails are workspace items now, not agent fields. A JavaScript config
-  // reaches here without TypeScript checking, so refuse the old field by name
-  // instead of silently dropping the checks it declared.
   if (Object.hasOwn(agent, "guardrails")) {
     throw new ValidationError(
-      `Agent "${agent.id}" declares guardrails, which are no longer agent fields: guardrails live in the workspace guardrail library. Declare them with defineGuardrail() in the config's top-level guardrails once it ships; until then, read them with client.guardrails or in Settings → Policies.`
+      `Agent "${agent.id}" declares guardrails. Manage guardrails in Settings → Policies.`
     );
   }
   const settings: Partial<AgentSettings> = { ...agent.settings };
@@ -1061,13 +1051,11 @@ export function mapProjectToDesiredState(
     }
   }
 
-  // Guardrails govern agents, so every run but `--only memory` reconciles
-  // them; omitting `guardrails` leaves the library unmanaged.
-  const guardrails =
-    only === "memory" || project.guardrails === undefined
-      ? undefined
-      : project.guardrails.map(mapGuardrail);
-  if (guardrails) assertUniqueBy(guardrails, (g) => g.name, "guardrail name");
+  if (Object.hasOwn(project, "guardrails")) {
+    throw new ValidationError(
+      "Move guardrail declarations to Settings → Policies, then remove the guardrails key from lobu.config.ts."
+    );
+  }
 
   const memory: NonNullable<DesiredState["memory"]> = {};
   if (project.org) memory.org = project.org;
@@ -1087,53 +1075,8 @@ export function mapProjectToDesiredState(
     ...(project.navigation !== undefined
       ? { navigation: canonicalNavigation(project.navigation) }
       : {}),
-    ...(guardrails ? { guardrails } : {}),
     providers,
     requiredSecrets: [...required].sort(),
-  };
-}
-
-/**
- * A `defineGuardrail` as the library stores it: the server's own config
- * canonicalization, agent subjects (every agent when `appliesTo` is omitted)
- * and `enabled` defaulting to true. A config error fails the load.
- */
-function mapGuardrail(guardrail: Guardrail): DesiredGuardrail {
-  const where = `Guardrail "${String(guardrail.name)}"`;
-  if (
-    typeof guardrail.name !== "string" ||
-    !isLibrarySkillName(guardrail.name)
-  ) {
-    throw new ValidationError(
-      `${where}: the name must be lowercase letters, digits and single inner hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`
-    );
-  }
-  const parsed = parseGuardrailConfig({ builtin: guardrail.builtin });
-  if (!parsed.ok) throw new ValidationError(`${where}: ${parsed.error}`);
-  if (guardrail.appliesTo !== undefined && guardrail.appliesTo.length === 0) {
-    throw new ValidationError(
-      `${where}: appliesTo must name at least one agent (omit it for every agent; set enabled: false to turn it off).`
-    );
-  }
-  const agents = guardrail.appliesTo?.map((subject) => {
-    if (typeof subject?.agent !== "string" || subject.agent.trim() === "") {
-      throw new ValidationError(
-        `${where}: each appliesTo entry is { agent: "<agent id>" }.`
-      );
-    }
-    return subject.agent;
-  });
-  const appliesTo: GuardrailSubject[] = agents
-    ? [...new Set(agents)].map((agent) => ({
-        principal_kind: "agent",
-        principal_id: agent,
-      }))
-    : [{ principal_kind: "agent", principal_id: null }];
-  return {
-    name: guardrail.name,
-    config: parsed.config,
-    applies_to: sortGuardrailSubjects(appliesTo),
-    enabled: guardrail.enabled ?? true,
   };
 }
 

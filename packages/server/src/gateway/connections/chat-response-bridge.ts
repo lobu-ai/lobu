@@ -15,7 +15,6 @@ import { unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   createLogger,
-  type GuardrailRegistry,
   type SuggestedPrompt,
 } from "@lobu/core";
 import { toAgentErrorCode } from "@lobu/core";
@@ -35,7 +34,8 @@ import {
 } from "../orchestration/agent-turn-retry.js";
 import { interactionTeamId } from "../orchestration/worker-token-claims.js";
 import {
-  OutputGuardrailScanner,
+  hasOutputGuardrails,
+  runOutputGuardrailScan,
   type OutputGuardrailTrip,
 } from "../guardrails/output-scan.js";
 import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
@@ -105,27 +105,7 @@ interface ResponseContext {
 export class ChatResponseBridge implements ResponseRenderer {
   private streams = new Map<string, StreamState>();
   private interactionService?: InteractionService;
-  /**
-   * Output-stage guardrails. Shared with the API/SSE path
-   * (UnifiedThreadResponseConsumer) so both surfaces enforce ONE policy:
-   * when an agent has output guardrails, streaming deltas are withheld and
-   * only the scanned, authoritative terminal text is delivered. This replaces
-   * the bridge's former per-delta rolling-tail scanner + blockedStreams set —
-   * that state was pod-local (so it never caught a secret split across deltas
-   * on different replicas) and was not cleared on the error path (a trip then
-   * an error left the next turn's stream silently blocked).
-   */
-  private readonly outputGuardrail = new OutputGuardrailScanner();
-
   constructor(private manager: ChatInstanceManager) {}
-
-  /**
-   * Wire output-stage guardrails. Without a registry the bridge behaves as
-   * before (no output guardrails run).
-   */
-  setGuardrails(registry?: GuardrailRegistry): void {
-    this.outputGuardrail.setGuardrails(registry);
-  }
 
   setInteractionService(interactionService: InteractionService): void {
     this.interactionService = interactionService;
@@ -178,12 +158,12 @@ export class ChatResponseBridge implements ResponseRenderer {
   ): Promise<boolean> {
     const agentId = this.resolveAgentId(payload, ctx);
     if (!agentId) return false;
-    return this.outputGuardrail.hasOutputGuardrails(
+    return hasOutputGuardrails({
       agentId,
-      this.resolveOrganizationId(payload, ctx),
-      readPlatformMetadata(payload.platformMetadata).source,
-      payload.conversationId,
-    );
+      organizationId: this.resolveOrganizationId(payload, ctx),
+      source: readPlatformMetadata(payload.platformMetadata).source,
+      conversationId: payload.conversationId,
+    });
   }
 
   /**
@@ -197,7 +177,7 @@ export class ChatResponseBridge implements ResponseRenderer {
   ): Promise<OutputGuardrailTrip | null> {
     const agentId = this.resolveAgentId(payload, ctx);
     if (!agentId || !text) return null;
-    return this.outputGuardrail.scanFinal(text, {
+    return runOutputGuardrailScan(text, {
       source: readPlatformMetadata(payload.platformMetadata).source,
       agentId,
       organizationId: this.resolveOrganizationId(payload, ctx),
