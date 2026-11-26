@@ -1,15 +1,15 @@
 -- migrate:up
--- lobu:no-quiesce -- old code keeps working: it reads condition-less rows unchanged and its inserts use ON CONFLICT DO NOTHING, which matches the rebuilt index; this release accepts `when` only on guardrails, which old replicas read as stricter, never on grants
+-- lobu:no-quiesce -- old code keeps working: it reads condition-less rows unchanged and its inserts use ON CONFLICT DO NOTHING, which matches the rebuilt index; no conditional rule can exist while old replicas serve: this release's policy PUT refuses `when`
 
 -- A connector action rule may carry conditions on the operation input (`when`):
 -- a JSON array of 1-8 field or scan conditions that must all hold for the rule
 -- to apply. Null keeps today's rule, which always applies when its scope matches.
 --
 -- Rollout: zero-unavailable, so old replicas serve for the minutes of the
--- rollout and read every rule as unconditional. The policy PUT therefore takes
--- `when` only on a guardrail in this release: read unconditionally, a guardrail
--- only gets stricter. Conditional grants wait for a later release, when no
--- replica predates this column. Rolling the app image back below this version
+-- rollout. They read every rule as unconditional, and their upsert matches a
+-- rule without its condition. So this release's policy PUT refuses `when`;
+-- conditional rules are written only from a later release, when no replica
+-- predates this column. Rolling the app image back below this version
 -- without the down migration makes every conditional rule unconditional; the
 -- down migration refuses while one exists. Cost: one
 -- metadata-only ADD COLUMN, a CHECK validated over the bounded policy table, and
