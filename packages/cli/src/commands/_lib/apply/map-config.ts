@@ -1108,23 +1108,7 @@ function mapGuardrail(guardrail: Guardrail): DesiredGuardrail {
       `${where}: the name must be lowercase letters, digits and single inner hyphens, at most ${LIBRARY_SKILL_NAME_MAX_CHARS} characters.`
     );
   }
-  const declared = [
-    guardrail.builtin !== undefined,
-    guardrail.judge !== undefined,
-    guardrail.requireTool !== undefined,
-  ].filter(Boolean).length;
-  if (declared !== 1) {
-    throw new ValidationError(
-      `${where}: set exactly one of builtin, judge or requireTool.`
-    );
-  }
-  const raw =
-    guardrail.builtin !== undefined
-      ? { builtin: guardrail.builtin }
-      : guardrail.judge !== undefined
-        ? { kind: "judge", ...guardrail.judge }
-        : { kind: "require-tool", stage: "output", ...guardrail.requireTool };
-  const parsed = parseGuardrailConfig(raw);
+  const parsed = parseGuardrailConfig({ builtin: guardrail.builtin });
   if (!parsed.ok) throw new ValidationError(`${where}: ${parsed.error}`);
   if (guardrail.appliesTo !== undefined && guardrail.appliesTo.length === 0) {
     throw new ValidationError(

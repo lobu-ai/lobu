@@ -80,9 +80,6 @@ export type AuditResourceKind = ConfigResourceKind | WorkspaceAuditResourceKind;
  *    `skill_config` read policy can deny a principal the body, and these rows
  *    are readable wherever workspace events are; the digest still shows when
  *    and whether the body changed.
- *  - `guardrail`: a judge's `config.policy` is replaced by
- *    `config.policy_sha256`, for the same reason: the library's read policy
- *    (`agent_config`) can deny a principal the policy text.
  *  - `organization` / `member` / `invitation`: no additional hard rules;
  *    ordinary identity fields remain visible while the denylist still strips
  *    any unexpectedly nested secret material.
@@ -99,15 +96,6 @@ export function redactConfigState(
   if (kind === 'skill' && typeof redacted.content === 'string') {
     const { content, ...rest } = redacted;
     return { ...rest, content_sha256: createHash('sha256').update(content).digest('hex') };
-  }
-  if (kind === 'guardrail') {
-    const config = redacted.config;
-    if (config != null && typeof config === 'object' && !Array.isArray(config)) {
-      const { policy, ...rest } = config as Record<string, unknown>;
-      if (typeof policy === 'string') {
-        redacted.config = { ...rest, policy_sha256: createHash('sha256').update(policy).digest('hex') };
-      }
-    }
   }
   if (kind === 'auth-profile' && redacted.credentials != null) {
     redacted.credentials = REDACTED_SENTINEL;

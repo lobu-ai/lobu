@@ -12,6 +12,7 @@ import { insertEvent } from '../utils/insert-event';
 import { allowlistRefusal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, runClearedHold, runsWithoutHold } from './connector-policy';
 import { resolvePolicyPrincipal } from './policy-principal';
 import { resolveActingPrincipal, resolveConnectorPolicy, resolveStoredActingPrincipal } from './entity-policy';
+import { storedPolicyClassify } from './policy-classify';
 import type { DestinationLookup } from './destination-audience';
 import { compileConnectionRowVisibility } from './connection-visibility';
 import { feedDefinitionSelection } from '../connectors/feed-definition-selection';
@@ -83,7 +84,8 @@ async function resolvePublicRunPolicy(sql: DbClient, organizationId: string, run
   const actor = await resolveStoredActingPrincipal(sql, organizationId, run.policy_principal_kind, run.policy_principal_id);
   return resolveConnectorPolicy({ organizationId, connectionId: Number(run.connection_id), operation: resolved.operation, actor, sql,
     appPrincipalId: storedPolicyPatPrincipal(run.run_metadata), skipCallerAllowlists: implementationStep,
-    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true, input: run.action_input, destination });
+    person: run.run_metadata?.[POLICY_PERSON_METADATA_KEY] === true, input: run.action_input, destination,
+    classify: { live: false, results: storedPolicyClassify(run.run_metadata) } });
 }
 
 async function isSourceReadFeedStillReadable(sql: DbClient, organizationId: string, run: PolicyRun): Promise<boolean> {

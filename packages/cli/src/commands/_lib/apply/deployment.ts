@@ -22,7 +22,6 @@ import {
   type RecordedGuardrail,
   type RecordedSkill,
   recordGuardrail,
-  recordGuardrailConfig,
   recordSkill,
 } from "./desired-state.js";
 import type { Baseline, DiffPlan, DiffRow, RemoteSnapshot } from "./diff.js";
@@ -83,15 +82,6 @@ export function redactDesiredState(
           skills: state.skills.map((skill) =>
             typeof skill.content === "string" ? recordSkill(skill) : skill
           ),
-        }
-      : {}),
-    // A judge's policy is recorded only as its digest.
-    ...(state.guardrails
-      ? {
-          guardrails: state.guardrails.map((guardrail) => ({
-            ...guardrail,
-            config: recordGuardrailConfig(guardrail.config),
-          })),
         }
       : {}),
     agents: state.agents.map((agent) => ({
@@ -161,8 +151,8 @@ export interface DeploymentManifest {
    */
   skills?: RecordedSkill[];
   /**
-   * The library guardrails this config applied, by id (a judge's policy as
-   * its digest): the rows prune may archive and the three-way baseline.
+   * The library guardrails this config applied, by id: the rows prune may
+   * archive and the three-way baseline.
    */
   guardrails?: RecordedGuardrail[];
   /**

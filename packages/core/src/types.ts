@@ -248,8 +248,8 @@ export interface ThreadResponsePayload {
   finalText?: string;
   /**
    * Distinct tool names invoked this turn (`tool_execution_end`), stamped by
-   * the worker on the terminal completion row so output guardrails (e.g.
-   * require-tool) can enforce "must call X this turn" without a second ledger.
+   * the worker on the terminal completion row so output guardrails can see
+   * which tools ran this turn without a second ledger.
    */
   toolsUsed?: string[];
   /**

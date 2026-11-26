@@ -1,8 +1,6 @@
 import { type MessagePayload, normalizeDomainPattern } from "@lobu/core";
 import type { ModelProviderModule } from "../modules/module-system.js";
 import type { GrantStore } from "../permissions/grant-store.js";
-import { patternReaches } from "@lobu/connector-sdk/egress-policy";
-import { readJudgedEgressDomains } from "../permissions/policy-store.js";
 import type { WritableSecretStore } from "../secrets/index.js";
 import type { CredentialLeaseRegistry } from "../agent-tooling/credential-lease.js";
 import { resolveAgentToolingDeclaration } from "../agent-tooling/resolver.js";
@@ -80,8 +78,8 @@ export interface DeploymentInfo {
 
 /**
  * Per-agent gateway state for the isolate lane: mints the signed worker token
- * pair, syncs per-agent egress grants and judge policies into the stores the
- * HTTP proxy reads at request time, and tracks the connector-tooling
+ * pair, syncs per-agent egress grants into the store the HTTP proxy reads at
+ * request time, and tracks the connector-tooling
  * fingerprint that decides whether a warm worker must be recycled.
  *
  * It no longer runs workers. A turn is claimed over HTTP by a worker the
@@ -305,8 +303,7 @@ export class DeploymentManager {
   /**
    * Sync per-agent network and Nix cache domain grants to the grant store.
    * Called on worker create and every message so config changes pick up without
-   * redeploying. The egress judge policy itself is not synced anywhere: the
-   * HTTP proxy reads it from the workspace guardrail library per request.
+   * redeploying.
    *
    * Domains reconcile against Postgres UNCONDITIONALLY — the pod-local
    * cache is never trusted for them. Non-expiring domain rows are written
@@ -324,40 +321,22 @@ export class DeploymentManager {
     if (!this.grantStore) return;
 
     const orgId = messageData.organizationId;
-    const judgedDomains = orgId
-      ? await readJudgedEgressDomains(orgId, agentId)
-      : [];
 
     // ── Domains: PG-reconciled ──────────────────────────────────────────
     // pattern → denied flag, keyed in NORMALIZED form so alias spellings
     // ("*.example.com" vs ".example.com") collapse to the single grant row
     // they share. Denies are added last so a domain listed on both sides
     // collapses to deny (matching the proxy's deny precedence).
-    //
-    // A domain the egress judge governs is SKIPPED on the allow side — config
-    // domains and Nix cache domains alike. An allow grant outranks the judge
-    // in `checkDomainAccess`, so granting a judged domain makes its judge
-    // permanently inert — and the dispatch payload can hold such a domain
-    // without anyone having typed it into agent config, because
-    // `foldConnectorTooling` unions connector `agentTooling` domains into
-    // `allowedDomains` AFTER the write-time guard has run. Skipping also
-    // HEALS an agent already in that state: the stale row is absent from
-    // `expectedDomains`, so the reconcile below revokes it. Denies are
-    // unaffected — a deny grant outranks the judge by design.
     const expectedDomains = new Map<string, boolean>();
-    const expectAllowUnlessJudged = (pattern: string) => {
-      if (judgedDomains.some((j) => patternReaches(j, pattern))) return;
-      expectedDomains.set(pattern, false);
-    };
     for (const domain of messageData.networkConfig?.allowedDomains ?? []) {
-      expectAllowUnlessJudged(normalizeDomainPattern(domain));
+      expectedDomains.set(normalizeDomainPattern(domain), false);
     }
     if (
       messageData.nixConfig?.packages?.length ||
       messageData.nixConfig?.flakeUrl
     ) {
       for (const domain of NIX_CACHE_DOMAINS) {
-        expectAllowUnlessJudged(domain);
+        expectedDomains.set(domain, false);
       }
     }
     for (const domain of messageData.networkConfig?.deniedDomains ?? []) {

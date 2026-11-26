@@ -379,9 +379,9 @@ export interface AgentTurnOutput {
   }>;
   /**
    * The tools the OWNER input's answer used, in first-call order. Always
-   * present, and `[]` for an answer that called none: the `requireTool`
-   * output guardrail treats an ABSENT ledger as "cannot prove a miss" and
-   * passes, so omitting it silently disables that check. Steered inputs carry
+   * present, and `[]` for an answer that called none: an ABSENT ledger means
+   * "not recorded", which output guardrails cannot tell from a miss. Steered
+   * inputs carry
    * their own ledgers on their `consumedInputs` receipts — this field is
    * never the execution-wide union, which would attribute a sibling input's
    * calls to the owner's reply.

@@ -2,52 +2,19 @@
  * Tests for the guardrails extensions:
  *  - `pii-scan` regex built-in (input, output, pre-tool) + Luhn filter
  *  - `safeStringify` helper (BigInt, circular refs)
- *  - `TextJudge` with a fake LLM client (cache hit, fail closed)
- *  - `createJudgeGuardrail` factory across stages + tool narrowing
  *  - `buildGuardrailsByStage` over workspace guardrail library rows
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  createNoopGuardrail,
-  GuardrailRegistry,
-  type GuardrailStage,
-} from "@lobu/core";
+import { createNoopGuardrail, GuardrailRegistry } from "@lobu/core";
 import type { ApplyingGuardrail } from "../../../guardrails/workspace-guardrails.js";
 import {
   buildGuardrailsByStage,
-  createJudgeGuardrail,
   createPiiScanGuardrail,
-  inlineJudgeHash,
   luhnValid,
   safeStringify,
-  TextJudge,
 } from "../index.js";
-import type { JudgeClient, JudgeVerdict } from "../../proxy/egress-judge/types.js";
 import { registerBuiltinGuardrails } from "../builtins.js";
-
-// --- Helpers ---------------------------------------------------------------
-
-class FakeJudgeClient implements JudgeClient {
-  public calls: Array<{ model: string; userPrompt: string }> = [];
-  constructor(private impl: (userPrompt: string) => JudgeVerdict) {}
-  async judge(args: {
-    model: string;
-    systemPrompt: string;
-    userPrompt: string;
-  }): Promise<JudgeVerdict> {
-    this.calls.push({ model: args.model, userPrompt: args.userPrompt });
-    return this.impl(args.userPrompt);
-  }
-}
-
-class ThrowingJudgeClient implements JudgeClient {
-  public calls = 0;
-  async judge(): Promise<JudgeVerdict> {
-    this.calls += 1;
-    throw new Error("simulated transport failure");
-  }
-}
 
 // --- luhnValid -------------------------------------------------------------
 
@@ -319,254 +286,6 @@ describe("pii-scan builtin", () => {
   });
 });
 
-// --- TextJudge -------------------------------------------------------------
-
-describe("TextJudge", () => {
-  test("returns allow when fake judge allows", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "ok",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const r = await judge.decide("Never reveal PHI.", "Hello there", { orgId: "org-a" });
-    expect(r.allow).toBe(true);
-    expect(r.reason).toBe("ok");
-    expect(fake.calls.length).toBe(1);
-  });
-
-  test("returns deny + reason when fake judge denies", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "deny",
-      reason: "mentions competitor",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const r = await judge.decide("No competitors.", "Acme is better", { orgId: "org-a" });
-    expect(r.allow).toBe(false);
-    expect(r.reason).toBe("mentions competitor");
-  });
-
-  test("verdict cache hits on identical (policy, text)", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "ok",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("p", "t", { orgId: "org-a" });
-    await judge.decide("p", "t", { orgId: "org-a" });
-    await judge.decide("p", "t", { orgId: "org-a" });
-    expect(fake.calls.length).toBe(1);
-  });
-
-  test("policy edit invalidates cache (different policyHash)", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "ok",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("p1", "t", { orgId: "org-a" });
-    await judge.decide("p2", "t", { orgId: "org-a" });
-    expect(fake.calls.length).toBe(2);
-  });
-
-  test("circuit breaker opens after threshold; subsequent calls fail closed", async () => {
-    const throwing = new ThrowingJudgeClient();
-    const judge = new TextJudge({
-      client: throwing,
-      resolveOrgDefaultModel: async () => "judge-test-model",
-      breakerFailureThreshold: 2,
-      breakerCooldownMs: 60_000,
-    });
-    // First two calls fail closed and increment the breaker; vary the text so
-    // we don't get a deny cache hit that hides the breaker transition.
-    const r1 = await judge.decide("p", "t1", { orgId: "org-a" });
-    expect(r1.allow).toBe(false);
-    const r2 = await judge.decide("p", "t2", { orgId: "org-a" });
-    expect(r2.allow).toBe(false);
-    expect(throwing.calls).toBe(2);
-    // Third call should short-circuit on the open breaker without hitting
-    // the client at all.
-    const r3 = await judge.decide("p", "t3", { orgId: "org-a" });
-    expect(r3.allow).toBe(false);
-    expect(r3.reason).toMatch(/circuit breaker/i);
-    expect(throwing.calls).toBe(2);
-  });
-
-  test("includes policy + text in the user prompt", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    await judge.decide("MY POLICY", "MY TEXT", { orgId: "org-a" });
-    expect(fake.calls[0]?.userPrompt).toContain("MY POLICY");
-    expect(fake.calls[0]?.userPrompt).toContain("MY TEXT");
-  });
-
-  test("fails closed without calling the judge when no model is configured", async () => {
-    // No defaultModel and no per-call model (EGRESS_JUDGE_MODEL unset in tests).
-    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
-    const judge = new TextJudge({ client: fake });
-    const r = await judge.decide("some policy", "some text", { orgId: "org-a" });
-    expect(r.allow).toBe(false);
-    expect(r.reason).toMatch(/no judge model configured/i);
-    // The transport must NOT be called — we never had a model to call it with.
-    expect(fake.calls.length).toBe(0);
-  });
-
-  test("uses a per-call model even when no default is set", async () => {
-    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "ok" }));
-    const judge = new TextJudge({ client: fake });
-    const r = await judge.decide("policy", "text", { model: "explicit-model" });
-    expect(r.allow).toBe(true);
-    expect(fake.calls[0]?.model).toBe("explicit-model");
-  });
-
-  test("the model is part of the cache key — different models are NOT shared", async () => {
-    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "ok" }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "default-model" });
-
-    await judge.decide("p", "t", { model: "model-a" });
-    // Same policy + text but a DIFFERENT model must re-call the judge, not
-    // reuse model-a's cached verdict.
-    await judge.decide("p", "t", { model: "model-b" });
-    expect(fake.calls.length).toBe(2);
-    expect(fake.calls.map((c) => c.model)).toEqual(["model-a", "model-b"]);
-
-    // Repeating model-a hits the cache (no extra call).
-    await judge.decide("p", "t", { model: "model-a" });
-    expect(fake.calls.length).toBe(2);
-  });
-});
-
-// --- createJudgeGuardrail --------------------------------------------------
-
-describe("createJudgeGuardrail", () => {
-  test("output stage trips when judge denies", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "deny",
-      reason: "competitor mention",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("output", "no competitors", { judge, orgId: "org-a" });
-    const r = await g.run({
-      agentId: "a",
-      userId: "u",
-      platform: "x",
-      text: "Acme is better than them",
-    });
-    expect(r.tripped).toBe(true);
-    expect(r.reason).toBe("competitor mention");
-  });
-
-  test("pre-tool guardrail respects tools narrowing", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "deny",
-      reason: "blocked",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      orgId: "org-a", judge,
-      tools: ["github.delete_repo"],
-    });
-    // Tool not in list -> noop, judge never called.
-    const r1 = await g.run({
-      agentId: "a",
-      userId: "u",
-      toolName: "github.list_issues",
-      arguments: {},
-    });
-    expect(r1.tripped).toBe(false);
-    expect(fake.calls.length).toBe(0);
-    // Tool in list -> judge is consulted, denies.
-    const r2 = await g.run({
-      agentId: "a",
-      userId: "u",
-      toolName: "github.delete_repo",
-      arguments: { repo: "lobu" },
-    });
-    expect(r2.tripped).toBe(true);
-    expect(fake.calls.length).toBe(1);
-  });
-
-  test("pre-tool guardrail safely serializes BigInt args", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
-    const r = await g.run({
-      agentId: "a",
-      userId: "u",
-      toolName: "weird.tool",
-      arguments: { id: 999999999999999n },
-    });
-    expect(r.tripped).toBe(false);
-    // Verify the judge actually got called (i.e., extraction didn't throw).
-    expect(fake.calls.length).toBe(1);
-    expect(fake.calls[0]?.userPrompt).toContain("999999999999999");
-  });
-
-  test("pre-tool guardrail safely serializes circular args", async () => {
-    const fake = new FakeJudgeClient(() => ({
-      verdict: "allow",
-      reason: "",
-    }));
-    const judge = new TextJudge({ client: fake, resolveOrgDefaultModel: async () => "judge-test-model" });
-    const g = createJudgeGuardrail("pre-tool", "policy", { judge, orgId: "org-a" });
-    const node: { name: string; self?: unknown } = { name: "root" };
-    node.self = node;
-    const r = await g.run({
-      agentId: "a",
-      userId: "u",
-      toolName: "weird.tool",
-      arguments: node,
-    });
-    expect(r.tripped).toBe(false);
-    expect(fake.calls.length).toBe(1);
-    expect(fake.calls[0]?.userPrompt).toContain("<circular>");
-  });
-
-  test("inline name is inline:<stage>:<hash8>", () => {
-    const g = createJudgeGuardrail("input", "policy text");
-    expect(g.name).toBe(`inline:input:${inlineJudgeHash("policy text")}`);
-  });
-
-  // Tool scope must factor into the hash so the aggregator's name-keyed
-  // dedup doesn't collapse two narrowings of the same English policy.
-  test("same policy with different tool scopes yields distinct names", () => {
-    const g1 = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      tools: ["fs.write"],
-    });
-    const g2 = createJudgeGuardrail("pre-tool", "no destructive ops", {
-      tools: ["fs.delete"],
-    });
-    expect(g1.name).not.toBe(g2.name);
-  });
-
-  test("same policy with same tool scope yields the same name (sort-invariant)", () => {
-    const g1 = createJudgeGuardrail("pre-tool", "policy", {
-      tools: ["a", "b"],
-    });
-    const g2 = createJudgeGuardrail("pre-tool", "policy", {
-      tools: ["b", "a"],
-    });
-    expect(g1.name).toBe(g2.name);
-  });
-
-  test("policy without tools differs from policy with tools", () => {
-    const g1 = createJudgeGuardrail("pre-tool", "policy");
-    const g2 = createJudgeGuardrail("pre-tool", "policy", { tools: ["x"] });
-    expect(g1.name).not.toBe(g2.name);
-  });
-
-  test("empty tools array is canonically equal to undefined tools", () => {
-    const g1 = createJudgeGuardrail("pre-tool", "policy", { tools: [] });
-    const g2 = createJudgeGuardrail("pre-tool", "policy");
-    expect(g1.name).toBe(g2.name);
-  });
-});
-
 // --- buildGuardrailsByStage ------------------------------------------------
 
 describe("buildGuardrailsByStage (aggregator)", () => {
@@ -592,51 +311,29 @@ describe("buildGuardrailsByStage (aggregator)", () => {
   test("a built-in row runs at every stage the built-in implements, under the row name", () => {
     const out = buildGuardrailsByStage(
       [row("pii", { builtin: "pii-scan" }), row("secrets", { builtin: "secret-scan" })],
-      setupRegistry(),
-      "org-a"
+      setupRegistry()
     );
     expect(names(out.input)).toEqual(["pii"]);
     expect(names(out.output)).toEqual(["pii"]);
     expect(names(out["pre-tool"])).toEqual(["pii", "secrets"]);
-    expect(out.egress).toEqual([]);
   });
 
-  test("custom checks accumulate: same policy under two names both run", () => {
-    const out = buildGuardrailsByStage(
-      [
-        row("no-fs-write", { kind: "judge", stage: "pre-tool", policy: "p", tools: ["fs.write"] }),
-        row("no-fs-delete", { kind: "judge", stage: "pre-tool", policy: "p", tools: ["fs.delete"] }),
-        row("tone", { kind: "judge", stage: "output", policy: "no profanity" }),
-        row("must-reply", { kind: "require-tool", stage: "output", tools: ["send_message"] }),
-      ],
-      setupRegistry(),
-      "org-a"
-    );
-    expect(names(out["pre-tool"])).toEqual(["no-fs-write", "no-fs-delete"]);
-    expect(names(out.output)).toEqual(["tone", "must-reply"]);
-    expect(out.output[0]?.stage).toBe("output");
-  });
-
-  test("egress rows and rows that cannot run are skipped, not thrown", () => {
+  test("a row naming a built-in the registry lacks is skipped, not thrown", () => {
     let out!: ReturnType<typeof buildGuardrailsByStage>;
     expect(() => {
-      out = buildGuardrailsByStage(
-        [
-          row("egress-check", { kind: "judge", stage: "egress", policy: "p", domains: [".x.com"] }),
-          row("bad-stage", { kind: "judge", stage: "outupt" as GuardrailStage, policy: "p" }),
-          row("no-policy", { kind: "judge", stage: "input" }),
-          row("rt-input", { kind: "require-tool", stage: "input", tools: ["x"] }),
-          row("rt-empty", { kind: "require-tool", stage: "output", tools: [] }),
-          row("unknown", { builtin: "forbidden-tools" }),
-        ],
-        setupRegistry(),
-        "org-a"
-      );
+      out = buildGuardrailsByStage([row("unknown", { builtin: "forbidden-tools" })], setupRegistry());
     }).not.toThrow();
     expect(out.input).toEqual([]);
     expect(out.output).toEqual([]);
     expect(out["pre-tool"]).toEqual([]);
-    expect(out.egress).toEqual([]);
+  });
+
+  test("rows accumulate: the same built-in under two names both run", () => {
+    const out = buildGuardrailsByStage(
+      [row("pii-a", { builtin: "pii-scan" }), row("pii-b", { builtin: "pii-scan" })],
+      setupRegistry()
+    );
+    expect(names(out["pre-tool"])).toEqual(["pii-a", "pii-b"]);
   });
 });
 
@@ -661,35 +358,5 @@ describe("secret-scan builtin", () => {
   test("does not flag ordinary prose", async () => {
     const res = await run("the quick brown fox jumps over the lazy dog");
     expect(res.tripped).toBe(false);
-  });
-});
-
-describe("createJudgeGuardrail org scoping", () => {
-  const defaults: Record<string, string> = { "org-a": "acme/model-a", "org-b": "acme/model-b" };
-  function build(orgId: string | undefined) {
-    const fake = new FakeJudgeClient(() => ({ verdict: "allow", reason: "" }));
-    const judge = new TextJudge({
-      client: fake,
-      resolveOrgDefaultModel: async (o) => defaults[o] ?? null,
-    });
-    const g = createJudgeGuardrail("output", "policy", { judge, orgId });
-    return { fake, g };
-  }
-  const ctx = { agentId: "shared-agent", userId: "u", platform: "x", text: "hello" } as never;
-
-  test("two orgs sharing an agent id each use their own default model", async () => {
-    const a = build("org-a");
-    const b = build("org-b");
-    await a.g.run(ctx);
-    await b.g.run(ctx);
-    expect(a.fake.calls[0]?.model).toBe("acme/model-a");
-    expect(b.fake.calls[0]?.model).toBe("acme/model-b");
-  });
-
-  test("no org in hand fails closed without calling the judge", async () => {
-    const { fake, g } = build(undefined);
-    const r = await g.run(ctx);
-    expect(r.tripped).toBe(true);
-    expect(fake.calls.length).toBe(0);
   });
 });

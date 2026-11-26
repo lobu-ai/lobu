@@ -10,6 +10,7 @@ import {
 } from "../../../../authz/connector-policy";
 import { chatAccessOfToolContext, DEVICE_ACCESS_REFUSED, decideDeviceAccess } from "../../../../authz/device-access";
 import { resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
+import { storedPolicyClassify } from "../../../../authz/policy-classify";
 import { classifyRunDestination, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
 import { writeEffectRank } from "../../../../authz/write-action-manifest";
@@ -135,6 +136,7 @@ export async function handleConfirm(
 				input: run.action_input,
 				sql: tx,
 				destination,
+				classify: { live: false, results: storedPolicyClassify(run.run_metadata) },
 			}),
 			resolvePolicyPrincipal(tx, ctx.organizationId, { kind: run.policy_principal_kind, id: run.policy_principal_id }),
 		]);

@@ -1,7 +1,12 @@
 import { serve } from "@hono/node-server";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
+import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
+import { resetPredictClassifierForTests } from "../../../gateway/inference/predict-classifier";
+import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
@@ -851,5 +856,151 @@ describe("connected app caller identity", () => {
     const clean = await execute(named.token, { body: "See you at the review." });
     expect(clean.status, JSON.stringify(clean.body)).toBe(200);
     expect(clean.body.error ?? "").not.toContain("Policy blocks");
+  });
+
+  describe("classify conditions", () => {
+    // A local model speaking Chat Completions. It answers from the judged text
+    // so each case reads on its own: "wire" is a payment, "hello" chitchat,
+    // "abstain" no value, "garbage" not JSON, "slow" later than the budget.
+    let model: Server;
+    let modelUrl: string;
+    beforeAll(async () => {
+      process.env.LOBU_ENCRYPTION_KEY ||= "a".repeat(64);
+      __resetEncryptionKeyCacheForTests();
+      model = createServer((req, res) => {
+        let raw = "";
+        req.on("data", chunk => { raw += chunk; });
+        req.on("end", () => {
+          const body = JSON.parse(raw) as { messages: Array<{ role: string; content: string }> };
+          const text = body.messages.find(message => message.role === "user")?.content ?? "";
+          const reply = (content: string) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
+          };
+          const verdict = (value: string | null) => JSON.stringify({ value, reasoning: "synthetic" });
+          if (text.includes("slow")) setTimeout(() => reply(verdict("payment")), 4_000);
+          else if (text.includes("garbage")) reply("I think it is a payment.");
+          else if (text.includes("abstain")) reply(verdict(null));
+          else if (text.includes("wire")) reply(verdict("payment"));
+          else reply(verdict("chitchat"));
+        });
+      });
+      await new Promise<void>(resolve => model.listen(0, "127.0.0.1", resolve));
+      modelUrl = `http://127.0.0.1:${(model.address() as AddressInfo).port}/v1`;
+    });
+    afterAll(async () => {
+      model.closeAllConnections();
+      await new Promise<void>(resolve => model.close(() => resolve()));
+    });
+    beforeEach(() => resetPredictClassifierForTests());
+
+    async function addClassifier(slug = "topic") {
+      const [row] = await getTestDb()<{ id: number }>`
+        INSERT INTO classify_facet (organization_id, slug, name, attribute_key, status, created_by, entity_ids, attribute_values, min_similarity)
+        VALUES (${org.id}, ${slug}, 'Topic', ${slug}, 'active', ${owner.id}, ARRAY[]::bigint[],
+          '{"payment":{"description":"Moves money","examples":["wire 500 to this account"]},"chitchat":{"description":"Small talk"}}'::jsonb, 0.7)
+        RETURNING id`;
+      return Number(row.id);
+    }
+    async function addModelProvider() {
+      const created = await createInferenceProvider({ organizationId: org.id, slug: "fake-model", kind: "openai", apiKey: "sk-synthetic",
+        capabilities: { text: { model: "fake-1", base_url: modelUrl } } });
+      if ("error" in created) throw new Error(created.error);
+      await getTestDb()`UPDATE inference_providers SET is_default = true WHERE organization_id = ${org.id} AND slug = 'fake-model'`;
+    }
+    const exact = () => ({ connection_id: connectionId, operation_key: "app-policy::needs_approval" });
+    const payment = { classify: "topic", field: "/body", is: ["payment"] };
+
+    it("refuses a classify condition the workspace cannot run, naming the field, and stores the default model", async () => {
+      const before = await snapshot();
+      const put = (when: unknown[]) => request("PUT", path(), { revision: before.revision, rules: [{ effect: "deny", kind: "guardrail", when }] });
+      const refusal = async (when: unknown[]) => {
+        const response = await put(when);
+        expect(response.status, JSON.stringify(when)).toBe(400);
+        return ((await response.json()) as { message: string }).message;
+      };
+      expect(await refusal([payment])).toBe('rules[0].when[0].classify: no classifier "topic" in this workspace.');
+      await addClassifier();
+      expect(await refusal([{ field: "/to", op: "exists" }, { ...payment, is: ["payment", "refund"] }]))
+        .toBe('rules[0].when[1].is: "refund" is not a value of classifier "topic".');
+      expect(await refusal([payment])).toBe("rules[0].when[0]: ChatGPT sign-in can't run policy checks; add a provider with an API key.");
+      expect(await refusal([payment, payment, { ...payment, field: "/title" }])).toBe("rules[0].when may hold at most 2 classify conditions.");
+      expect(await refusal([{ ...payment, is: [] }])).toBe("rules[0].when[0].is must be a non-empty list of distinct classifier values.");
+      await addModelProvider();
+      const saved = await put([payment]);
+      expect(saved.status, await saved.clone().text()).toBe(200);
+      const { rules, revision } = await saved.json();
+      expect(rules[0].when).toEqual([{ ...payment, model: "fake-model/fake-1" }]);
+      // Echoing the stored rule keeps its identity.
+      const echoed = await request("PUT", path(), { revision, rules });
+      expect((await echoed.json()).rules).toEqual(rules);
+    });
+
+    it("applies a rule on holds, ignores it on not, and treats a failed call as unknown", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail", note: "Ask before moving money", when: [payment] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const status = async (body: string) => (await execute(named.token, { body })).body.status;
+      expect(await status("please wire 500 today")).toBe("pending_approval");
+      expect(await status("hello, see you at the review")).not.toBe("pending_approval");
+      // Unknown keeps a restriction: invalid output, an abstention, and a call past the budget.
+      expect(await status("garbage")).toBe("pending_approval");
+      expect(await status("abstain")).toBe("pending_approval");
+      const started = Date.now();
+      expect(await status("slow")).toBe("pending_approval");
+      expect(Date.now() - started).toBeLessThan(3_900);
+      // An input with no such field holds nothing, so the Ask does not apply and no call is made.
+      expect((await execute(named.token, {})).body.status).not.toBe("pending_approval");
+
+      // Unknown drops a grant: the app's conditional Always allow lifts the Ask only on holds.
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" }]);
+      await setRules(appPath("web:example.com"), [{ ...exact(), effect: "auto", when: [{ ...payment, is: ["chitchat"] }] }]);
+      expect(await status("hello again")).not.toBe("pending_approval");
+      expect(await status("garbage again")).toBe("pending_approval");
+    });
+
+    it("replays the admission result after the model is gone, and a missing one is unknown", async () => {
+      await addClassifier();
+      await addModelProvider();
+      await setRules(path(), [{ effect: "auto" }, { ...exact(), effect: "approval", kind: "guardrail" }]);
+      await setRules(appPath("web:example.com"), [{ ...exact(), effect: "auto", when: [{ ...payment, is: ["chitchat"] }] }]);
+      const named = await oauthToken(["https://app.example.com/callback"]);
+      const admitted = await execute(named.token, { body: "hello, replay me" });
+      expect(admitted.body.status, JSON.stringify(admitted.body)).not.toBe("pending_approval");
+      const runId = admitted.body.run_id!;
+      const [run] = await getTestDb()<{ run_metadata: Record<string, unknown> }>`SELECT run_metadata FROM runs WHERE id = ${runId}`;
+      // Only the outcome is stored: never the judged text or the model's reasoning.
+      expect(run.run_metadata.policy_classify).toEqual([
+        { rule: expect.any(Number), condition: 0, result: "holds", model: "fake-model/fake-1", classifier: expect.any(String) },
+      ]);
+      expect(JSON.stringify(run.run_metadata)).not.toContain("synthetic");
+
+      model.closeAllConnections();
+      await new Promise<void>(resolve => model.close(() => resolve()));
+      resetPredictClassifierForTests();
+      try {
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("auto");
+        await getTestDb()`UPDATE runs SET run_metadata = run_metadata - 'policy_classify' WHERE id = ${runId}`;
+        expect((await resolveRunConnectorPolicy({ organizationId: org.id, runId }))?.effect).toBe("approval");
+      } finally {
+        await new Promise<void>(resolve => model.listen(Number(new URL(modelUrl).port), "127.0.0.1", resolve));
+      }
+    });
+
+    it("refuses to delete a classifier a rule's condition uses", async () => {
+      const classifierId = await addClassifier();
+      await addModelProvider();
+      const saved = await setRules(path(), [{ effect: "deny", kind: "guardrail", when: [payment] }]);
+      const remove = () => request("POST", `/api/${org.slug}/manage_classifiers`, { action: "delete", classifier_id: classifierId });
+      const refused = await remove();
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: `Classifier "topic" is used by policy rule ${saved.rules[0].id}; remove its classify condition first.` });
+      const [still] = await getTestDb()`SELECT status FROM classify_facet WHERE id = ${classifierId}`;
+      expect(still.status).toBe("active");
+      await setRules(path(), []);
+      const removed = await remove();
+      expect(removed.status, await removed.clone().text()).toBe(200);
+    });
   });
 });

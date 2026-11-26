@@ -75,8 +75,8 @@ export default defineConfig({
   return dir;
 }
 
-const judge = (policy: string) =>
-  `[defineGuardrail({ name: "no-refunds", judge: { stage: "output", policy: ${JSON.stringify(policy)} }, appliesTo: [{ agent: "triage" }] })]`;
+const scan = (builtin: string) =>
+  `[defineGuardrail({ name: "no-leaks", builtin: ${JSON.stringify(builtin)}, appliesTo: [{ agent: "triage" }] })]`;
 
 interface WireCall {
   method: string;
@@ -242,12 +242,12 @@ const appGuardrail: WorkspaceGuardrail = {
 };
 
 describe("apply workspace guardrails over the wire", () => {
-  test("creates each declared guardrail, records only policy digests, then re-applies as a noop", async () => {
+  test("creates each declared guardrail, records it, then re-applies as a noop", async () => {
     const store: Store = { guardrails: [] };
     const first = makeFetch(store);
     await runApply(
       mkProject(
-        `[defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }), ...${judge("Never promise a refund.")}]`
+        `[defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }), ...${scan("pii-scan")}]`
       ),
       first.fetchStub
     );
@@ -276,12 +276,8 @@ describe("apply workspace guardrails over the wire", () => {
         "/api/acme/guardrails",
         {
           guardrail: {
-            name: "no-refunds",
-            config: {
-              kind: "judge",
-              stage: "output",
-              policy: "Never promise a refund.",
-            },
+            name: "no-leaks",
+            config: { builtin: "pii-scan" },
             applies_to: [{ principal_kind: "agent", principal_id: "triage" }],
             enabled: true,
           },
@@ -295,24 +291,19 @@ describe("apply workspace guardrails over the wire", () => {
     };
     expect(manifest.guardrails).toMatchObject([
       { id: "gr_no-secrets", name: "no-secrets" },
-      { id: "gr_no-refunds", name: "no-refunds" },
+      { id: "gr_no-leaks", name: "no-leaks" },
     ]);
     for (const recorded of [
       manifest.guardrails?.[1],
       manifest.state?.guardrails?.[1],
     ]) {
-      expect(recorded?.config).toEqual({
-        kind: "judge",
-        stage: "output",
-        policy_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-      });
+      expect(recorded?.config).toEqual({ builtin: "pii-scan" });
     }
-    expect(JSON.stringify(manifest)).not.toContain("Never promise a refund.");
 
     const again = makeFetch(store);
     await runApply(
       mkProject(
-        `[defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }), ...${judge("Never promise a refund.")}]`
+        `[defineGuardrail({ name: "no-secrets", builtin: "secret-scan" }), ...${scan("pii-scan")}]`
       ),
       again.fetchStub
     );
@@ -321,61 +312,61 @@ describe("apply workspace guardrails over the wire", () => {
 
   test("replaces at the revision apply read while the library is as this config left it", async () => {
     const store: Store = { guardrails: [] };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
     const edit = makeFetch(store);
-    await runApply(mkProject(judge("v2")), edit.fetchStub);
+    await runApply(mkProject(scan("secret-scan")), edit.fetchStub);
     expect(
       guardrailWrites(edit.calls).map((call) => [
         call.method,
         new URL(call.url).pathname,
         call.body.expected_revision,
       ])
-    ).toEqual([["PUT", "/api/acme/guardrails/gr_no-refunds", 1]]);
+    ).toEqual([["PUT", "/api/acme/guardrails/gr_no-leaks", 1]]);
     expect(store.guardrails).toMatchObject([
-      { config: { policy: "v2" }, revision: 2 },
+      { config: { builtin: "secret-scan" }, revision: 2 },
     ]);
   });
 
   test("blocks a stale config from replacing a guardrail edited in the app since", async () => {
     const store: Store = { guardrails: [] };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
     const [guardrail] = store.guardrails;
     if (!guardrail) throw new Error("expected the applied guardrail");
-    guardrail.config = { kind: "judge", stage: "output", policy: "Edited." };
+    guardrail.config = { builtin: "forbidden-tools" };
     guardrail.revision = 2;
 
     const stale = makeFetch(store);
     await expect(
-      runApply(mkProject(judge("v1")), stale.fetchStub)
+      runApply(mkProject(scan("pii-scan")), stale.fetchStub)
     ).rejects.toThrow(/blocked by 1 drift item/);
     expect(guardrailWrites(stale.calls)).toEqual([]);
     expect(store.guardrails).toMatchObject([
-      { config: { policy: "Edited." }, revision: 2 },
+      { config: { builtin: "forbidden-tools" }, revision: 2 },
     ]);
   });
 
   test("fails instead of overwriting an edit made between read and write", async () => {
     const store: Store = { guardrails: [] };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
     store.concurrentEdit = true;
     await expect(
-      runApply(mkProject(judge("v2")), makeFetch(store).fetchStub)
-    ).rejects.toThrow(
-      /Guardrail "no-refunds" changed since this apply read it/
-    );
-    expect(store.guardrails).toMatchObject([{ config: { policy: "v1" } }]);
+      runApply(mkProject(scan("secret-scan")), makeFetch(store).fetchStub)
+    ).rejects.toThrow(/Guardrail "no-leaks" changed since this apply read it/);
+    expect(store.guardrails).toMatchObject([
+      { config: { builtin: "pii-scan" } },
+    ]);
   });
 
   test("archives only guardrails this config created, and only under prune", async () => {
     const store: Store = { guardrails: [structuredClone(appGuardrail)] };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
 
     // Dropped without prune: it stays, and stays owned.
     const kept = makeFetch(store);
     await runApply(mkProject("[]"), kept.fetchStub);
     expect(guardrailWrites(kept.calls)).toEqual([]);
     expect(store.latestManifest).toMatchObject({
-      guardrails: [{ id: "gr_no-refunds", created: true }],
+      guardrails: [{ id: "gr_no-leaks", created: true }],
     });
 
     // Under prune the owned row is archived at its revision; the app's is not.
@@ -387,7 +378,7 @@ describe("apply workspace guardrails over the wire", () => {
         `${new URL(call.url).pathname}${new URL(call.url).search}`,
       ])
     ).toEqual([
-      ["DELETE", "/api/acme/guardrails/gr_no-refunds?expected_revision=1"],
+      ["DELETE", "/api/acme/guardrails/gr_no-leaks?expected_revision=1"],
     ]);
     expect(store.guardrails.map((g) => g.name)).toEqual(["app-made"]);
     expect(store.latestManifest).toMatchObject({ guardrails: [] });
@@ -419,23 +410,23 @@ describe("apply workspace guardrails over the wire", () => {
 
   test("owns the id its create returned, never a same-name replacement made right after", async () => {
     const store: Store = { guardrails: [], replaceAfterCreate: true };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
     store.replaceAfterCreate = false;
     expect(store.guardrails.map((g) => g.id)).toEqual([
-      "gr_no-refunds_replacement",
+      "gr_no-leaks_replacement",
     ]);
 
     const pruned = makeFetch(store);
     await runApply(mkProject("[]", { prune: true }), pruned.fetchStub);
     expect(guardrailWrites(pruned.calls)).toEqual([]);
     expect(store.guardrails.map((g) => g.id)).toEqual([
-      "gr_no-refunds_replacement",
+      "gr_no-leaks_replacement",
     ]);
   });
 
   test("blocks archiving a guardrail edited in the app since this config created it", async () => {
     const store: Store = { guardrails: [] };
-    await runApply(mkProject(judge("v1")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub);
     const [guardrail] = store.guardrails;
     if (!guardrail) throw new Error("expected the applied guardrail");
     guardrail.enabled = false;
@@ -452,7 +443,7 @@ describe("apply workspace guardrails over the wire", () => {
   test("a refused write says a guardrails:write token is needed", async () => {
     const store: Store = { guardrails: [], denyWrites: true };
     await expect(
-      runApply(mkProject(judge("v1")), makeFetch(store).fetchStub)
+      runApply(mkProject(scan("pii-scan")), makeFetch(store).fetchStub)
     ).rejects.toThrow(/guardrails:write scope[\s\S]*LOBU_API_TOKEN/);
   });
 
@@ -463,17 +454,17 @@ describe("apply workspace guardrails over the wire", () => {
     expect(guardrailCalls(unmanaged.calls)).toEqual([]);
 
     const memory = makeFetch(store);
-    await runApply(mkProject(judge("v1")), memory.fetchStub, "memory");
+    await runApply(mkProject(scan("pii-scan")), memory.fetchStub, "memory");
     expect(guardrailCalls(memory.calls)).toEqual([]);
     expect(store.guardrails).toEqual([appGuardrail]);
   });
 
   test("rollback leaves the library alone and keeps its record, so a later edit still blocks", async () => {
     const store: Store = { guardrails: [] };
-    const dir = mkProject(judge("v1"));
+    const dir = mkProject(scan("pii-scan"));
     await runApply(dir, makeFetch(store).fetchStub);
     store.rollbackManifest = structuredClone(store.latestManifest);
-    await runApply(mkProject(judge("v2")), makeFetch(store).fetchStub);
+    await runApply(mkProject(scan("secret-scan")), makeFetch(store).fetchStub);
 
     const rollback = makeFetch(store);
     await rollbackCommand({
@@ -485,14 +476,16 @@ describe("apply workspace guardrails over the wire", () => {
       fetchImpl: rollback.fetchStub,
     });
     expect(guardrailWrites(rollback.calls)).toEqual([]);
-    expect(store.guardrails).toMatchObject([{ config: { policy: "v2" } }]);
+    expect(store.guardrails).toMatchObject([
+      { config: { builtin: "secret-scan" } },
+    ]);
     expect(store.latestManifest).toMatchObject({
-      guardrails: [{ id: "gr_no-refunds", created: true }],
+      guardrails: [{ id: "gr_no-leaks", created: true }],
     });
 
     const [guardrail] = store.guardrails;
     if (!guardrail) throw new Error("expected the library guardrail");
-    guardrail.config = { kind: "judge", stage: "output", policy: "Edited." };
+    guardrail.config = { builtin: "forbidden-tools" };
     guardrail.revision += 1;
     await expect(runApply(dir, makeFetch(store).fetchStub)).rejects.toThrow(
       /blocked by 1 drift item/
@@ -502,12 +495,8 @@ describe("apply workspace guardrails over the wire", () => {
   test("rejects an invalid declaration before anything reaches the workspace", async () => {
     for (const [declaration, message] of [
       [
-        `[defineGuardrail({ name: "both", builtin: "secret-scan", requireTool: { tools: ["x"] } })]`,
-        /set exactly one of builtin, judge or requireTool/,
-      ],
-      [
-        `[defineGuardrail({ name: "egress", judge: { stage: "egress", policy: "p" } })]`,
-        /config\.domains must not be empty/,
+        `[defineGuardrail({ name: "unknown", builtin: "no-such-check" })]`,
+        /config\.builtin must be one of/,
       ],
       [
         `[defineGuardrail({ name: "Bad Name", builtin: "pii-scan" })]`,

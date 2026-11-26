@@ -12,6 +12,7 @@ import { resolveAutomationConnectionVisibilityUserId } from "../../../../authz/a
 import { compileConnectionRowVisibility } from "../../../../authz/connection-visibility";
 import { allowlistRefusal, type ConnectorPolicyExplanation, type ConnectorPolicyPrincipal, type ConnectorPolicyResult, connectorPolicyNoteSuffix, explainConnectorPolicy, requesterPolicyExplanation } from "../../../../authz/connector-policy";
 import { type ActingPrincipal, resolveActingPrincipal, resolveConnectorPolicy } from "../../../../authz/entity-policy";
+import { POLICY_CLASSIFY_METADATA_KEY, type PolicyClassifyLookup } from "../../../../authz/policy-classify";
 import { applyRunConnectorPolicyAtClaim, classifyRunDestination, POLICY_PAT_PRINCIPAL_METADATA_KEY, POLICY_PERSON_METADATA_KEY, resolveRunConnectorPolicy } from "../../../../authz/operation-run-policy";
 import { hasClassifiableDestination } from "../../../../authz/destination-audience";
 import { resolvePolicyPrincipal } from "../../../../authz/policy-principal";
@@ -994,6 +995,9 @@ export async function handleExecute(
 	// Rules stop agents, apps and Automations, never a person in the web app.
 	// A delegated step answers to the parent run's requester instead.
 	const person = !delegation && isPersonInWebApp(ctx);
+	// Classify conditions run here, before any run lock; the run keeps their
+	// results so claim, approval and dispatch replay them.
+	const classify: PolicyClassifyLookup = { live: true, results: [] };
 	const [policy, principal] = await Promise.all([
 		resolveConnectorPolicy({
 			organizationId: ctx.organizationId,
@@ -1004,6 +1008,7 @@ export async function handleExecute(
 			person,
 			input,
 			destination: { live: true, seen: [] },
+			classify,
 			sql,
 		}),
 		resolvePolicyPrincipal(sql, ctx.organizationId, actor),
@@ -1067,6 +1072,7 @@ export async function handleExecute(
 		...runMetadata,
 		...(patPrincipalId ? { [POLICY_PAT_PRINCIPAL_METADATA_KEY]: patPrincipalId } : {}),
 		...(person ? { [POLICY_PERSON_METADATA_KEY]: true } : {}),
+		...(classify.results.length > 0 ? { [POLICY_CLASSIFY_METADATA_KEY]: classify.results } : {}),
 		approval_notification: notificationContext,
 		source_attribution: requestSourceAttribution(ctx),
 		...(turnOrigin ? { turn_origin: turnOrigin } : {}),

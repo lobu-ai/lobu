@@ -3,11 +3,14 @@ import { scanForPii, scanForSecret } from "../utils/sensitive-content-scan";
 
 /**
  * Conditions on a connector policy rule (`when`): every one must hold for the
- * rule to apply. Both kinds are pure and cheap, so they re-run wherever the
- * evaluator runs, against the operation's input.
+ * rule to apply.
  *
  * - `{ field, op, value? }` compares the value at a JSON pointer.
  * - `{ scan, field }` runs the shared secret or PII detector on it.
+ * - `{ classify, field, is, model }` asks a workspace classifier (a model call)
+ *   whether the value at the pointer is one of `is`. Field and scan conditions
+ *   are pure and re-run wherever the evaluator runs; a classify result is
+ *   computed once at admission and handed in by the caller (`classified`).
  */
 
 const POLICY_CONDITION_OPS = [
@@ -26,12 +29,25 @@ const POLICY_CONDITION_SCANS = ["secrets", "pii"] as const;
 type PolicyConditionScan = (typeof POLICY_CONDITION_SCANS)[number];
 
 const MAX_POLICY_CONDITIONS = 8;
+const MAX_CLASSIFY_CONDITIONS = 2;
 const MAX_POINTER_LENGTH = 512;
 const MAX_VALUE_BYTES = 4096;
 
-type PolicyCondition =
+/** `model` is the workspace default model ref, filled in when the rule is written. */
+export type PolicyClassifyCondition = {
+	classify: string;
+	field: string;
+	is: string[];
+	model?: string;
+};
+
+export type PolicyCondition =
 	| { field: string; op: PolicyConditionOp; value?: unknown }
-	| { scan: PolicyConditionScan; field: string };
+	| { scan: PolicyConditionScan; field: string }
+	| PolicyClassifyCondition;
+
+/** A classify condition's result for one operation input. */
+export type ClassifyOutcome = "holds" | "not" | "unknown";
 
 /** A rule's conditions as stored: a 1-8 element array, or null for none. */
 export type StoredPolicyConditions = readonly unknown[] | null;
@@ -108,6 +124,32 @@ function parseCondition(raw: unknown, path: string): PolicyCondition {
 		);
 	}
 	const field = raw.field;
+	if ("classify" in raw) {
+		const extra = Object.keys(raw).find(
+			(key) => key !== "classify" && key !== "field" && key !== "is" && key !== "model",
+		);
+		if (extra) {
+			throw new Error(`${path}.${extra} is not accepted on a classify condition (classify, field, is, model).`);
+		}
+		if (typeof raw.classify !== "string" || raw.classify === "") {
+			throw new Error(`${path}.classify must be a classifier slug.`);
+		}
+		const is = raw.is;
+		if (
+			!Array.isArray(is) ||
+			is.length === 0 ||
+			!is.every((item) => typeof item === "string" && item !== "") ||
+			new Set(is).size !== is.length
+		) {
+			throw new Error(`${path}.is must be a non-empty list of distinct classifier values.`);
+		}
+		if (raw.model !== undefined && (typeof raw.model !== "string" || raw.model === "")) {
+			throw new Error(`${path}.model must be a model ref such as "provider/model".`);
+		}
+		const condition: PolicyClassifyCondition = { classify: raw.classify, field, is: [...is].sort() };
+		if (typeof raw.model === "string") condition.model = raw.model;
+		return condition;
+	}
 	if ("scan" in raw) {
 		const extra = Object.keys(raw).find((key) => key !== "scan" && key !== "field");
 		if (extra) throw new Error(`${path}.${extra} is not accepted on a scan condition (scan, field).`);
@@ -145,6 +187,7 @@ function parseCondition(raw: unknown, path: string): PolicyCondition {
 
 /** A canonical copy, so equal conditions compare and store identically. */
 function canonicalCondition(condition: PolicyCondition): PolicyCondition {
+	if ("classify" in condition) return condition;
 	if ("scan" in condition) return { scan: condition.scan, field: condition.field };
 	return condition.value === undefined
 		? { field: condition.field, op: condition.op }
@@ -159,7 +202,19 @@ export function parsePolicyConditions(raw: unknown, path = "when"): PolicyCondit
 	if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_POLICY_CONDITIONS) {
 		throw new Error(`${path} must list 1-${MAX_POLICY_CONDITIONS} conditions.`);
 	}
-	return raw.map((item, index) => canonicalCondition(parseCondition(item, `${path}[${index}]`)));
+	const conditions = raw.map((item, index) => canonicalCondition(parseCondition(item, `${path}[${index}]`)));
+	if (conditions.filter((condition) => "classify" in condition).length > MAX_CLASSIFY_CONDITIONS) {
+		throw new Error(`${path} may hold at most ${MAX_CLASSIFY_CONDITIONS} classify conditions.`);
+	}
+	return conditions;
+}
+
+/** The input text a condition judges: the value at its pointer, or undefined when missing. */
+export function policyConditionText(input: Record<string, unknown>, pointer: string): string | undefined {
+	const tokens = pointerTokens(pointer);
+	const value = tokens === null ? undefined : resolvePointer(input, tokens);
+	if (value === undefined) return undefined;
+	return typeof value === "string" ? value : JSON.stringify(value) ?? "";
 }
 
 /** A stored or requested condition list, as one comparable key ("" for none). */
@@ -196,7 +251,10 @@ function positiveHolds(op: PositiveOp, expected: unknown, value: unknown): boole
 	}
 }
 
-function fieldHolds(condition: Extract<PolicyCondition, { op: string }>, value: unknown): boolean {
+function fieldHolds(
+	condition: Extract<PolicyCondition, { op: PolicyConditionOp }>,
+	value: unknown,
+): boolean {
 	if (condition.op === "exists") return value !== undefined;
 	// A missing field makes every other comparison false, negative ops included.
 	if (value === undefined) return false;
@@ -215,12 +273,16 @@ function scanHolds(scan: PolicyConditionScan, value: unknown): boolean {
 
 /**
  * Whether every stored condition holds for `input`. "unknown" when the input
- * is not known (discovery) or a stored condition cannot be read; the caller
- * then decides strictly, so an unreadable condition never grants.
+ * is not known (discovery), a stored condition cannot be read, or a classify
+ * condition has no known result; the caller then decides strictly, so an
+ * unknown condition never grants. A condition that is false wins over an
+ * unknown one. `classified` answers a classify condition by its index in the
+ * stored list; without it every classify condition is unknown.
  */
 export function policyConditionsHold(
 	conditions: StoredPolicyConditions,
 	input: Record<string, unknown> | null | undefined,
+	classified?: (index: number, condition: PolicyClassifyCondition) => ClassifyOutcome,
 ): boolean | "unknown" {
 	if (conditions == null) return true;
 	let parsed: PolicyCondition[];
@@ -231,9 +293,24 @@ export function policyConditionsHold(
 	}
 	if (input === undefined) return "unknown";
 	const document = input ?? {};
-	return parsed.every((condition) => {
+	const pending: number[] = [];
+	for (const [index, condition] of parsed.entries()) {
 		const tokens = pointerTokens(condition.field);
 		const value = tokens === null ? undefined : resolvePointer(document, tokens);
-		return "scan" in condition ? scanHolds(condition.scan, value) : fieldHolds(condition, value);
-	});
+		if ("classify" in condition) {
+			// A missing field is false without asking, like the other kinds.
+			if (value === undefined) return false;
+			pending.push(index);
+			continue;
+		}
+		const holds = "scan" in condition ? scanHolds(condition.scan, value) : fieldHolds(condition, value);
+		if (!holds) return false;
+	}
+	let result: boolean | "unknown" = true;
+	for (const index of pending) {
+		const outcome = classified?.(index, parsed[index] as PolicyClassifyCondition) ?? "unknown";
+		if (outcome === "not") return false;
+		if (outcome === "unknown") result = "unknown";
+	}
+	return result;
 }

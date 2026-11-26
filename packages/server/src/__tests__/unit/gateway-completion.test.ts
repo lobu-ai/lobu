@@ -276,9 +276,9 @@ describe("gatewayCompletion", () => {
 });
 
 /**
- * Options added for the fail-closed judge transport. The judge needs a bounded
- * reply, no retries (the circuit breaker is its retry policy), and a timeout it
- * can tell apart from an upstream fault when deciding what to alert on.
+ * Options for a fail-closed caller: a bounded reply, no retries (the circuit
+ * breaker is its retry policy), and a timeout it can tell apart from an
+ * upstream fault when deciding what to alert on.
  */
 describe("gatewayCompletion — fail-closed caller options", () => {
   test("omits max_tokens by default so existing callers are unchanged", async () => {
@@ -311,8 +311,8 @@ describe("gatewayCompletion — fail-closed caller options", () => {
   });
 
   test("maxRetries: 0 makes exactly one upstream attempt on a retryable 500", async () => {
-    // Without the option this retries twice, so a naive judge migration would
-    // triple the upstream load and delay every fail-closed deny.
+    // Without the option this retries twice, so a fail-closed caller would
+    // triple the upstream load and delay every deny.
     const { calls } = stubFetch({}, { status: 500 });
 
     await expect(
@@ -372,11 +372,11 @@ describe("gatewayCompletion — truncated replies", () => {
    * A reasoning model's hidden thinking tokens are charged against
    * `max_tokens` while being EXCLUDED from `completion_tokens`, so a ceiling
    * that looks generous next to the visible reply can still cut the answer
-   * off. Measured against gemini-2.5-flash with the judge's production
-   * prompts: `max_tokens: 256` produced `finish_reason: "length"` with
+   * off. Measured against gemini-2.5-flash with a fail-closed caller's
+   * production prompts: `max_tokens: 256` produced `finish_reason: "length"` with
    * `completion_tokens: 40` but 252 tokens actually generated.
    *
-   * Returning that truncated body is the dangerous part: the judge's parser
+   * Returning that truncated body is the dangerous part: a verdict parser
    * reports it as "no JSON object", which is indistinguishable from a model
    * that ignored its instructions. A ceiling the operator can raise then looks
    * like a model that has to be replaced, and the fail-closed deny gets blamed

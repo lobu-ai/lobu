@@ -11,7 +11,8 @@ import {
   validatePolicyKindAndNote,
   withConnectorPolicyTransaction,
 } from "../authz/entity-policy";
-import { parsePolicyConditions, policyConditionsKey } from "../authz/policy-conditions";
+import { classifyConditionProblem, withClassifyModel } from "../authz/policy-classify";
+import { type PolicyCondition, parsePolicyConditions, policyConditionsKey } from "../authz/policy-conditions";
 import { appKeyProblem, resolvePolicyPrincipal } from "../authz/policy-principal";
 import { POLICY_WRITE_SCOPE } from "../auth/oauth/scopes";
 import { type DbClient, getDb } from "../db/client";
@@ -158,7 +159,8 @@ export async function replaceConnectorPolicyCollection(c: Context) {
     }
     revision = body.revision;
     const scopes = new Set<string>();
-    policies = body.rules.map((rule: unknown, index: number) => {
+    policies = [];
+    for (const [index, rule] of (body.rules as unknown[]).entries()) {
       if (!rule || typeof rule !== "object" || Array.isArray(rule) ||
         Object.keys(rule).some(key => !["id", "connector_key", "connection_id", "operation_key", "operation_category", "effect", "kind", "note", "audience", "when"].includes(key))) {
         throw new Error("A rule accepts only id, connector_key, connection_id, operation_key, operation_category, effect, kind, note, audience, and when.");
@@ -170,18 +172,14 @@ export async function replaceConnectorPolicyCollection(c: Context) {
       // The collection is the whole desired state, so an omitted note clears it.
       const checked = validatePolicyKindAndNote({ ...parsed, kind: kind as ConnectorPolicyKind | undefined, note: (note ?? null) as string | null });
       if (principal.principalKind !== null && checked.kind !== "guardrail") callerGrantProblem(principal, parsed);
-      const condition = when == null ? null : parsePolicyConditions(when, `rules[${index}].when`);
-      // Replicas from before the condition column keep serving during a rolling
-      // deploy: they read a conditional rule as unconditional and their upsert can
-      // rewrite its effect while keeping the condition. So no rule takes `when`
-      // until a later release, once no replica predates the column.
-      if (condition) throw new Error(`rules[${index}].when is not accepted yet.`);
+      // A classify condition runs on the model that was the workspace default when it was written.
+      const condition = when == null ? null : await withClassifyModel(org, parsePolicyConditions(when, `rules[${index}].when`));
       const policy = { ...parsed, ...principal, kind: checked.kind, note: checked.note ?? null, condition };
       const key = scopeKey(policy);
       if (scopes.has(key)) throw new Error("Duplicate policy scope.");
       scopes.add(key);
-      return policy;
-    });
+      policies.push(policy);
+    }
   } catch (error) {
     return c.json({ error: "invalid_request", message: (error as Error).message }, 400);
   }
@@ -195,8 +193,13 @@ export async function replaceConnectorPolicyCollection(c: Context) {
   const unchanged = new Map(current.policies.map(policy => [scopeKey(policy), policy.effects.execute]));
   // Retained rules survive catalog removal; new grants still need a live target.
   // Discovery may contact connector providers; never hold a database lock during it.
-  for (const policy of policies) {
+  for (const [index, policy] of policies.entries()) {
     if (unchanged.get(scopeKey(policy)) === policy.effects?.execute) continue;
+    for (const [at, condition] of ((policy.condition ?? []) as PolicyCondition[]).entries()) {
+      if (!("classify" in condition)) continue;
+      const problem = await classifyConditionProblem(org, condition, `rules[${index}].when[${at}]`);
+      if (problem) return c.json({ error: "invalid_request", message: problem }, 400);
+    }
     const targetError = await validateConnectorPolicyTarget(org, policy, c.get("user")!.id);
     if (targetError) return c.json({ error: "invalid_request", message: targetError }, 400);
   }

@@ -5,8 +5,7 @@
  * same configured patterns with the functions in this file:
  *
  *  - the gateway's worker egress proxy (`packages/server/src/gateway/proxy/http-proxy.ts`)
- *  - the per-agent grant store and the judged-domain policy store
- *    (`packages/server/src/gateway/permissions/`)
+ *  - the per-agent grant store (`packages/server/src/gateway/permissions/`)
  *  - the remote runtime provider's sandbox network policy
  *    (`packages/server/src/gateway/runtime/providers/vercel.ts`)
  *  - the connector isolate lane's host capabilities, `fetch` and `socketOpen`
@@ -27,15 +26,14 @@
  * caller shares; a caller whose configured default is "open" supplies `["*"]`
  * itself, never a special case here.
  *
- * Decision order, shared by every caller that layers tenant and judge inputs on
- * the global lists ({@link decideEgress}):
+ * Decision order, shared by every caller that layers tenant inputs on the
+ * global lists ({@link decideEgress}):
  *
  *  1. global denylist            → deny
  *  2. tenant deny grant          → deny (authoritative over every allow below)
  *  3. global allowlist           → allow
  *  4. tenant allow grant         → allow
- *  5. LLM egress judge, if a judged-domain rule covers the host → its verdict
- *  6. otherwise                  → deny
+ *  5. otherwise                  → deny
  *
  * Pure on purpose: no `node:` import and no `@lobu/core` import, so the same
  * module runs on the Node host, inside a V8 isolate, and on a workerd-class
@@ -63,7 +61,7 @@ export function isUnrestrictedMode(allowedDomains: readonly string[]): boolean {
 const HOST_CHARS = /^[A-Za-z0-9._\-\u0080-\uffff]+$/;
 
 /**
- * Canonicalize a hostname for allow/deny/judge matching.
+ * Canonicalize a hostname for allow/deny matching.
  *
  * WHATWG URL parsing and a raw CONNECT host parser both preserve a trailing dot
  * (`evil.com.`), which DNS resolves identically to `evil.com` but which no
@@ -90,7 +88,7 @@ export function canonicalizeHostname(hostname: string): string {
 export interface PatternMatchOptions {
   /**
    * Whether a `.suffix` wildcard also covers its apex. The proxy's global
-   * lists and the judged-domain rules say yes (the default); the per-agent
+   * lists say yes (the default); the per-agent
    * grant store deliberately says no — a grant for `.example.com` covers
    * subdomains only, so the apex needs its own row.
    */
@@ -162,10 +160,9 @@ export function wildcardParentPatterns(hostname: string): string[] {
 /**
  * Whether an `allow` pattern reaches any host a `covering` pattern covers.
  *
- * Used to refuse an allow entry that would shadow a judged domain, and to
- * subtract a denied pattern from a remote sandbox's allow set (its policy has
- * no deny primitive). The `covering` side is matched with apex-inclusive
- * wildcards, the way judged rules and denylists are enforced; whether the
+ * Used to subtract a denied pattern from a remote sandbox's allow set (its
+ * policy has no deny primitive). The `covering` side is matched with
+ * apex-inclusive wildcards, the way denylists are enforced; whether the
  * `allow` side's wildcard covers its apex depends on which matcher enforces
  * it, so callers pass {@link PatternMatchOptions.wildcardCoversRoot} for it
  * (default: grant semantics, no). Two wildcards overlap when either suffix
@@ -183,19 +180,15 @@ export function patternReaches(covering: string, allow: string, options?: Patter
   return c === a || under(c, a) || under(a, c);
 }
 
-export type EgressDecisionSource = 'global' | 'grant' | 'judge';
+export type EgressDecisionSource = 'global' | 'grant';
 
-/**
- * Outcome of a full access decision. When the judge was consulted, `judge`
- * carries its verdict so the caller can surface the reason and audit it.
- */
-export interface EgressDecision<Judge = unknown> {
+/** Outcome of a full access decision. */
+export interface EgressDecision {
   allowed: boolean;
   source: EgressDecisionSource;
-  judge?: Judge;
 }
 
-export interface EgressDecisionInputs<Judge = unknown> {
+export interface EgressDecisionInputs {
   /** Raw request hostname; canonicalized here so every step sees one name. */
   hostname: string;
   global: {
@@ -207,17 +200,10 @@ export interface EgressDecisionInputs<Judge = unknown> {
     isDenied(hostname: string): Promise<boolean>;
     hasGrant(hostname: string): Promise<boolean>;
   };
-  /**
-   * The LLM egress judge. Returns `null` when no judged-domain rule covers the
-   * host; otherwise its verdict plus whatever the caller wants to audit.
-   */
-  judge?: (hostname: string) => Promise<{ allowed: boolean; decision: Judge } | null>;
 }
 
 /** The shared decision order documented at the top of this file. */
-export async function decideEgress<Judge = unknown>(
-  inputs: EgressDecisionInputs<Judge>,
-): Promise<EgressDecision<Judge>> {
+export async function decideEgress(inputs: EgressDecisionInputs): Promise<EgressDecision> {
   const hostname = canonicalizeHostname(inputs.hostname);
   const { allowedDomains, deniedDomains } = inputs.global;
 
@@ -232,10 +218,6 @@ export async function decideEgress<Judge = unknown>(
   }
   if (inputs.tenant && (await inputs.tenant.hasGrant(hostname))) {
     return { allowed: true, source: 'grant' };
-  }
-  if (inputs.judge) {
-    const verdict = await inputs.judge(hostname);
-    if (verdict) return { allowed: verdict.allowed, source: 'judge', judge: verdict.decision };
   }
   return { allowed: false, source: 'global' };
 }

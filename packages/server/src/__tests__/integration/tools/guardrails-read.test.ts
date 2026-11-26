@@ -48,7 +48,7 @@ describe("guardrail library reads", () => {
 	let deniedAgentCtx: AuthContext;
 	let readerAgentCtx: AuthContext;
 	let outsiderCtx: AuthContext;
-	let judgeId: string;
+	let scopedId: string;
 	let archivedId: string;
 	let foreignId: string;
 
@@ -75,10 +75,10 @@ describe("guardrail library reads", () => {
 		await createTestWorkspaceGuardrail({
 			organizationId: org.id, name: "secret-scan", config: { builtin: "secret-scan" },
 		});
-		judgeId = (await createTestWorkspaceGuardrail({
+		scopedId = (await createTestWorkspaceGuardrail({
 			organizationId: org.id,
-			name: "no-refunds",
-			config: { kind: "judge", stage: "output", policy: "Never promise refunds." },
+			name: "forbidden-tools",
+			config: { builtin: "forbidden-tools" },
 			appliesTo: [{ kind: "agent", id: reader.agentId }],
 		})).id;
 		archivedId = (await createTestWorkspaceGuardrail({
@@ -105,16 +105,16 @@ describe("guardrail library reads", () => {
 		const first = await get(`/api/${orgSlug}/guardrails?limit=1`, { token });
 		expect(first.status).toBe(200);
 		const page = await first.json() as { items: Array<{ name: string }>; next_cursor: string | null };
-		expect(page.items.map((item) => item.name)).toEqual(["no-refunds"]);
+		expect(page.items.map((item) => item.name)).toEqual(["forbidden-tools"]);
 		const rest = await get(`/api/${orgSlug}/guardrails?cursor=${page.next_cursor}`, { token });
 		expect((await rest.json() as { items: Array<{ name: string }> }).items.map((item) => item.name)).toEqual(["secret-scan"]);
 
 		const listed = await sdkFor(memberCtx).list({ include_archived: true });
 		expect(listed.items.map((item) => [item.name, item.archived])).toEqual([
-			["no-refunds", false], ["retired", true], ["secret-scan", false],
+			["forbidden-tools", false], ["retired", true], ["secret-scan", false],
 		]);
 		expect(listed.items[0]).toMatchObject({
-			config: { kind: "judge", stage: "output", policy: "Never promise refunds." },
+			config: { builtin: "forbidden-tools" },
 			applies_to: [{ principal_kind: "agent", principal_id: readerAgentCtx.agentId }],
 			enabled: true,
 			revision: 1,
@@ -123,9 +123,9 @@ describe("guardrail library reads", () => {
 
 	it("gets one guardrail by id, archived included, over REST and the SDK", async () => {
 		const token = await tokenFor("guardrails-get");
-		const rest = await get(`/api/${orgSlug}/guardrails/${judgeId}`, { token });
+		const rest = await get(`/api/${orgSlug}/guardrails/${scopedId}`, { token });
 		expect(rest.status).toBe(200);
-		expect(await rest.json()).toMatchObject({ guardrail: { id: judgeId, name: "no-refunds" } });
+		expect(await rest.json()).toMatchObject({ guardrail: { id: scopedId, name: "forbidden-tools" } });
 		expect(await sdkFor(memberCtx).get({ id: archivedId })).toMatchObject({
 			guardrail: { name: "retired", archived: true },
 		});
@@ -148,7 +148,7 @@ describe("guardrail library reads", () => {
 
 	it("answers 403 to an agent the agent_config read policy denies and to a caller outside the workspace", async () => {
 		await expect(sdkFor(deniedAgentCtx).list()).rejects.toMatchObject({ httpStatus: 403 });
-		await expect(sdkFor(deniedAgentCtx).get({ id: judgeId })).rejects.toMatchObject({ httpStatus: 403 });
+		await expect(sdkFor(deniedAgentCtx).get({ id: scopedId })).rejects.toMatchObject({ httpStatus: 403 });
 		await expect(sdkFor(outsiderCtx).list()).rejects.toMatchObject({ httpStatus: 403 });
 		// The default agent_config read effect lets an agent without a rule read.
 		await expect(sdkFor(readerAgentCtx).list()).resolves.toBeDefined();
@@ -164,7 +164,7 @@ describe("guardrail library reads", () => {
 			effects: { read: "deny" },
 		});
 		expect((await get(`/api/${orgSlug}/guardrails`, { token })).status).toBe(403);
-		expect((await get(`/api/${orgSlug}/guardrails/${judgeId}`, { token })).status).toBe(403);
+		expect((await get(`/api/${orgSlug}/guardrails/${scopedId}`, { token })).status).toBe(403);
 		// Another app is unaffected.
 		const other = await tokenFor("guardrails-other-app");
 		expect((await get(`/api/${orgSlug}/guardrails`, { token: other })).status).toBe(200);

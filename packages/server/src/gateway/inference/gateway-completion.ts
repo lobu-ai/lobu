@@ -80,8 +80,8 @@ interface GatewayCompletionRequest {
    * and a miss costs a feature.
    *
    * A fail-CLOSED caller passes 0. For those, the circuit breaker is the retry
-   * policy — retrying inside one judge call burns the shared deadline and
-   * delays the fail-closed deny without changing its outcome.
+   * policy — retrying inside one call burns the shared deadline and delays the
+   * fail-closed deny without changing its outcome.
    */
   maxRetries?: number;
 }

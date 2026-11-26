@@ -2,14 +2,11 @@
  * The guardrail library writers: `PUT /api/:org/guardrails[/:id]` and
  * `DELETE /api/:org/guardrails/:id`, driven over real HTTP. Only an
  * owner/admin web session or a human-minted `guardrails:write` PAT writes;
- * every write is compare-and-swap on `revision` and leaves a config event
- * whose judge policy is digested.
+ * every write is compare-and-swap on `revision` and leaves a config event.
  */
 import { serve } from "@hono/node-server";
 import type { Server } from "node:http";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { GrantStore } from "../../../gateway/permissions/grant-store";
-import { lockEgressJudgeDecisions } from "../../../gateway/permissions/policy-store";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { app, type Env } from "../../../index";
 import { initWorkspaceProvider } from "../../../workspace";
 import { postForm } from "../../setup/test-helpers";
@@ -32,10 +29,6 @@ const env = {
 	BETTER_AUTH_SECRET: "test-auth-secret-for-testing-only",
 	RATE_LIMIT_ENABLED: "false",
 } as Env;
-// A judge model this deployment can run: the repo's provider registry plus a
-// synthetic system key for its OpenAI entry.
-const RUNNABLE_MODEL = "openai/gpt-4o-mini";
-const REGISTRY_PATH = new URL("../../../../../../config/providers.json", import.meta.url).pathname;
 
 let org: Awaited<ReturnType<typeof createTestOrganization>>;
 let owner: Awaited<ReturnType<typeof createTestUser>>;
@@ -59,29 +52,13 @@ const replace = (id: string, guardrail: unknown, expected_revision: number, auth
 const archive = (id: string, expected_revision: number | string, auth?: { token?: string }) =>
 	request("DELETE", `${base()}/${id}?expected_revision=${expected_revision}`, undefined, auth);
 
-const judge = (policy = "Never promise refunds.") => ({
-	name: "no-refunds",
-	config: { kind: "judge", stage: "output", policy, model: RUNNABLE_MODEL },
-});
-
 async function created(guardrail: unknown) {
 	const response = await create(guardrail);
 	expect(response.status, await response.clone().text()).toBe(200);
 	return (await response.json()).guardrail as { id: string; revision: number; [key: string]: unknown };
 }
 
-async function lastChange(id: string) {
-	const [row] = await getTestDb()`
-		SELECT row_to_json(e)::text AS raw, metadata FROM current_event_records e
-		WHERE organization_id = ${org.id} AND metadata->>'resource_kind' = 'guardrail' AND metadata->>'resource_id' = ${id}
-		ORDER BY id DESC LIMIT 1
-	`;
-	return row as { raw: string; metadata: Record<string, unknown> } | undefined;
-}
-
 beforeAll(async () => {
-	vi.stubEnv("LOBU_PROVIDER_REGISTRY_PATH", REGISTRY_PATH);
-	vi.stubEnv("OPENAI_API_KEY", "sk-synthetic-deployment-key");
 	await initWorkspaceProvider();
 	await new Promise<void>((resolve) => {
 		server = serve({ fetch: (req) => app.fetch(req, env), port: 0, hostname: "127.0.0.1" }, (address) => {
@@ -91,7 +68,6 @@ beforeAll(async () => {
 	});
 });
 afterAll(async () => {
-	vi.unstubAllEnvs();
 	await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 	await cleanupTestDatabase();
 });
@@ -151,11 +127,8 @@ describe("guardrail library writes", () => {
 			{ name: "Bad Name", config: { builtin: "pii-scan" } },
 			{ name: "x", config: { builtin: "not-a-check" } },
 			{ name: "x", config: { builtin: "pii-scan", stage: "output" } },
-			{ name: "x", config: { kind: "judge", stage: "output", policy: "  ", model: RUNNABLE_MODEL } },
-			{ name: "x", config: { kind: "judge", stage: "egress", policy: "p", model: RUNNABLE_MODEL } },
-			{ name: "x", config: { kind: "judge", stage: "output", policy: "p", model: RUNNABLE_MODEL, domains: ["a.com"] } },
-			{ name: "x", config: { kind: "require-tool", stage: "input", tools: ["t"] } },
-			{ name: "x", config: { kind: "require-tool", stage: "output", tools: [] } },
+			// A custom check is no longer a guardrail config.
+			{ name: "x", config: { kind: "judge", stage: "output", policy: "p" } },
 			{ name: "x", config: { builtin: "pii-scan" }, applies_to: [] },
 			{ name: "x", config: { builtin: "pii-scan" }, applies_to: [{ principal_kind: null, principal_id: null }] },
 			{ name: "x", config: { builtin: "pii-scan" }, applies_to: [{ principal_kind: "app", principal_id: "local:app" }] },
@@ -172,18 +145,11 @@ describe("guardrail library writes", () => {
 	});
 
 	it("accepts app subjects only on a guardrail that runs at pre-tool alone", async () => {
-		const preToolJudge = { kind: "judge", stage: "pre-tool", policy: "Never delete records.", model: RUNNABLE_MODEL };
 		const apps = [{ principal_kind: "app", principal_id: null }, { principal_kind: "app", principal_id: "web:example.com" }];
-		const judged = await created({ name: "app-judge", config: preToolJudge, applies_to: [...apps, { principal_kind: "agent", principal_id: null }] });
-		expect(judged.applies_to).toEqual(expect.arrayContaining([...apps, { principal_kind: "agent", principal_id: null }]));
-		const forbidden = await created({ name: "forbidden-tools", config: { builtin: "forbidden-tools" }, applies_to: [apps[1]] });
-		expect(forbidden.applies_to).toEqual([apps[1]]);
+		const forbidden = await created({ name: "forbidden-tools", config: { builtin: "forbidden-tools" }, applies_to: [...apps, { principal_kind: "agent", principal_id: null }] });
+		expect(forbidden.applies_to).toEqual(expect.arrayContaining([...apps, { principal_kind: "agent", principal_id: null }]));
 
 		for (const config of [
-			{ ...preToolJudge, stage: "input" },
-			{ ...preToolJudge, stage: "output" },
-			{ ...preToolJudge, stage: "egress", domains: ["example.com"] },
-			{ kind: "require-tool", stage: "output", tools: ["t"] },
 			{ builtin: "secret-scan" },
 			// pii-scan also runs at input and output.
 			{ builtin: "pii-scan" },
@@ -194,8 +160,8 @@ describe("guardrail library writes", () => {
 		}
 		// An app key must be one the server derives; a guardrail cannot move an
 		// app subject off pre-tool.
-		expect((await create({ name: "bad-app-key", config: preToolJudge, applies_to: [{ principal_kind: "app", principal_id: "not an app key" }] })).status).toBe(422);
-		expect((await replace(judged.id, { name: "app-judge", config: { ...preToolJudge, stage: "output" }, applies_to: apps }, 1)).status).toBe(422);
+		expect((await create({ name: "bad-app-key", config: { builtin: "forbidden-tools" }, applies_to: [{ principal_kind: "app", principal_id: "not an app key" }] })).status).toBe(422);
+		expect((await replace(forbidden.id, { name: "forbidden-tools", config: { builtin: "pii-scan" }, applies_to: apps }, 1)).status).toBe(422);
 	});
 
 	it("answers 404 for a missing guardrail and another workspace's", async () => {
@@ -208,145 +174,6 @@ describe("guardrail library writes", () => {
 		const [row] = await getTestDb()`SELECT revision, archived_at FROM workspace_guardrails WHERE id = ${foreign.id}`;
 		expect(Number(row.revision)).toBe(1);
 		expect(row.archived_at).toBeNull();
-	});
-
-	it("needs a judge model this deployment can run, but keeps saving a stored one", async () => {
-		const noModel = { name: "tone", config: { kind: "judge", stage: "output", policy: "Be polite." } };
-		const missing = await create(noModel);
-		expect(missing.status).toBe(422);
-		expect((await missing.json()).error).toContain("no default provider model");
-		const unresolvable = await create({ ...noModel, config: { ...noModel.config, model: "unknown-provider/m" } });
-		expect(unresolvable.status).toBe(422);
-		expect((await unresolvable.json()).error).toContain("cannot run");
-
-		const stored = await createTestWorkspaceGuardrail({
-			organizationId: org.id,
-			name: "legacy",
-			config: { kind: "judge", stage: "output", policy: "Be polite.", model: "unknown-provider/m" },
-		});
-		const legacy = { name: "legacy", config: { kind: "judge", stage: "output", policy: "Be kind.", model: "unknown-provider/m" } };
-		expect((await replace(stored.id, legacy, 1)).status).toBe(200);
-		expect((await replace(stored.id, { ...legacy, config: { ...legacy.config, model: "other-provider/m" } }, 2)).status).toBe(422);
-		expect((await replace(stored.id, { ...legacy, config: { ...legacy.config, model: RUNNABLE_MODEL } }, 2)).status).toBe(200);
-	});
-
-	it("refuses an egress judge an agent's allowedDomains would shadow and revokes shadowing grants", async () => {
-		const shadowed = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
-		const granted = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
-		await getTestDb()`UPDATE agents SET network_config = ${getTestDb().json({ allowedDomains: [".payments.test"] })} WHERE id = ${shadowed.agentId}`;
-		const egress = (agentId: string) => ({
-			name: "payments",
-			config: { kind: "judge", stage: "egress", policy: "Only read invoices.", model: RUNNABLE_MODEL, domains: ["api.payments.test"] },
-			applies_to: [{ principal_kind: "agent", principal_id: agentId }],
-		});
-		const refused = await create(egress(shadowed.agentId));
-		expect(refused.status).toBe(422);
-		expect((await refused.json()).error).toContain(`agent "${shadowed.agentId}" allows ".payments.test"`);
-		// Every agent includes the shadowed one.
-		expect((await create({ ...egress(shadowed.agentId), applies_to: undefined })).status).toBe(422);
-
-		const sql = getTestDb();
-		for (const [pattern, denied] of [["api.payments.test", false], ["*.payments.test", true], ["unrelated.test", false]] as const) {
-			await sql`INSERT INTO grants (agent_id, kind, pattern, denied, organization_id) VALUES (${granted.agentId}, 'domain', ${pattern}, ${denied}, ${org.id})`;
-		}
-		expect((await create(egress(granted.agentId))).status).toBe(200);
-		const left = await sql`SELECT pattern, denied FROM grants WHERE agent_id = ${granted.agentId} ORDER BY pattern, denied`;
-		expect(left.map((row) => [row.pattern, row.denied])).toEqual([["*.payments.test", true], ["unrelated.test", false]]);
-	});
-
-	it("serializes an egress judge write with allow-grant writes, so no grant outlives its judge", async () => {
-		const sql = getTestDb();
-		const agent = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
-		const egress = {
-			name: "payments",
-			config: { kind: "judge", stage: "egress", policy: "Only read invoices.", model: RUNNABLE_MODEL, domains: ["api.payments.test"] },
-			applies_to: [{ principal_kind: "agent", principal_id: agent.agentId }],
-		};
-		const allowGrants = async () =>
-			(await sql`SELECT pattern FROM grants WHERE agent_id = ${agent.agentId} AND NOT denied`).map((row) => row.pattern);
-		/** Run `body` in a transaction holding the org's egress-judge lock until `release`. */
-		const holdLock = (body: (tx: typeof sql) => Promise<void>) => {
-			let release!: () => void;
-			let locked!: () => void;
-			const held = new Promise<void>((resolve) => (release = resolve));
-			const isLocked = new Promise<void>((resolve) => (locked = resolve));
-			const done = sql.begin(async (tx) => {
-				await lockEgressJudgeDecisions(tx as unknown as typeof sql, org.id);
-				locked();
-				await held;
-				await body(tx as unknown as typeof sql);
-			});
-			return { isLocked, release, done };
-		};
-		const stateAfter = (pending: Promise<unknown>) =>
-			Promise.race([pending.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
-
-		// An allow grant mid-write: the judge write waits for it, then revokes it.
-		const grantWrite = holdLock(async (tx) => {
-			await tx`INSERT INTO grants (agent_id, kind, pattern, denied, organization_id) VALUES (${agent.agentId}, 'domain', 'api.payments.test', false, ${org.id})`;
-		});
-		await grantWrite.isLocked;
-		const judgeWrite = create(egress);
-		const judgeWriteState = await stateAfter(judgeWrite);
-		grantWrite.release();
-		await grantWrite.done;
-		expect((await judgeWrite).status).toBe(200);
-		expect(await allowGrants()).toEqual([]);
-		expect(judgeWriteState).toBe("waiting");
-
-		// A judge write mid-commit: GrantStore.grant waits, sees the judge, and skips.
-		const other = await createTestAgent({ organizationId: org.id, ownerUserId: owner.id });
-		const otherJudge = holdLock(async (tx) => {
-			await tx`INSERT INTO workspace_guardrails (id, organization_id, name, config, enabled)
-				VALUES ('guardrail-race', ${org.id}, 'payments-other', ${tx.json(egress.config)}, true)`;
-			await tx`INSERT INTO workspace_guardrail_subjects (guardrail_id, organization_id, principal_kind, principal_id)
-				VALUES ('guardrail-race', ${org.id}, 'agent', ${other.agentId})`;
-		});
-		await otherJudge.isLocked;
-		const grant = new GrantStore().grant(other.agentId, "api.payments.test", null, false, org.id);
-		const grantState = await stateAfter(grant);
-		otherJudge.release();
-		await otherJudge.done;
-		await grant;
-		expect((await sql`SELECT pattern FROM grants WHERE agent_id = ${other.agentId}`).map((row) => row.pattern)).toEqual([]);
-		expect(grantState).toBe("waiting");
-
-		// An agent created (with an allow grant) after an every-agent judge
-		// write read the workspace's agents but before it took the lock: the
-		// cleanup covers the agents present under the lock, so it goes too.
-		const lateAgentId = `agent-late-${org.id.slice(-6)}`;
-		const lateAgent = holdLock(async (tx) => {
-			await tx`INSERT INTO agents (id, organization_id, name, owner_platform, owner_user_id, created_at, updated_at)
-				VALUES (${lateAgentId}, ${org.id}, 'Late', 'lobu', ${owner.id}, NOW(), NOW())`;
-			await tx`INSERT INTO grants (agent_id, kind, pattern, denied, organization_id)
-				VALUES (${lateAgentId}, 'domain', 'api.ledger.test', false, ${org.id})`;
-		});
-		await lateAgent.isLocked;
-		const everyAgentJudge = create({
-			name: "ledger",
-			config: { ...egress.config, domains: ["api.ledger.test"] },
-			applies_to: [{ principal_kind: "agent", principal_id: null }],
-		});
-		const everyAgentState = await stateAfter(everyAgentJudge);
-		lateAgent.release();
-		await lateAgent.done;
-		expect((await everyAgentJudge).status).toBe(200);
-		expect((await sql`SELECT pattern FROM grants WHERE agent_id = ${lateAgentId} AND NOT denied`).map((row) => row.pattern)).toEqual([]);
-		expect(everyAgentState).toBe("waiting");
-	});
-
-	it("records a config event that digests the judge policy", async () => {
-		const policy = "Never mention the synthetic codeword ZEPHYR-41.";
-		const made = await created(judge(policy));
-		const createdEvent = await lastChange(made.id);
-		expect(createdEvent?.metadata).toMatchObject({ resource_kind: "guardrail", resource_id: made.id });
-		expect(createdEvent?.raw).toContain("policy_sha256");
-		expect(createdEvent?.raw).not.toContain("ZEPHYR-41");
-
-		expect((await replace(made.id, judge("Never mention ORCHID-7."), 1)).status).toBe(200);
-		const updatedEvent = await lastChange(made.id);
-		expect(updatedEvent?.raw).not.toContain("ZEPHYR-41");
-		expect(updatedEvent?.raw).not.toContain("ORCHID-7");
 	});
 
 	it("admits only an owner/admin web session or a human-minted guardrails:write PAT", async () => {

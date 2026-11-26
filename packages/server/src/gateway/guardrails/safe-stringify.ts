@@ -3,7 +3,7 @@
  * contain BigInt values (native JSON throws) or circular object graphs (also
  * throws). On any failure return a placeholder string rather than letting the
  * exception escape: the guardrail runner treats a thrown guardrail as a pass,
- * which would silently weaken pii-scan / inline judges on exactly the inputs
+ * which would silently weaken pii-scan on exactly the inputs
  * weird enough to deserve scrutiny.
  *
  * Invariant: always returns a string. Callers run `.match()` on the result,
