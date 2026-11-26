@@ -485,6 +485,13 @@ describe("operations.execute backend lifecycle", () => {
 						}
 						if (
 							(request.params?.arguments as Record<string, unknown> | undefined)
+								?.value === "session-expired"
+						) {
+							expect(new Headers(init?.headers).get("mcp-session-id")).toBe("operations-backend-session");
+							return new Response("Session not found", { status: 404 });
+						}
+						if (
+							(request.params?.arguments as Record<string, unknown> | undefined)
 								?.fail_transport === true
 						) {
 							failedTransportCallCount++;
@@ -1559,6 +1566,7 @@ describe("operations.execute backend lifecycle", () => {
 		["a connector error's HTTP status", "local", { value: "target-missing" }, "NOT_FOUND", "user"],
 		["an upstream HTTP status", "http", { body: { value: "nul-failure" } }, "UPSTREAM_5XX", "dependency"],
 		["an upstream MCP server's HTTP status", "mcp", { value: "upstream-502" }, "UPSTREAM_5XX", "dependency"],
+		["an upstream MCP session rejection", "mcp", { value: "session-expired" }, "UPSTREAM_UNAVAILABLE", "dependency"],
 		["no cause for a redirect the request did not follow", "http", { body: { value: "redirect" } }, undefined, "system"],
 	] as const)("records an inline failure under %s", async (_label, backend, input, code, kind) => {
 		const target = {

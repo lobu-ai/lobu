@@ -6,7 +6,7 @@
  * Tool discovery cache is stored in-process with a short TTL.
  */
 
-import { MCP_PROTOCOL_VERSION } from '@lobu/core';
+import { MCP_PROTOCOL_VERSION, type ToolErrorCode } from '@lobu/core';
 import {
   isReservedIp,
   stripIpv6Brackets,
@@ -159,7 +159,8 @@ class McpOAuthRequiredError extends Error {
 class McpUpstreamHttpError extends Error {
   constructor(
     message: string,
-    readonly httpStatus: number
+    readonly httpStatus: number,
+    readonly code?: ToolErrorCode
   ) {
     super(message);
     this.name = 'McpUpstreamHttpError';
@@ -287,7 +288,12 @@ async function sendRequest(
     const text = new TextDecoder().decode((await readResponseBody(response)).bytes);
     if (response.status === 404 && session) {
       sessions.delete(key);
-      throw new McpUpstreamHttpError(`Upstream MCP returned 404: ${text}`, 404);
+      // The upstream lost a gateway-managed session, not a caller's target.
+      throw new McpUpstreamHttpError(
+        `Upstream MCP returned 404: ${text}`,
+        404,
+        'UPSTREAM_UNAVAILABLE'
+      );
     }
     if (response.status === 401) {
       throw new McpAuthRejectedError(`Upstream MCP returned 401: ${text}`);
