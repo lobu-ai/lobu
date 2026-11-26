@@ -10,6 +10,7 @@ import type {
 	WorkspaceGuardrail,
 } from "@lobu/core/contracts/workspace-guardrails";
 import { assertGuardrailConfigReadAllowed } from "../authz/guardrail-config-access";
+import { loopPolicyCutoverComplete } from "../authz/policy-hooks";
 import { getDb } from "../db/client";
 import { insertToolConfigChange } from "../tools/admin/helpers/config-audit";
 import type { ToolContext } from "../tools/registry";
@@ -54,6 +55,10 @@ const AUDITED_FIELDS = ["config", "applies_to", "enabled"] as const;
 
 async function applyAndAudit(ctx: ToolContext, write: GuardrailWrite): Promise<WorkspaceGuardrail> {
 	return getDb().begin(async (tx) => {
+		// Serialize the legacy writer with the migration's table lock. A writer
+		// arriving after the copy sees the cutover index and cannot edit stale rows.
+		await tx`LOCK TABLE workspace_guardrails IN ROW EXCLUSIVE MODE`;
+		if (await loopPolicyCutoverComplete(tx)) throw new ToolUserError("Manage these guardrails in workspace policies.", 410);
 		await lockOrganizationForRelationshipClaims(tx, ctx.organizationId);
 		const { before, after, changed } = await applyGuardrailWrite(tx, ctx.organizationId, write);
 		if (!changed) return after;

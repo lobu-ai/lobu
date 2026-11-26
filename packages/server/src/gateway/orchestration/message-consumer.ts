@@ -24,6 +24,7 @@ import {
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
+import { agentLoopPrincipal, evaluateLoopPolicy } from "../guardrails/loop-policy.js";
 import type {
   IMessageQueue,
   QueueJob as SharedQueueJob,
@@ -529,6 +530,25 @@ export class MessageConsumer {
             },
             "Input guardrail check failed — proceeding without guardrails"
           );
+        }
+      }
+
+      if (!inputTrip && data.organizationId && data.agentId) {
+        try {
+          inputTrip = await evaluateLoopPolicy({
+            organizationId: data.organizationId,
+            principal: agentLoopPrincipal(
+              data.agentId,
+              platformMetadataString(data.platformMetadata, "source"),
+              effectiveConversationId,
+            ),
+            userId: data.userId,
+            conversationId: effectiveConversationId,
+            hook: "message_in",
+            input: { text: data.messageText ?? "", platform: data.platform },
+          });
+        } catch (err) {
+          logger.warn({ agentId: data.agentId, err: getErrorMessage(err) }, "Message policy check failed — proceeding");
         }
       }
 

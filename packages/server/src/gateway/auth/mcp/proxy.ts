@@ -6,7 +6,7 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { agentGuardrailPrincipal } from "../../../guardrails/workspace-guardrails.js";
+import { agentLoopPrincipal } from "../../guardrails/loop-policy.js";
 import { evaluatePreToolGuardrails } from "../../guardrails/pre-tool.js";
 import { parseJsonRpcResponse } from "../../../mcp-proxy/http-response.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
@@ -295,10 +295,12 @@ export class McpProxy {
 		tokenData: {
 			userId: string;
 			conversationId?: string;
+			source?: string;
 			organizationId?: string;
 		},
 		toolName: string,
 		toolArgs: Record<string, unknown>,
+		namespace: string,
 	): Promise<boolean> {
 		if (!this.guardrailRegistry) return false;
 		try {
@@ -317,7 +319,8 @@ export class McpProxy {
 			const tripped = await evaluatePreToolGuardrails({
 				registry: this.guardrailRegistry,
 				organizationId,
-				principal: agentGuardrailPrincipal(agentId),
+				principal: agentLoopPrincipal(agentId, tokenData.source, tokenData.conversationId),
+				namespace,
 				userId: tokenData.userId,
 				conversationId: tokenData.conversationId,
 				toolName,

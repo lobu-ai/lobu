@@ -26,7 +26,7 @@
  * high-volume provenance plumbing, not collaboration edits; gating them would
  * flood approvals. Any new user-facing entity write path MUST call this module.
  */
-import { type DbClient, getDb, pgBigintArray } from "../db/client";
+import { type DbClient, getDb, pgBigintArray, pgTextArray } from "../db/client";
 import { loadCallerActionAllowlists } from "./caller-action-allowlist";
 import {
 	type ConnectorPolicyCategory,
@@ -45,6 +45,7 @@ import {
 	type PolicyClassifyRequest,
 } from "./policy-classify";
 import { parsePolicyConditions, type StoredPolicyConditions } from "./policy-conditions";
+import { parsePolicyToolPatterns, type PolicyHook } from "./policy-hooks";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
 	WRITE_ACTION_MANIFEST,
@@ -137,6 +138,8 @@ export interface EntityApprovalPolicy extends Required<ConnectorPolicyScope> {
 	 * condition this runtime cannot read is evaluated as unknown, never dropped.
 	 */
 	condition: StoredPolicyConditions;
+	hook: PolicyHook;
+	toolPatterns: string[] | null;
 	deliveryTarget: EntityApprovalDeliveryTarget;
 }
 
@@ -172,6 +175,8 @@ export interface EntityApprovalPolicyInput extends ConnectorPolicyScope {
 	audience?: PolicyAudience | null;
 	/** connector_action only, part of the rule's identity: the rule's `when`. */
 	condition?: StoredPolicyConditions;
+	hook?: PolicyHook;
+	toolPatterns?: string[] | null;
 	approvalConnectionId?: string | null;
 	approvalChannelId?: string | null;
 	approvalTeamId?: string | null;
@@ -213,6 +218,8 @@ type EntityApprovalPolicyRow = {
 	note: string | null;
 	audience: string | null;
 	condition: unknown;
+	hook: PolicyHook;
+	tool_patterns: string[] | null;
 	approval_connection_id: string | null;
 	approval_channel_id: string | null;
 	approval_team_id: string | null;
@@ -263,7 +270,7 @@ function normalizePolicyNote(value: unknown): string | null | undefined {
  * An audience narrows where a guardrail applies, so a grant cannot carry one.
  */
 export function validatePolicyKindAndNote(
-	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects" | "audience" | "condition">,
+	input: Pick<EntityApprovalPolicyInput, "resourceClass" | "kind" | "note" | "effects" | "audience" | "condition" | "hook">,
 ): { kind: ConnectorPolicyKind; note: string | null | undefined } {
 	const kind = normalizePolicyKind(input.kind);
 	if (kind === "guardrail" && input.resourceClass !== "connector_action")
@@ -273,6 +280,9 @@ export function validatePolicyKindAndNote(
 	if (input.audience != null && kind !== "guardrail")
 		throw new Error("audience is only valid on a guardrail.");
 	const execute = input.effects?.execute;
+	if (input.hook && input.hook !== "operation" && (kind !== "guardrail" || (execute !== "log" && execute !== "deny"))) {
+		throw new Error("Loop rules must be guardrails with a Log only or Block effect.");
+	}
 	if (kind === "guardrail" && execute === "auto")
 		throw new Error("A guardrail can only log, check, require approval or block; use a grant to allow.");
 	if (kind === "grant" && (execute === "log" || execute === "check"))
@@ -326,6 +336,8 @@ function rowToPolicy(row: EntityApprovalPolicyRow): EntityApprovalPolicy {
 		// Anything stored that is not a list still conditions the rule; the
 		// evaluator reads it as unknown and decides strictly.
 		condition: row.condition == null ? null : Array.isArray(row.condition) ? row.condition : [row.condition],
+		hook: row.hook,
+		toolPatterns: row.tool_patterns,
 		deliveryTarget: {
 			connectionId: row.approval_connection_id || null,
 			channelId: row.approval_channel_id,
@@ -364,6 +376,8 @@ export function defaultEntityApprovalPolicy(
 		note: null,
 		audience: null,
 		condition: null,
+		hook: "operation",
+		toolPatterns: null,
 		deliveryTarget: {
 			connectionId: null,
 			channelId: null,
@@ -511,7 +525,7 @@ function automationPrincipal(
 ): ActingPrincipal {
 	return {
 		kind: "automation",
-		id: `automation:${automationId}`,
+		id: mutationPrincipalId({ automationId }),
 		ownerAgentId: owner.ownerAgentId,
 		ownerResolved: owner.resolved,
 	};
@@ -865,12 +879,12 @@ async function loadCandidatePolicies(args: {
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience, condition,
+       kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     FROM write_approval_policies
     WHERE organization_id = ${args.organizationId}
-      AND resource_class = ${resourceClass}
+      AND resource_class = ${resourceClass} AND hook = 'operation'
       AND (
         principal_kind IS NULL
         OR (
@@ -1157,11 +1171,12 @@ export async function listEntityApprovalPolicies(
 	organizationId: string,
 	resourceClass?: WriteResourceClass,
 	sql: DbClient = getDb(),
+	hook: PolicyHook = "operation",
 ): Promise<EntityApprovalPolicy[]> {
 	const rows = await sql<EntityApprovalPolicyRow>`
     SELECT id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience, condition,
+       kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name,
        COALESCE((SELECT jsonb_object_agg(e.action, e.effect)
@@ -1169,6 +1184,7 @@ export async function listEntityApprovalPolicies(
     FROM write_approval_policies p
     WHERE organization_id = ${organizationId}
       AND (${resourceClass ?? null}::text IS NULL OR resource_class = ${resourceClass ?? null})
+      AND hook = ${hook}
     ORDER BY
       resource_class ASC,
       CASE WHEN principal_kind IS NULL THEN 0 ELSE 1 END,
@@ -1295,6 +1311,9 @@ export async function upsertEntityApprovalPolicy(
 	const { kind, note } = validatePolicyKindAndNote({ ...input, resourceClass });
 	const audience = input.audience ?? null;
 	const condition = input.condition == null ? null : JSON.stringify(parsePolicyConditions(input.condition));
+	const hook = input.hook ?? "operation";
+	const patterns = parsePolicyToolPatterns(hook, input.toolPatterns);
+	const toolPatterns = patterns === null ? null : pgTextArray(patterns);
 	const effectSet = actionEffectSetForInput(resourceClass, input);
 	const approvalConnectionId = input.approvalConnectionId?.trim() || null;
 	const approvalChannelId = input.approvalChannelId?.trim() || null;
@@ -1349,9 +1368,11 @@ export async function upsertEntityApprovalPolicy(
         AND kind = ${kind}
         AND audience IS NOT DISTINCT FROM ${audience}
         AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
+        AND hook = ${hook}
+        AND tool_patterns IS NOT DISTINCT FROM ${toolPatterns}::text[]
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience, condition,
+       kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1364,13 +1385,13 @@ export async function upsertEntityApprovalPolicy(
       INSERT INTO write_approval_policies (
         organization_id, resource_class, principal_kind, principal_id,
         operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-        kind, note, audience, condition,
+        kind, note, audience, condition, hook, tool_patterns,
         approval_connection_id, approval_channel_id, approval_team_id,
         approval_channel_name, created_at, updated_at
       ) VALUES (
         ${organizationId}, ${resourceClass}, ${principalKind}, ${principalId},
         ${operationKey}, ${connectorKey}, ${connectionId}, ${operationCategory}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
-        ${kind}, ${note ?? null}, ${audience}, ${condition}::text::jsonb,
+        ${kind}, ${note ?? null}, ${audience}, ${condition}::text::jsonb, ${hook}, ${toolPatterns}::text[],
         ${approvalConnectionId},
         ${approvalChannelId}, ${approvalTeamId}, ${approvalChannelName},
         now(), now()
@@ -1378,7 +1399,7 @@ export async function upsertEntityApprovalPolicy(
       ON CONFLICT DO NOTHING
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience, condition,
+       kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
@@ -1412,11 +1433,15 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
 	kind?: ConnectorPolicyKind;
 	audience?: PolicyAudience | null;
 	condition?: StoredPolicyConditions;
+	hook?: PolicyHook;
+	toolPatterns?: string[] | null;
 }, transaction?: DbClient): Promise<boolean> {
 	const resourceClass = normalizeResourceClass(args.resourceClass);
 	const kind = normalizePolicyKind(args.kind);
 	const audience = args.audience ?? null;
 	const condition = args.condition == null ? null : JSON.stringify(args.condition);
+	const hook = args.hook ?? "operation";
+	const toolPatterns = args.toolPatterns == null ? null : pgTextArray(args.toolPatterns);
 	const principalKind = normalizePrincipalKind(args.principalKind);
 	const principalId = principalKind ? args.principalId?.trim() || null : null;
 	const operationKey =
@@ -1463,6 +1488,8 @@ export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
       AND kind = ${kind}
       AND audience IS NOT DISTINCT FROM ${audience}
       AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
+      AND hook = ${hook}
+      AND tool_patterns IS NOT DISTINCT FROM ${toolPatterns}::text[]
     RETURNING id
   `;
 	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"

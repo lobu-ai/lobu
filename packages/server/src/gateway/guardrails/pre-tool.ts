@@ -10,6 +10,7 @@ import {
 } from "../../guardrails/workspace-guardrails.js";
 import { buildGuardrailsByStage } from "./aggregator.js";
 import { recordGuardrailTrip } from "./audit.js";
+import { evaluateLoopPolicy, loopToolInput } from "./loop-policy.js";
 
 export type PreToolTrip = NonNullable<GuardrailRunOutcome["tripped"]>;
 
@@ -25,15 +26,30 @@ export type PreToolTrip = NonNullable<GuardrailRunOutcome["tripped"]>;
  * The trip reason is audited only; callers answer with a generic block, since
  * the reason would be an evasion oracle.
  */
-export async function evaluatePreToolGuardrails(params: {
+interface PreToolPolicyContext {
   registry: GuardrailRegistry | undefined;
   organizationId: string;
   principal: GuardrailPrincipal;
-  userId: string;
+  userId?: string;
   conversationId?: string;
   toolName: string;
+  namespace?: string;
   arguments: Record<string, unknown>;
-}): Promise<PreToolTrip | null> {
+}
+
+export async function evaluatePreToolGuardrails(params: PreToolPolicyContext): Promise<PreToolTrip | null> {
+  const legacy = await evaluateLegacyPreToolGuardrails(params);
+  return legacy ?? evaluateLoopPolicy({
+    ...params,
+    hook: "tool_call",
+    toolNames: params.namespace
+      ? [params.toolName, `${params.namespace}__${params.toolName}`]
+      : [params.toolName],
+    input: loopToolInput(params.toolName, params.arguments),
+  });
+}
+
+async function evaluateLegacyPreToolGuardrails(params: PreToolPolicyContext): Promise<PreToolTrip | null> {
   const rows = await resolveGuardrails(
     getDb(),
     params.organizationId,
@@ -46,11 +62,11 @@ export async function evaluatePreToolGuardrails(params: {
   const list = buildGuardrailsByStage(rows, params.registry)["pre-tool"];
   if (list.length === 0) return null;
   const agentId =
-    params.principal.kind === "agent" ? params.principal.id : null;
+    params.principal.kind === "agent" ? params.principal.id : params.principal.ownerAgentId;
   const appId = params.principal.kind === "app" ? params.principal.id : null;
   const outcome = await runGuardrailInstances("pre-tool", list, {
     agentId,
-    userId: params.userId,
+    userId: params.userId ?? "",
     toolName: params.toolName,
     arguments: params.arguments,
     conversationId: params.conversationId,

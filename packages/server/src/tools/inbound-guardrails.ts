@@ -14,10 +14,10 @@ import type { AccountToolContext, InboundToolCall } from './registry';
  * guardrail in workspace B applies when a script started in A reaches into B.
  *
  * The caller is the acting principal `resolveActingPrincipal` derives from the
- * verified token. Only an app principal is checked here: an agent's calls
+ * verified token. Connected apps and Automations are checked here. Agent calls
  * already pass the outbound MCP proxy's pre-tool stage, and that lane must not
  * change. Unlike the proxy, this fails closed: when the guardrails cannot be
- * looked up (the library read or the registry), the call is refused with
+ * looked up (the policy read), the call is refused with
  * `INTERNAL` rather than executed unchecked.
  *
  * Invariant: every workspace a tool call acts in with the caller's identity
@@ -38,7 +38,7 @@ import type { AccountToolContext, InboundToolCall } from './registry';
 export function enforceInboundPreToolGuardrails(ctx: AccountToolContext): Promise<void> {
   const call = ctx.inboundToolCall;
   const organizationId = ctx.organizationId;
-  if (!call || !organizationId || !ctx.appPrincipalId) return Promise.resolve();
+  if (!call || !organizationId || (!ctx.appPrincipalId && ctx.actingAutomationId == null)) return Promise.resolve();
   let check = call.checkedWorkspaces.get(organizationId);
   if (!check) {
     check = checkWorkspace(ctx, organizationId, call);
@@ -61,13 +61,13 @@ async function checkWorkspace(
       sessionAutomationId: ctx.actingAutomationId,
       appId: ctx.appPrincipalId,
     });
-    if (principal.kind !== 'app') return;
-    if (!ctx.userId) throw new Error('A connected-app call has no user');
+    if (principal.kind !== 'app' && principal.kind !== 'automation') return;
+    if (principal.kind === 'app' && !ctx.userId) throw new Error('A connected-app call has no user');
     const trip = await evaluatePreToolGuardrails({
       registry: getLobuCoreServices()?.getGuardrailRegistry?.() ?? undefined,
       organizationId,
       principal,
-      userId: ctx.userId,
+      userId: ctx.userId ?? undefined,
       conversationId: ctx.mcpConversationId ?? undefined,
       toolName: call.toolName,
       arguments: call.arguments,

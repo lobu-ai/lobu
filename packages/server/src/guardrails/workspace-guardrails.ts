@@ -16,6 +16,7 @@ import {
 } from "@lobu/core/contracts/workspace-guardrails";
 import type { ActingPrincipal } from "../authz/entity-policy";
 import { appKeyProblem } from "../authz/policy-principal";
+import { LOOP_POLICY_CUTOVER_INDEX } from "../authz/policy-hooks";
 import type { DbClient } from "../db/client";
 import { pgTextArray } from "../db/client";
 import { builtinGuardrailStages } from "../gateway/guardrails/builtins";
@@ -57,6 +58,7 @@ export async function resolveGuardrails(
 		WHERE g.organization_id = ${organizationId}
 		  AND g.archived_at IS NULL
 		  AND g.enabled
+		  AND to_regclass(${LOOP_POLICY_CUTOVER_INDEX}) IS NULL
 		  AND EXISTS (
 		    SELECT 1 FROM workspace_guardrail_subjects gs
 		    WHERE gs.guardrail_id = g.id
