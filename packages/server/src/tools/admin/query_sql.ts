@@ -44,7 +44,7 @@ export const QuerySqlSchema = Type.Object({
   sql: Type.String({
     minLength: 1,
     description:
-      'Base SELECT query. Table references are auto-scoped to your organization. It is wrapped as a subquery, so ORDER BY / LIMIT / window functions inside it are fine; pagination + sort are added on the outside via sort_by/limit/offset.',
+      'Base SELECT query. With no connection, table references are scoped to your organization. Discover queryable tables and column types with information_schema.tables and information_schema.columns. ORDER BY, LIMIT and window functions are supported inside the query; pagination and sort are added outside it via sort_by, limit and offset.',
   }),
   window_token: Type.Optional(Type.String({
     minLength: 1,
@@ -111,6 +111,12 @@ const PG_OID_TYPE_MAP: Record<number, string> = {
   114: 'json',
   700: 'float4',
   701: 'float8',
+  1000: 'boolean[]',
+  1005: 'smallint[]',
+  1007: 'integer[]',
+  1009: 'text[]',
+  1015: 'varchar[]',
+  1016: 'bigint[]',
   1042: 'bpchar',
   1043: 'varchar',
   1082: 'date',
@@ -120,7 +126,10 @@ const PG_OID_TYPE_MAP: Record<number, string> = {
   1186: 'interval',
   1700: 'numeric',
   2950: 'uuid',
+  2951: 'uuid[]',
+  3614: 'tsvector',
   3802: 'jsonb',
+  3807: 'jsonb[]',
 };
 
 function oidToTypeName(oid: number): string {
@@ -509,6 +518,7 @@ export async function querySqlImpl(
   try {
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
       window,
+      includeCatalog: true,
       safeColumns: SAFE_COLUMN_DEFS,
       restrictedTables: isAdminOrOwnerRole(memberReadRole(ctx)) ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
       // Per-user connection visibility: even an admin sees another user's

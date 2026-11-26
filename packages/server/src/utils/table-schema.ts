@@ -877,7 +877,8 @@ function outputAliases(sql: string): Set<string> {
 /** Build one actionable error covering all unknown tables in a query. */
 export function formatUnknownTablesError(
   tableNames: Iterable<string>,
-  queryableTableNames: Iterable<string> = QUERYABLE_TABLE_NAMES
+  queryableTableNames: Iterable<string> = QUERYABLE_TABLE_NAMES,
+  includeCatalog = false
 ): string {
   const names = [...new Set(tableNames)].sort();
   const subject =
@@ -888,13 +889,21 @@ export function formatUnknownTablesError(
   return (
     `${subject} — not in the queryable allowlist, so the query did not run. ` +
     `This is an error, not an empty result. ` +
-    `Queryable tables are: ${queryableTables}.`
+    `Queryable tables are: ${queryableTables}.` +
+    (includeCatalog
+      ? ' This query targets Lobu internal SQL. List tables with SELECT table_name FROM information_schema.tables. For an external database, pass its connection slug.'
+      : '')
   );
 }
 
 export function validateTableQuery(
   sql: string,
-  safeColumns: Map<string, ColumnDef[]> = SAFE_COLUMN_DEFS
+  safeColumns: Map<string, ColumnDef[]> = SAFE_COLUMN_DEFS,
+  options?: {
+    includeCatalog?: boolean;
+    restrictedTables?: ReadonlySet<string>;
+    catalogTables?: ReadonlySet<string>;
+  }
 ): { valid: boolean; errors: string[] } {
   const schema = {
     tables: [...safeColumns].map(([name, columns]) => ({ name, columns })),
@@ -921,17 +930,29 @@ export function validateTableQuery(
       messages.push(error.message);
       // E201 has no structured table field in polyglot's diagnostics.
       const table = error.code === 'E201' ? /in table '([^']+)'/i.exec(error.message)?.[1] : undefined;
-      if (table && safeColumns.has(table)) columnTables.add(table);
+      if (table && safeColumns.has(table) && !options?.restrictedTables?.has(table)) {
+        columnTables.add(table);
+      }
     }
   }
   for (const table of columnTables) {
-    messages.push(`Allowed columns for '${table}': ${safeColumns.get(table)!.map((column) => column.name).join(', ')}. Select named columns; whole-row expressions such as to_jsonb(alias) and alias::text are rejected to keep non-queryable columns private.`);
+    messages.push(`Allowed columns for '${table}': ${safeColumns.get(table)!.map((column) => column.name).join(', ')}.`);
+  }
+  if (columnTables.size > 0) {
+    messages.push('Select named columns. The query does not accept whole-row expressions such as to_jsonb(alias) or alias::text.');
+  }
+  if (options?.includeCatalog && errors.some((error) => error.code === 'E201') && unknownTables.length === 0) {
+    messages.push('This query targets Lobu internal SQL. Look up names and types in information_schema.columns, filtering by table_name.');
   }
   if (unknownTables.length > 0) {
-    messages.unshift(formatUnknownTablesError(unknownTables, safeColumns.keys()));
+    const visible = [...safeColumns.keys()].filter(
+      (name) => !options?.restrictedTables?.has(name) && !options?.catalogTables?.has(name)
+    );
+    messages.unshift(formatUnknownTablesError(unknownTables, visible, options?.includeCatalog));
   }
+  const unique = [...new Set(messages)];
   return {
-    valid: messages.length === 0,
-    errors: messages,
+    valid: unique.length === 0,
+    errors: unique,
   };
 }
