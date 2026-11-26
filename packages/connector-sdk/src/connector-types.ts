@@ -13,6 +13,7 @@ import type { ConnectorBrowserRequirement } from './browser-requirement.js';
 import type { ChromeActionDispatcher } from './extension-network.js';
 import type { AttributeFilter } from '@lobu/core/contracts/tools/collection-selection';
 import type { ConnectorOperationRequest, ConnectorOperationResult } from '@lobu/core/contracts/tools/manage-operations';
+import type { ToolErrorCode } from '@lobu/core/connector-query-errors';
 import type {
   ConnectorAutomationEvent,
   ConnectorAutomationSignalDraft,
@@ -1520,6 +1521,14 @@ export interface ActionResult {
   output?: Record<string, unknown>;
   /** Error message if failed */
   error?: string;
+  /**
+   * Why a failed action failed, when the connector knows from structure (an
+   * upstream status, a refusal the target recorded): e.g. `ACTION_FAILED` when
+   * the target ran the action and refused it. Read only when `success` is
+   * false. The runtime keeps a code from the `ToolErrorCode` catalog and drops
+   * any other value; omitted, the failure is recorded unclassified.
+   */
+  error_code?: ToolErrorCode;
 }
 
 // =============================================================================

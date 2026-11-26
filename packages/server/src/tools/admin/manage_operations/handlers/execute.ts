@@ -350,6 +350,7 @@ async function executeLocalActionInline(
 				deferTerminalWrite,
 				claimedBy,
 				result.output,
+				result.error_code,
 			);
 		}
 		return completeRunInline(
@@ -425,6 +426,8 @@ async function executeMcpToolInline(
       errorText,
       deferTerminalWrite,
       claimedBy,
+      undefined,
+      result.errorCode,
     );
   }
 

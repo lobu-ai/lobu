@@ -486,19 +486,36 @@ function beforeRowid(input: Record<string, unknown>): number | null {
 type ShellOutput = {
   exit_code?: number;
   timed_out?: boolean;
+  exit_signal?: string;
+  process_error?: string;
   stdout?: string;
   stderr?: string;
 };
 
+type FailureCode = ActionResult['error_code'];
+
 type ShellResult =
   | { kind: 'receipt'; receipt: Record<string, unknown> }
   | { kind: 'completed'; runId: number | undefined; shell: ShellOutput }
-  | { kind: 'error'; error: string };
+  | { kind: 'error'; error: string; code?: FailureCode };
 
 type SqlResult =
   | { rows: Array<Record<string, unknown>> }
   | { receipt: Record<string, unknown> }
-  | { error: string };
+  | { error: string; code?: FailureCode };
+
+/**
+ * The typed cause of a failed shell run, read off its exit structure the way
+ * the shell operation classifies its own run: a command that ran and exited
+ * non-zero was refused by its target, one that ran out of its budget timed
+ * out. A spawn fault or a signal death names no cause.
+ */
+function shellFailureCode(shell: ShellOutput | undefined): FailureCode {
+  if (!shell || typeof shell !== 'object') return undefined;
+  if (shell.timed_out === true) return 'UPSTREAM_TIMEOUT';
+  if (shell.process_error || shell.exit_signal) return undefined;
+  return typeof shell.exit_code === 'number' && shell.exit_code !== 0 ? 'ACTION_FAILED' : undefined;
+}
 
 async function runShell(
   ctx: ActionContext,
@@ -521,11 +538,18 @@ async function runShell(
   const status = receipt.status;
   if (status === 'pending_approval' || status === 'in_progress')
     return { kind: 'receipt', receipt };
-  if (status !== 'completed') return { kind: 'error', error: JSON.stringify(receipt) };
+  if (status !== 'completed') {
+    // The shell run timed out waiting, or failed with its output attached.
+    const code =
+      status === 'timeout' ? 'UPSTREAM_TIMEOUT' : shellFailureCode(receipt.output as ShellOutput | undefined);
+    return { kind: 'error', error: JSON.stringify(receipt), ...(code ? { code } : {}) };
+  }
   const shell = receipt.output as ShellOutput | undefined;
+  const shellCode = shellFailureCode(shell);
   if (!shell || shell.exit_code !== 0 || shell.timed_out)
     return {
       kind: 'error',
+      ...(shellCode ? { code: shellCode } : {}),
       error: JSON.stringify({
         run_id: receipt.run_id,
         exit_code: shell?.exit_code,
@@ -553,7 +577,7 @@ async function runSql(
     idempotencyKey,
   );
   if (result.kind === 'receipt') return { receipt: result.receipt };
-  if (result.kind === 'error') return { error: result.error };
+  if (result.kind === 'error') return { error: result.error, ...(result.code ? { code: result.code } : {}) };
   const stdout = result.shell.stdout ?? '';
   if (stdout.length >= MAX_SHELL_STDOUT_CHARS)
     return {
@@ -575,10 +599,11 @@ async function runSql(
   return { rows: parsed as Array<Record<string, unknown>> };
 }
 
-function resultFromSqlFailure(result: { receipt: Record<string, unknown> } | { error: string }): ActionResult {
-  return 'receipt' in result
-    ? { success: true, output: { ...result.receipt } }
-    : { success: false, error: result.error };
+function resultFromSqlFailure(
+  result: { receipt: Record<string, unknown> } | { error: string; code?: FailureCode },
+): ActionResult {
+  if ('receipt' in result) return { success: true, output: { ...result.receipt } };
+  return { success: false, error: result.error, ...(result.code ? { error_code: result.code } : {}) };
 }
 
 /**
@@ -747,6 +772,7 @@ export default class IMessageConnector extends ConnectorRuntime {
       return {
         success: false,
         error: 'Configure shell_connection_id with an existing os.shell connection.',
+        error_code: 'PRECONDITION_FAILED',
       };
     switch (ctx.actionKey) {
       case 'list_chats':
@@ -876,6 +902,7 @@ export default class IMessageConnector extends ConnectorRuntime {
             ? 'The message was not sent: the pre-send database read failed before osascript ran.'
             : 'The message may already have been sent; inspect this run before retrying.'
         }`,
+        ...(send.code ? { error_code: send.code } : {}),
       };
     }
     const sentinel = parseSentinel(send.shell.stdout ?? '');
@@ -947,8 +974,10 @@ export default class IMessageConnector extends ConnectorRuntime {
       status: message.error !== 0 ? 'failed' : message.is_delivered ? 'delivered' : 'sent_unconfirmed',
       message,
     };
+    // Messages wrote the outgoing row with a non-zero error: it ran the send
+    // and refused delivery.
     return output.status === 'failed'
-      ? { success: false, error: JSON.stringify(output), output }
+      ? { success: false, error: JSON.stringify(output), output, error_code: 'ACTION_FAILED' }
       : { success: true, output };
   }
 }

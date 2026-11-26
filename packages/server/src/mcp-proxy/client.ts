@@ -532,6 +532,13 @@ async function runDiscovery(
  * Call a tool on an upstream MCP server.
  * Establishes a session before dispatch and only refreshes a rejected credential
  * before one retry; ambiguous tool outcomes are never replayed.
+ *
+ * `errorCode` is set only for a tool result the upstream flagged `isError`:
+ * per the MCP spec that is the tool reporting its own execution failure after
+ * it ran, the same refusal a non-zero shell exit is (`ACTION_FAILED`). A
+ * JSON-RPC error response is a protocol failure (unknown tool, invalid params,
+ * the server's internal error) that names no execution outcome, so it stays
+ * unclassified.
  */
 export async function callTool(
   connectorKey: string,
@@ -541,7 +548,7 @@ export async function callTool(
   args: Record<string, unknown>,
   connectionId: number,
   options?: { signal?: AbortSignal; timeoutMs?: number }
-): Promise<{ content: unknown[]; isError: boolean }> {
+): Promise<{ content: unknown[]; isError: boolean; errorCode?: ToolErrorCode }> {
   let credentials = await resolveCredentialsByConnectionId(connectionId, orgId);
   let canRefreshAfter401 = true;
 
@@ -636,6 +643,7 @@ export async function callTool(
   return {
     content: response.result?.content ?? [],
     isError: response.result?.isError ?? false,
+    ...(response.result?.isError === true ? { errorCode: 'ACTION_FAILED' as const } : {}),
   };
 }
 

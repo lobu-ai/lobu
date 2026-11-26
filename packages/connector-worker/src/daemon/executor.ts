@@ -638,6 +638,7 @@ async function executeActionRun(
         status: 'failed',
         error_message: result.error,
         ...(Object.keys(actionOutput).length > 0 ? { action_output: actionOutput } : {}),
+        ...(result.error_code ? { error_code: result.error_code } : {}),
       });
       log.info(`[executor] Action run ${run_id} failed: ${result.error}`);
       return { itemsCollected: 0, error: result.error };

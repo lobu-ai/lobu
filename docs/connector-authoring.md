@@ -564,6 +564,16 @@ reaches the caller and the stored run, so agents branch on `code` rather than
 parsing the message. Name the business cases (`not_connectable`,
 `invitation_limit_reached`) after what the site said.
 
+When the refusal's structure names why it failed, also return `error_code`, a
+code from the platform's `ToolErrorCode` catalog: `ACTION_FAILED` when the
+target ran the action and refused it (a non-zero exit, a delivery the upstream
+marked failed), `PRECONDITION_FAILED` when setup the action needs is missing,
+`UPSTREAM_TIMEOUT` when the upstream ran out of time. The run records it, so
+the failure is reported as the caller's or the upstream's rather than as a Lobu
+defect. Omit it when the structure names no cause; never derive it from the
+message. A value outside the catalog is dropped and the failure stays
+unclassified.
+
 When a browser action cannot find or tell apart the controls it needs before it
 has clicked anything, return `code: "page_unrecognized"` and describe what the
 page showed by its control labels. Never guess a business reason from a missing

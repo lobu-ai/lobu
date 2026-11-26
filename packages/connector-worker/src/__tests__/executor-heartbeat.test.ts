@@ -310,7 +310,7 @@ describe('executor heartbeats (lobu#860)', () => {
     expect(scheduledIntervals.length).toBe(0);
   });
 
-  test('a failed action reports the code its execution error structure names, and none otherwise', async () => {
+  test('a failed action reports the code its execution error structure or its refusal names, and none otherwise', async () => {
     const reported: Array<Record<string, unknown>> = [];
     const client = {
       ...makeStubClient(),
@@ -325,7 +325,13 @@ describe('executor heartbeats (lobu#860)', () => {
     executeCompiledConnectorMock.mockImplementationOnce(async () => {
       throw new ConnectorExecutionError('Connector threw', diagnostics);
     });
-    for (const runId of [401, 402]) {
+    executeCompiledConnectorMock.mockImplementationOnce(async () => ({
+      mode: 'action',
+      output: {},
+      error: 'Delivery refused',
+      error_code: 'ACTION_FAILED',
+    }));
+    for (const runId of [401, 402, 403]) {
       // biome-ignore lint/suspicious/noExplicitAny: minimal job and env
       await executeRun(client as any, { run_id: runId, run_type: 'action', connector_key: 'fake', action_key: 'do_thing', action_input: {}, compiled_code: 'compiled-code' } as any, {} as any, {
         executor: { execute: executeCompiledConnectorMock },
@@ -334,5 +340,6 @@ describe('executor heartbeats (lobu#860)', () => {
     expect(reported[0]).toMatchObject({ run_id: 401, status: 'failed', error_code: 'NOT_FOUND' });
     expect(reported[1]).toMatchObject({ run_id: 402, status: 'failed' });
     expect(reported[1]).not.toHaveProperty('error_code');
+    expect(reported[2]).toMatchObject({ run_id: 403, status: 'failed', error_message: 'Delivery refused', error_code: 'ACTION_FAILED' });
   });
 });
