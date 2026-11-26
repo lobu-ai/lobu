@@ -555,6 +555,13 @@ describe("X likes GraphQL cursor URLs", () => {
 
 describe("parseBrowserSearchResponse", () => {
 	test("reads search_by_raw_query instructions", () => {
+		const hit = tweetResult("1", "alice", "search hit");
+		hit.core.user_results.result = {
+			core: { screen_name: "alice" },
+			avatar: {
+				image_url: "https://pbs.twimg.com/profile_images/1/synthetic_normal.jpg",
+			},
+		} as never;
 		const json = wrapSearchInstructions([
 			{
 				entries: [
@@ -563,7 +570,7 @@ describe("parseBrowserSearchResponse", () => {
 						content: {
 							itemContent: {
 								tweet_results: {
-									result: tweetResult("1", "alice", "search hit"),
+									result: hit,
 								},
 							},
 						},
@@ -577,6 +584,8 @@ describe("parseBrowserSearchResponse", () => {
 			id: "1",
 			username: "alice",
 			text: "search hit",
+			authorAvatarUrl:
+				"https://pbs.twimg.com/profile_images/1/synthetic_normal.jpg",
 		});
 	});
 
@@ -1803,6 +1812,9 @@ const followedPerson = {
 	rest_id: "2001",
 	is_blue_verified: false,
 	profile_image_shape: "Circle",
+	avatar: {
+		image_url: "https://pbs.twimg.com/profile_images/2001/synthetic_normal.jpg",
+	},
 	core: {
 		screen_name: "Synth_Person",
 		name: "Synthetic Person",
@@ -1982,6 +1994,8 @@ describe("XConnector following feed", () => {
 				followed_name: "Synthetic Person",
 				is_blue_verified: false,
 				profile_image_shape: "Circle",
+				followed_avatar_url:
+					"https://pbs.twimg.com/profile_images/2001/synthetic_normal.jpg",
 				is_organization: false,
 				followed_by_id: FOLLOWING_OWNER,
 				followed_by_handle: "testuser",
@@ -2143,6 +2157,8 @@ describe("XConnector home_feed", () => {
 							{
 								id: "111",
 								body: "first tweet on my timeline",
+								avatar_url:
+									"https://pbs.twimg.com/profile_images/111/synthetic_x96.jpg",
 								status_path: "/alice/status/111",
 								published_at: "2026-06-30T12:00:00.000Z",
 							},
@@ -2180,6 +2196,11 @@ describe("XConnector home_feed", () => {
 		expect(res.events).toHaveLength(2);
 		expect(res.events[0].origin_id).toBe("111");
 		expect(res.events[1].origin_id).toBe("222");
+		// An avatar the tab rendered is kept; a lazy, unrendered one is omitted.
+		expect(res.events[0].metadata.author_avatar_url).toBe(
+			"https://pbs.twimg.com/profile_images/111/synthetic_x96.jpg",
+		);
+		expect(res.events[1].metadata).not.toHaveProperty("author_avatar_url");
 		expect(res.metadata.backend).toBe("extension-cs-scrape");
 		// Default: timeline authors stay link-only.
 		for (const event of res.events) {

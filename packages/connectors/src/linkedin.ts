@@ -384,6 +384,13 @@ interface HomeFeedLink {
   name?: string;
 }
 
+/** One profile photo or company logo scraped from inside a profile anchor. */
+interface HomeFeedAvatar {
+  url?: string;
+  /** The img alt, which repeats the anchor's accessible name. */
+  name?: string;
+}
+
 /** One media URL scraped from a feed card. */
 interface HomeFeedMedia {
   url?: string;
@@ -418,6 +425,8 @@ interface HomeFeedRow {
   post_identity?: string;
   /** Every profile/company anchor in the card, each with its accessible name. */
   links?: HomeFeedLink[];
+  /** Every profile photo / company logo in the card, matched to names like `links`. */
+  avatars?: HomeFeedAvatar[];
   /** Media that belongs to a top-level post (nested comment media excluded). */
   post_media?: HomeFeedMedia[];
   /** Media that belongs to a visible comment row. */
@@ -656,6 +665,18 @@ const HOME_FEED_SCRAPE_CONFIG = {
         href: { take: "attr", attr: "href" },
         name: { take: "aria" },
         nameAlt: { take: "alt" },
+      },
+    },
+    avatars: {
+      // Profile photos and company logos sit inside the profile anchor, and
+      // their alt repeats its accessible name, so buildHomeFeedEvents pairs a
+      // photo with the author by NAME, the same way as `links`.
+      selector:
+        'a[href*="/in/"] img[src*="/profile-displayphoto"], a[href*="/company/"] img[src*="/company-logo"]',
+      take: "objectAll",
+      parts: {
+        url: { take: "attr", attr: "src" },
+        name: { take: "attr", attr: "alt" },
       },
     },
     post_media: {
@@ -1483,6 +1504,32 @@ function resolveMemberSlug(
 }
 
 /**
+ * The profile photo whose alt names `targetName`. Only LinkedIn's own image
+ * CDN is accepted, since the URL is rendered back to the user as an image.
+ */
+function resolveAvatarUrl(
+  avatars: unknown,
+  targetName: string
+): string | undefined {
+  const target = nameKey(targetName);
+  if (!target || !Array.isArray(avatars)) return undefined;
+  for (const raw of avatars) {
+    const avatar = (raw ?? {}) as HomeFeedAvatar;
+    if (!avatar.url) continue;
+    if (nameKey(linkDisplayName({ name: avatar.name })) !== target) continue;
+    let url: URL;
+    try {
+      url = new URL(avatar.url);
+    } catch {
+      continue;
+    }
+    if (url.protocol === "https:" && url.hostname === "media.licdn.com")
+      return url.href;
+  }
+  return undefined;
+}
+
+/**
  * Resolve a company author's `/company/<slug>` the same way: the target name
  * must match exactly one company page and no member, so a same-named person
  * (or two same-named pages) leaves the author unattributed rather than guessed.
@@ -1838,6 +1885,8 @@ function buildHomeFeedRowContext(row: HomeFeedRow): HomeFeedRowContext {
     metadata.author_linkedin_slug = authorSlug;
     metadata.author_profile_url = profileUrlFor(authorSlug);
   }
+  const authorAvatarUrl = resolveAvatarUrl(row.avatars, author);
+  if (authorAvatarUrl) metadata.author_avatar_url = authorAvatarUrl;
 
   const embeddedUrn = row.post_identity?.match(
     /(?:(shareId|ugcPostId)=|urn:li:(activity|share|ugcPost):)(\d{6,})|urn:li:(groupPost):(\d+-\d{6,})/i
@@ -3191,7 +3240,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
     name: "LinkedIn",
     description:
       "Read LinkedIn feeds, notifications, and recent inbox messages through paired Chrome. Subscribe to source changes, store 1:1 message history on the people you talk to, answer direct messages, manage your network (connection requests, follows), and prepare message, post, or comment drafts for human submission.",
-    version: "3.26.0",
+    version: "3.27.0",
     faviconDomain: "linkedin.com",
     // Live feeds bind a signed-in Chrome account.
     browser: {
@@ -3365,6 +3414,10 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 author: { type: "string" },
                 author_linkedin_slug: { type: "string" },
                 author_profile_url: { type: "string" },
+                author_avatar_url: {
+                  type: "string",
+                  description: "Author profile photo or company logo URL",
+                },
                 author_company_slug: {
                   type: "string",
                   description:
@@ -3404,6 +3457,10 @@ export default class LinkedInConnector extends ConnectorRuntime<
                 author: { type: "string" },
                 author_linkedin_slug: { type: "string" },
                 author_profile_url: { type: "string" },
+                author_avatar_url: {
+                  type: "string",
+                  description: "Commenter profile photo URL",
+                },
                 parent_post_origin_id: { type: "string" },
                 parent_author: { type: "string" },
                 parent_author_linkedin_slug: { type: "string" },

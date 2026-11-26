@@ -2227,6 +2227,7 @@ describe("LinkedInConnector home_feed", () => {
         <p>Synthetic Co 1,234 followers A company update long enough to pass the noise filter</p>
         <div id="replaceableComment_urn:li:comment:(urn:li:activity:4444444444444444444,5555555555555555555)">
           <a href="https://www.linkedin.com/in/fixture-commenter/">
+            <img src="https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-commenter" alt="View Fixture Commenter’s profile" />
             <span aria-hidden="true">Fixture Commenter</span>
             <span aria-label="View Fixture Commenter’s profile"></span>
           </a>
@@ -2241,10 +2242,16 @@ describe("LinkedInConnector home_feed", () => {
     expect(post.metadata).toMatchObject({
       author_company_slug: "synthetic-co",
       author_company_url: "https://www.linkedin.com/company/synthetic-co",
+      author_avatar_url:
+        "https://media.licdn.com/dms/image/v2/company-logo_100_100/synthetic",
       create_engager_people: true,
     });
+    // The post row contains the comment row, so each photo is paired by name:
+    // the commenter's photo never becomes the post author's, or vice versa.
     expect(comment.metadata).toMatchObject({
       author_linkedin_slug: "fixture-commenter",
+      author_avatar_url:
+        "https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100_100/fixture-commenter",
       create_engager_people: true,
     });
     // The company slug belongs to the post author; a comment's own author is
@@ -3495,7 +3502,7 @@ describe("prepare_comment helpers", () => {
     expect(action?.inputSchema?.properties).not.toHaveProperty(
       "browser_connection_id"
     );
-    expect(c.definition.version).toBe("3.26.0");
+    expect(c.definition.version).toBe("3.27.0");
     expect(String(action?.description ?? "")).toMatch(
       /NEVER opens a tab or submits/i
     );
