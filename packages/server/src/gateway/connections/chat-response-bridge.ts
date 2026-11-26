@@ -180,7 +180,9 @@ export class ChatResponseBridge implements ResponseRenderer {
     if (!agentId) return false;
     return this.outputGuardrail.hasOutputGuardrails(
       agentId,
-      this.resolveOrganizationId(payload, ctx)
+      this.resolveOrganizationId(payload, ctx),
+      readPlatformMetadata(payload.platformMetadata).source,
+      payload.conversationId,
     );
   }
 
@@ -196,6 +198,7 @@ export class ChatResponseBridge implements ResponseRenderer {
     const agentId = this.resolveAgentId(payload, ctx);
     if (!agentId || !text) return null;
     return this.outputGuardrail.scanFinal(text, {
+      source: readPlatformMetadata(payload.platformMetadata).source,
       agentId,
       organizationId: this.resolveOrganizationId(payload, ctx),
       userId: payload.userId,

@@ -13,6 +13,8 @@
 
 
 export interface PlatformMetadata {
+  /** Server-stamped turn origin. */
+  source?: string;
   /** Outbound: the Chat SDK connection the response originated from. */
   connectionId?: string;
   /** Outbound: optional override for the chat-level recipient. */

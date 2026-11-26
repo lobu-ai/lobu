@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileInputSchema } from "@lobu/connector-sdk";
-import { __resetEncryptionKeyCacheForTests } from "@lobu/core";
+import { __resetEncryptionKeyCacheForTests, GuardrailRegistry } from "@lobu/core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperationForConnection } from "../../../operations/connector-operations";
 import { resolveRunConnectorPolicy } from "../../../authz/operation-run-policy";
@@ -14,6 +14,9 @@ import { predictClassifier, resetPredictClassifierForTests } from "../../../gate
 import { ArtifactStore } from "../../../gateway/files/artifact-store";
 import { ingestInputFiles } from "../../../gateway/files/input-files";
 import * as gateway from "../../../lobu/gateway";
+import { flushPendingGuardrailAudits } from "../../../gateway/guardrails/audit";
+import { evaluatePreToolGuardrails } from "../../../gateway/guardrails/pre-tool";
+import { OutputGuardrailScanner } from "../../../gateway/guardrails/output-scan";
 import { createInferenceProvider } from "../../../lobu/stores/provider-secrets";
 import * as dbClient from "../../../db/client";
 import { app, type Env } from "../../../index";
@@ -409,6 +412,76 @@ describe("connector policy collection", () => {
     await getTestDb()`UPDATE "member" SET role = 'owner' WHERE "userId" = ${owner.id} AND "organizationId" = ${org.id}`;
     await getTestDb()`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = ${token.id}`;
     expect((await request("GET", path(), undefined, token.token)).status).toBe(401);
+  });
+});
+
+describe("loop rules during the guardrail transition", () => {
+  it("keeps reply rules out of operation replacements and buffers only blocking replies", async () => {
+    const agent = "reply-policy-agent";
+    await createTestAgent({ organizationId: org.id, agentId: agent });
+    const scanner = new OutputGuardrailScanner();
+    scanner.setGuardrails(new GuardrailRegistry());
+    const rule = {
+      resourceClass: "connector_action" as const,
+      hook: "reply_out" as const,
+      principalKind: "agent" as const,
+      principalId: agent,
+      kind: "guardrail" as const,
+      condition: [{ field: "/text", op: "contains", value: "synthetic phrase" }],
+    };
+    const unavailable = await request("GET", `${path()}?hook=reply_out&principal_kind=agent&principal_id=${agent}`);
+    expect(unavailable.status).toBe(404);
+
+    const before = await snapshot();
+    const log = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "log" } });
+    const ctx = { organizationId: org.id, agentId: agent, userId: owner.id, platform: "lobu" };
+    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(false);
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).toBeNull();
+
+    const block = await upsertEntityApprovalPolicy(org.id, { ...rule, effects: { execute: "deny" } });
+    expect(block.id).toBe(log.id);
+    expect(await scanner.hasOutputGuardrails(agent, org.id)).toBe(true);
+    expect(await scanner.scanFinal("unrestricted reply", ctx)).toBeNull();
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
+    expect(await scanner.scanFinal("synthetic phrase", { ...ctx, agentId: "different-agent" })).toBeNull();
+    expect(await snapshot()).toEqual(before);
+    const replaced = await request("PUT", path(), { revision: before.revision, rules: [{ effect: "auto" }] });
+    expect(replaced.status).toBe(200);
+    expect(await scanner.scanFinal("synthetic phrase", ctx)).not.toBeNull();
+    await flushPendingGuardrailAudits();
+  });
+
+  it("keeps distinct tool selectors and matches only the intended tool namespace", async () => {
+    const agent = "tool-policy-agent";
+    await createTestAgent({ organizationId: org.id, agentId: agent });
+    const rule = {
+      resourceClass: "connector_action" as const,
+      hook: "tool_call" as const,
+      principalKind: "agent" as const,
+      principalId: agent,
+      kind: "guardrail" as const,
+      effects: { execute: "deny" as const },
+    };
+    const exact = await upsertEntityApprovalPolicy(org.id, { ...rule, toolPatterns: ["repo.delete_branch"] });
+    const namespaced = await upsertEntityApprovalPolicy(org.id, { ...rule, toolPatterns: ["github__*"] });
+    expect(exact.id).not.toBe(namespaced.id);
+    const call = (toolName: string, id = agent, namespace?: string) => evaluatePreToolGuardrails({
+      registry: undefined,
+      organizationId: org.id,
+      principal: { kind: "agent", id, ownerAgentId: null },
+      userId: owner.id,
+      toolName,
+      namespace,
+      arguments: {},
+    });
+    expect(await call("repo.delete_branch")).not.toBeNull();
+    expect(await call("repoXdelete_branch")).toBeNull();
+    expect(await call("github__list_issues")).not.toBeNull();
+    expect(await call("list_issues", agent, "github")).not.toBeNull();
+    expect(await call("list_issues", agent, "other")).toBeNull();
+    expect(await call("othergithub__list_issues")).toBeNull();
+    expect(await call("github__list_issues", "another-agent")).toBeNull();
+    await flushPendingGuardrailAudits();
   });
 });
 

@@ -150,6 +150,7 @@ async function handleCallToolAuthenticated(
 			auth.tokenData,
 			toolName,
 			toolArguments,
+			mcpId,
 		)
 	) {
 		return c.json({

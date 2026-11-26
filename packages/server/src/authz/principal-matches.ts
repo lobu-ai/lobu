@@ -7,7 +7,7 @@ import type { ActingPrincipal, EntityApprovalPolicy } from "./entity-policy";
  */
 export function principalMatches(
 	rule: Pick<EntityApprovalPolicy, "principalKind" | "principalId">,
-	actor: ActingPrincipal,
+	actor: Pick<ActingPrincipal, "id" | "kind" | "ownerAgentId">,
 ): boolean {
 	return (
 		rule.principalKind === null ||

@@ -157,6 +157,7 @@ async function handleProxyRequestAuthenticated(
 							tokenData,
 							toolName,
 							toolArgs,
+							mcpId,
 						)
 					) {
 						return c.json({

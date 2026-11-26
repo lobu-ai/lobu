@@ -128,7 +128,7 @@ export function requireHumanWorkspaceAdmin(
 	}, 403);
 }
 
-async function agentExists(organizationId: string, agentId: string) {
+export async function agentExists(organizationId: string, agentId: string) {
 	const rows = await getDb()`
     SELECT id FROM agents
     WHERE organization_id = ${organizationId} AND id = ${agentId}
