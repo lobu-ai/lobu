@@ -38,7 +38,7 @@
  *     and the catalog separately, which is how the two drifted.
  */
 
-import { AgentErrorCode, classifyErrorMessage } from "@lobu/core";
+import { AGENT_ERRORS, AgentErrorCode, classifyErrorMessage } from "@lobu/core";
 
 export type RunOutcome = "infra_error" | "agent_error" | "scoreable";
 
@@ -88,6 +88,48 @@ const INFRA_PATTERNS: readonly RegExp[] = [
 	/worker sandbox/i,
 	/failed to (?:create|resume|enqueue)/i,
 ];
+
+/**
+ * Run types whose failures are agent turns. The `classifyErrorMessage` catalog
+ * is an agent/provider vocabulary, so a connector sync's "Execution timed out
+ * after …ms" must not read back as "The agent didn't finish responding".
+ */
+const AGENT_RUN_TYPES: ReadonlySet<string> = new Set([
+	"automation",
+	"agent_turn",
+	"chat_message",
+]);
+
+/**
+ * A coded hosted failure is persisted as its catalog text (the API renderer
+ * stores `AGENT_ERRORS[code].message`), which the wording classifier does not
+ * place. Equality with the catalog entry recovers the code it was written from.
+ */
+const CODE_BY_CATALOG_MESSAGE: ReadonlyMap<string, AgentErrorCode> = new Map(
+	(Object.keys(AGENT_ERRORS) as AgentErrorCode[]).flatMap((code) => {
+		const message = AGENT_ERRORS[code].message;
+		return message ? [[message, code] as const] : [];
+	}),
+);
+
+/**
+ * The `AgentErrorCode` a run surface renders for a stored failure, derived at
+ * read time from `error_message`: the catalog text a coded failure was stored
+ * as, else the raw provider wording placed by THE catalog. Null for non-agent
+ * run types, empty messages, and anything the catalog cannot place.
+ */
+export function runErrorCode(
+	runType: unknown,
+	errorMessage: unknown,
+): AgentErrorCode | null {
+	if (typeof runType !== "string" || !AGENT_RUN_TYPES.has(runType)) return null;
+	if (typeof errorMessage !== "string" || !errorMessage) return null;
+	return (
+		CODE_BY_CATALOG_MESSAGE.get(errorMessage) ??
+		classifyErrorMessage(errorMessage) ??
+		null
+	);
+}
 
 /**
  * The `error_message` a run carries when `claim_next_window` cancels it because

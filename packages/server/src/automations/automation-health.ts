@@ -13,7 +13,9 @@
  */
 
 import type { AutomationTrigger } from '../types/automations';
+import { AGENT_ERRORS } from '@lobu/core';
 import { intervals } from '../config/intervals';
+import { runErrorCode } from '../runs/run-outcome';
 import { referenceCaptureTriggers } from './event-trigger';
 import { scheduleOverdueGraceMs, scheduleTriggerOf } from './schedule-overdue-grace';
 
@@ -98,6 +100,8 @@ export interface AutomationHealth {
   last_scheduling_error: string | null;
   /** Latest run outcome classification, echoed for convenience (null when unstamped). */
   last_run_outcome: string | null;
+  /** `AgentErrorCode` of the latest run error; surfaces render its catalog text. */
+  last_run_error_code: string | null;
 }
 
 function toMs(value: string | Date | null | undefined): number | null {
@@ -132,6 +136,8 @@ export function computeAutomationHealth(
   const reasons: string[] = [];
   const lastError = input.latestRunError ?? null;
   const lastOutcome = input.latestRunOutcome ?? null;
+  const lastErrorCode = runErrorCode('automation', lastError);
+  const shownError = (lastErrorCode && AGENT_ERRORS[lastErrorCode].message) || lastError;
 
   // Archived automations are intentionally idle and therefore healthy.
   if (input.status !== 'active') {
@@ -140,6 +146,7 @@ export function computeAutomationHealth(
       reasons,
       last_scheduling_error: lastError,
       last_run_outcome: lastOutcome,
+      last_run_error_code: lastErrorCode,
     };
   }
 
@@ -171,7 +178,7 @@ export function computeAutomationHealth(
     const label = lastOutcome
       ? `latest run ${input.latestRunStatus} (${lastOutcome})`
       : `latest run ${input.latestRunStatus}`;
-    reasons.push(lastError ? `${label}: ${lastError}` : label);
+    reasons.push(shownError ? `${label}: ${shownError}` : label);
   }
 
   const recentStatuses = input.recentTerminalRunStatuses ?? [];
@@ -221,5 +228,6 @@ export function computeAutomationHealth(
     reasons,
     last_scheduling_error: lastError,
     last_run_outcome: lastOutcome,
+    last_run_error_code: lastErrorCode,
   };
 }

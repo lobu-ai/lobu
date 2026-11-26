@@ -168,6 +168,8 @@ export enum AgentErrorCode {
    * config is wrong, so it must not render as a worker crash.
    */
   PROVIDER_TOOL_CALL_FAILED = "PROVIDER_TOOL_CALL_FAILED",
+  /** Model resolved, but it can't accept image input (a non-vision model was asked to read an image). */
+  MODEL_IMAGE_UNSUPPORTED = "MODEL_IMAGE_UNSUPPORTED",
   /** Session exceeded its time budget (exit 124); retried silently. */
   SESSION_TIMEOUT = "SESSION_TIMEOUT",
 }
@@ -239,6 +241,15 @@ export const AGENT_ERRORS: Record<AgentErrorCode, AgentErrorSpec> = {
     message:
       "The model provider rejected its own tool call and ended the turn. This is usually temporary — please try again.",
     cta: "none",
+  },
+  // The model exists but cannot read images. The upstream string is an internal
+  // instruction ("…Inform the user."), so like PROVIDER_TOOL_CALL_FAILED this
+  // carries its own text and does NOT relay the raw blob.
+  [AgentErrorCode.MODEL_IMAGE_UNSUPPORTED]: {
+    message:
+      "This agent's model can't read images. Choose a vision-capable model, or send text instead.",
+    cta: "agent-settings",
+    ctaLabel: "Choose a vision model",
   },
   // Errors we synthesize — carry our own text (no provider string to relay).
   [AgentErrorCode.NO_MODEL_CONFIGURED]: {

@@ -7,9 +7,11 @@
  */
 
 import type { NotificationDelivery } from "@lobu/core/contracts/tools/manage-operations";
+import { AGENT_ERRORS } from "@lobu/core";
 import { compileConnectionFkVisibilityLiteral } from "../../../authz/connection-visibility";
 import { authzScopeFromToolContext } from "../../../authz/scope";
 import { getDb, pgTextArray } from "../../../db/client";
+import { runErrorCode } from "../../../runs/run-outcome";
 import { listNotifications } from "../../../notifications/service";
 import { buildResourcePermalink } from "../../../utils/url-builder";
 import { AGENT_ASK_ACTION_KEY } from "../../../notifications/ask";
@@ -658,8 +660,12 @@ export async function listOrgActivity(opts: {
 						: r.run_type === "sync"
 							? "sync"
 							: "run";
+				const errorCode = runErrorCode(r.run_type, r.error_message);
+				const cleanError = errorCode
+					? AGENT_ERRORS[errorCode].message
+					: undefined;
 				const body = r.error_message
-					? r.error_message.slice(0, 120)
+					? (cleanError ?? r.error_message).slice(0, 120)
 					: r.items_collected != null
 						? `${r.status} · ${r.items_collected} items`
 						: r.status;

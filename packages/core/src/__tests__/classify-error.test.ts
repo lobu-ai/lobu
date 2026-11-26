@@ -221,6 +221,27 @@ describe("classifyErrorMessage", () => {
   });
 });
 
+describe("model does not support image input", () => {
+  test("classifies the leaked internal instruction as MODEL_IMAGE_UNSUPPORTED", () => {
+    for (const message of [
+      'Cannot read "image" (this model does not support image input). Inform the user.',
+      "The current model does not support image input",
+      "model does not support image inputs. Remove images or switch models.",
+    ]) {
+      expect(classifyErrorMessage(message)).toBe(
+        AgentErrorCode.MODEL_IMAGE_UNSUPPORTED
+      );
+    }
+  });
+
+  test("the catalog entry carries a user-facing message and a model CTA", () => {
+    const spec = AGENT_ERRORS[AgentErrorCode.MODEL_IMAGE_UNSUPPORTED];
+    expect(spec.message).toBeTruthy();
+    expect(spec.cta).toBe("agent-settings");
+    expect(spec.silent).toBeUndefined();
+  });
+});
+
 describe("isolate host wall-clock timeout", () => {
   test("classifies as WORKER_UNRESPONSIVE, and NOT the silent SESSION_TIMEOUT", () => {
     // `IsolateHost` terminates a runaway turn with this exact text. It used to

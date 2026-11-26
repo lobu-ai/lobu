@@ -852,6 +852,7 @@ async function getAutomationImpl(
       }),
       last_scheduling_error: automationHealth.last_scheduling_error,
       last_run_outcome: automationHealth.last_run_outcome,
+      automation_run_error_code: automationHealth.last_run_error_code,
     };
   }
 

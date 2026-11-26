@@ -85,6 +85,24 @@ describe("computeAutomationHealth", () => {
 		expect(result.last_run_outcome).toBeNull();
 	});
 
+	it("names a coded run failure by its catalog text, keeping the raw error", () => {
+		const raw =
+			'Cannot read "image" (this model does not support image input). Inform the user.';
+		const result = computeAutomationHealth(
+			{
+				status: "active",
+				nextRunAt: new Date(NOW + 60_000).toISOString(),
+				latestRunStatus: "failed",
+				latestRunError: raw,
+			},
+			NOW,
+		);
+		expect(result.last_run_error_code).toBe("MODEL_IMAGE_UNSUPPORTED");
+		expect(result.last_scheduling_error).toBe(raw);
+		expect(result.reasons.join(" ")).toContain("can't read images");
+		expect(result.reasons.join(" ")).not.toContain("Inform the user");
+	});
+
 	it("labels the degraded reason with the stamped run outcome", () => {
 		const result = computeAutomationHealth(
 			{
