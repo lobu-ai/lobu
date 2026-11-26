@@ -486,8 +486,6 @@ function beforeRowid(input: Record<string, unknown>): number | null {
 type ShellOutput = {
   exit_code?: number;
   timed_out?: boolean;
-  exit_signal?: string;
-  process_error?: string;
   stdout?: string;
   stderr?: string;
 };
@@ -504,19 +502,6 @@ type SqlResult =
   | { receipt: Record<string, unknown> }
   | { error: string; code?: FailureCode };
 
-/**
- * The typed cause of a failed shell run, read off its exit structure the way
- * the shell operation classifies its own run: a command that ran and exited
- * non-zero was refused by its target, one that ran out of its budget timed
- * out. A spawn fault or a signal death names no cause.
- */
-function shellFailureCode(shell: ShellOutput | undefined): FailureCode {
-  if (!shell || typeof shell !== 'object') return undefined;
-  if (shell.timed_out === true) return 'UPSTREAM_TIMEOUT';
-  if (shell.process_error || shell.exit_signal) return undefined;
-  return typeof shell.exit_code === 'number' && shell.exit_code !== 0 ? 'ACTION_FAILED' : undefined;
-}
-
 async function runShell(
   ctx: ActionContext,
   connectionId: number,
@@ -528,28 +513,26 @@ async function runShell(
   const operations = ctx.operations;
   if (!operations)
     return { kind: 'error', error: 'Connector operation delegation is unavailable.' };
-  const receipt = (await operations.execute({
+  const receipt = await operations.execute({
     connection_id: connectionId,
     operation_key: 'run',
     idempotency_key: idempotencyKey,
     input: { command, stdin, timeout_ms: timeoutMs },
-  })) as Record<string, unknown>;
-  if (typeof receipt.error === 'string') return { kind: 'error', error: receipt.error };
+  });
+  if ('error' in receipt) return { kind: 'error', error: receipt.error };
   const status = receipt.status;
   if (status === 'pending_approval' || status === 'in_progress')
-    return { kind: 'receipt', receipt };
+    return { kind: 'receipt', receipt: { ...receipt } };
   if (status !== 'completed') {
-    // The shell run timed out waiting, or failed with its output attached.
-    const code =
-      status === 'timeout' ? 'UPSTREAM_TIMEOUT' : shellFailureCode(receipt.output as ShellOutput | undefined);
+    // A failed shell run carries the code it recorded; a wait that ended
+    // before the run did records none, so its status is the cause.
+    const code = status === 'timeout' ? 'UPSTREAM_TIMEOUT' : status === 'failed' ? receipt.error_code : undefined;
     return { kind: 'error', error: JSON.stringify(receipt), ...(code ? { code } : {}) };
   }
   const shell = receipt.output as ShellOutput | undefined;
-  const shellCode = shellFailureCode(shell);
   if (!shell || shell.exit_code !== 0 || shell.timed_out)
     return {
       kind: 'error',
-      ...(shellCode ? { code: shellCode } : {}),
       error: JSON.stringify({
         run_id: receipt.run_id,
         exit_code: shell?.exit_code,

@@ -17,7 +17,7 @@ import {
 } from "../setup/test-fixtures";
 import { handleExecute } from "../../tools/admin/manage_operations/handlers/execute";
 import type { Env } from "../../index";
-import { runShellBuiltin } from "../../../../connector-worker/src/daemon/builtins/os-shell";
+import { executeDaemonBuiltin } from "../../../../connector-worker/src/daemon/builtins";
 import { post } from "../setup/test-helpers";
 import { OPERATION_TARGET_NOT_FOUND_ERROR } from "../../tools/admin/helpers/connection-helpers";
 
@@ -27,6 +27,17 @@ const shellManifest = DEVICE_MANIFESTS_BY_PLATFORM.headless.find(
   (entry) => entry.key === "os.shell"
 );
 if (!shellManifest) throw new Error("Shipped shell manifest missing");
+/** The completion a device daemon posts for a built-in shell run. */
+function completionBody(shell: Awaited<ReturnType<typeof executeDaemonBuiltin>>) {
+  return shell.ok
+    ? { status: "success", action_output: shell.output }
+    : {
+        status: "failed",
+        error_message: shell.error,
+        ...(shell.output ? { action_output: shell.output } : {}),
+        ...(shell.errorCode ? { error_code: shell.errorCode } : {}),
+      };
+}
 async function fixture() {
   const { org, user, ctx } = await seedOwnerContext();
   await sql`UPDATE organization SET metadata = ${sql.json({ personal_org_for_user_id: user.id })} WHERE id=${org.id}`;
@@ -232,7 +243,10 @@ describe("connector delegation through the public operation lifecycle", () => {
       error: expect.stringContaining("ctx.browser"),
     });
   });
-  it("runs a real isolate parent through device claim, supervised shell and completion", async () => {
+  it.each([
+    { outcome: "completion", command: "printf delegation-proof" },
+    { outcome: "its recorded failure code", command: "printf partial; exit 3" },
+  ])("runs a real isolate parent through device claim, supervised shell and $outcome", async ({ command }) => {
     const { params, org, agent, connection, ctx, devices } = await fixture();
     await upsertEntityApprovalPolicy(org.id, {
       resourceClass: "connector_action",
@@ -248,7 +262,7 @@ describe("connector delegation through the public operation lifecycle", () => {
         action: "execute",
         connection_id: connection.id,
         operation_key: "run",
-        input: { ...params.request, background: false },
+        input: { ...params.request, input: { ...params.request.input, command }, background: false },
       },
       { ...ctx, agentId: agent.agentId },
       {} as Env
@@ -275,24 +289,78 @@ describe("connector delegation through the public operation lifecycle", () => {
     expect(wrong.run_id).not.toBe(childId);
     const claim = await (await poll(devices[0].worker)).json();
     expect(claim.run_id).toBe(childId);
-    const output = await runShellBuiltin(claim.action_input);
-    expect(output.stdout).toBe("delegation-proof");
+    const shell = await executeDaemonBuiltin({
+      connectorKey: "os.shell",
+      actionKey: "run",
+      input: claim.action_input,
+    });
     const completed = await post("/api/workers/complete-action", {
-      body: {
-        run_id: childId,
-        worker_id: devices[0].worker,
-        status: "success",
-        action_output: output,
-      },
+      body: { run_id: childId, worker_id: devices[0].worker, ...completionBody(shell) },
     });
     expect(completed.status).toBe(200);
-    expect(await resultPromise).toMatchObject({
-      status: "completed",
-      output: {
+    const result = await resultPromise;
+    if (shell.ok) {
+      expect(shell.output.stdout).toBe("delegation-proof");
+      expect(result).toMatchObject({
         status: "completed",
-        run_id: childId,
-        output: { stdout: "delegation-proof", exit_code: 0 },
+        output: {
+          status: "completed",
+          run_id: childId,
+          output: { stdout: "delegation-proof", exit_code: 0 },
+        },
+      });
+      expect((result as { output: object }).output).not.toHaveProperty("error_code");
+    } else {
+      expect(shell.errorCode).toBe("ACTION_FAILED");
+      expect(result).toMatchObject({
+        status: "completed",
+        output: { status: "failed", run_id: childId, error_code: "ACTION_FAILED" },
+      });
+    }
+  });
+  it("hands a fleet replay of a failed child its recorded failure code", async () => {
+    const { params, org, devices } = await fixture();
+    await upsertEntityApprovalPolicy(org.id, {
+      resourceClass: "connector_action",
+      connectorKey: "os.shell",
+      effects: { execute: "auto" },
+    });
+    const body = {
+      parent_run_id: params.parentRunId,
+      worker_id: params.claimedBy,
+      request: { ...params.request, input: { command: "exit 3", timeout_ms: 1000 } },
+    };
+    const queued = await post("/api/workers/execute-operation", { body });
+    expect(queued.status).toBe(200);
+    const receipt = await queued.json();
+    expect(receipt).toMatchObject({ status: "in_progress" });
+    expect(receipt).not.toHaveProperty("error_code");
+    const claim = await (await post("/api/workers/poll", {
+      body: {
+        worker_id: devices[0].worker,
+        platform: "headless",
+        app_version: "9.9.0",
+        capabilities: { "os.shell": true },
+        connector_manifests: [shellManifest],
+        capacity_available: 1,
       },
+    })).json();
+    expect(claim.run_id).toBe(receipt.run_id);
+    const shell = await executeDaemonBuiltin({
+      connectorKey: "os.shell",
+      actionKey: "run",
+      input: claim.action_input,
+    });
+    expect(shell).toMatchObject({ ok: false, errorCode: "ACTION_FAILED" });
+    expect((await post("/api/workers/complete-action", {
+      body: { run_id: receipt.run_id, worker_id: devices[0].worker, ...completionBody(shell) },
+    })).status).toBe(200);
+    const replay = await post("/api/workers/execute-operation", { body });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      status: "failed",
+      run_id: receipt.run_id,
+      error_code: "ACTION_FAILED",
     });
   });
   it("cancels a foreground child wait through the existing terminalization path", async () => {
