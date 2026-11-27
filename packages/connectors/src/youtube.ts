@@ -25,6 +25,7 @@ import {
   calculateEngagementScore,
   createHttpClient,
   type EventEnvelope,
+  HttpStatusError,
   paginateByCursor,
   sleep,
   type SyncContext,
@@ -609,6 +610,9 @@ export default class YouTubeConnector extends ConnectorRuntime {
   // budget. This is the backstop for an API that keeps handing back a cursor.
   private readonly MAX_PAGES = 200;
   private readonly http = createHttpClient({ errorPrefix: 'YouTube API' });
+  // Watch pages and caption tracks are best-effort: a failure yields no
+  // transcript, so they are never retried.
+  private readonly pageHttp = createHttpClient({ errorPrefix: 'YouTube', retry: false });
 
   // -------------------------------------------------------------------------
   // sync
@@ -677,6 +681,9 @@ export default class YouTubeConnector extends ConnectorRuntime {
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
     } catch (error) {
+      // An upstream HTTP failure reaches the runtime with its status, which
+      // classifies it; only this connector's own refusals become a result.
+      if (error instanceof HttpStatusError) throw error;
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -764,11 +771,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
         });
         if (cursor) params.set('pageToken', cursor);
         const response = await this.apiGet(`${this.BASE_URL}/playlists?${params.toString()}`, auth);
-        if (!response.ok) {
-          throw new Error(
-            `YouTube Playlists API error (${response.status}): ${await response.text()}`
-          );
-        }
         const data = (await response.json()) as YouTubePlaylistResponse;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
@@ -849,11 +851,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
         });
         if (cursor) params.set('pageToken', cursor);
         const response = await this.apiGet(`${this.BASE_URL}/playlists?${params.toString()}`, auth);
-        if (!response.ok) {
-          throw new Error(
-            `YouTube Playlists API error (${response.status}): ${await response.text()}`
-          );
-        }
         const data = (await response.json()) as YouTubePlaylistResponse;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
@@ -920,11 +917,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
           `${this.BASE_URL}/subscriptions?${params.toString()}`,
           auth
         );
-        if (!response.ok) {
-          throw new Error(
-            `YouTube Subscriptions API error (${response.status}): ${await response.text()}`
-          );
-        }
         const data = (await response.json()) as YouTubeSubscriptionResponse;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
@@ -997,26 +989,30 @@ export default class YouTubeConnector extends ConnectorRuntime {
     // One page fetch, including the single restart-from-page-one recovery.
     const fetchSearchPage = async (cursor: string | null): Promise<YouTubeSearchResponse> => {
       const pageSize = Math.min(50, maxResults - totalCollected);
-      const response = await this.apiGet(
-        this.buildSearchUrl(searchQuery, pageSize, cursor ?? undefined),
-        auth
-      );
+      const url = this.buildSearchUrl(searchQuery, pageSize, cursor ?? undefined);
+      // `raw`, not `request`: a page-token rejection is told apart by the FULL
+      // error body, which the client's own HttpStatusError truncates.
+      const response = await this.apiRaw(url, auth);
       if (response.ok) return (await response.json()) as YouTubeSearchResponse;
 
       // Read the body exactly once — it drives both the rejection test and the
-      // error message, and a Response body cannot be consumed twice.
+      // error, and a Response body cannot be consumed twice.
       const body = await response.text();
       if (!cursor || !isPageTokenRejection(response.status, body)) {
-        throw new Error(`YouTube Search API error (${response.status}): ${body}`);
+        throw new HttpStatusError({
+          prefix: 'YouTube API',
+          method: 'GET',
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          bodyText: body,
+        });
       }
 
       // Stale cursor: remember it so pagination can never follow it again, then
       // restart from page one so the feed recovers instead of failing forever.
       rejectedPageTokens.add(cursor);
       const restart = await this.apiGet(this.buildSearchUrl(searchQuery, pageSize), auth);
-      if (!restart.ok) {
-        throw new Error(`YouTube Search API error (${restart.status}): ${await restart.text()}`);
-      }
       return (await restart.json()) as YouTubeSearchResponse;
     };
 
@@ -1171,11 +1167,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
       mine: 'true',
     });
     const response = await this.apiGet(`${this.BASE_URL}/channels?${params.toString()}`, auth);
-    if (!response.ok) {
-      throw new Error(
-        `YouTube Channels API error (${response.status}): ${await response.text()}`
-      );
-    }
     const data = (await response.json()) as YouTubeChannelResponse;
     const likesPlaylistId = data.items?.[0]?.contentDetails?.relatedPlaylists?.likes;
     if (!likesPlaylistId) {
@@ -1209,11 +1200,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
           `${this.BASE_URL}/playlistItems?${listParams.toString()}`,
           params.auth
         );
-        if (!response.ok) {
-          throw new Error(
-            `YouTube PlaylistItems API error (${response.status}): ${await response.text()}`
-          );
-        }
         const data = (await response.json()) as YouTubePlaylistItemResponse;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
@@ -1389,11 +1375,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
           `${this.BASE_URL}/playlistItems?${listParams.toString()}`,
           params.auth
         );
-        if (!response.ok) {
-          throw new Error(
-            `YouTube PlaylistItems API error (${response.status}): ${await response.text()}`
-          );
-        }
         const data = (await response.json()) as YouTubePlaylistItemResponse;
         return { items: data.items ?? [], nextCursor: data.nextPageToken };
       },
@@ -1427,11 +1408,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
   ): Promise<VideoSummary[]> {
     const searchUrl = this.buildSearchUrl(query, Math.min(maxResults, 50));
     const searchResponse = await this.apiGet(searchUrl, auth);
-    if (!searchResponse.ok) {
-      throw new Error(
-        `YouTube Search API error (${searchResponse.status}): ${await searchResponse.text()}`
-      );
-    }
     const searchData = (await searchResponse.json()) as YouTubeSearchResponse;
     const videoIds = (searchData.items ?? [])
       .map((item) => item.id.videoId)
@@ -1485,9 +1461,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
       });
 
       const response = await this.apiGet(`${this.BASE_URL}/videos?${params.toString()}`, auth);
-      if (!response.ok) {
-        throw new Error(`YouTube Videos API error (${response.status}): ${await response.text()}`);
-      }
 
       const data = (await response.json()) as YouTubeVideoResponse;
       results.push(...data.items);
@@ -1518,16 +1491,18 @@ export default class YouTubeConnector extends ConnectorRuntime {
           params.set('pageToken', cursor);
         }
 
-        const response = await this.apiGet(
-          `${this.BASE_URL}/commentThreads?${params.toString()}`,
-          auth
-        );
-
-        if (!response.ok) {
-          if (response.status === 403) return { items: [], nextCursor: null };
-          throw new Error(
-            `YouTube Comments API error (${response.status}): ${await response.text()}`
+        let response: Response;
+        try {
+          response = await this.apiGet(
+            `${this.BASE_URL}/commentThreads?${params.toString()}`,
+            auth
           );
+        } catch (error) {
+          // Comments disabled on the video: no comments, not a failed sync.
+          if (error instanceof HttpStatusError && error.status === 403) {
+            return { items: [], nextCursor: null };
+          }
+          throw error;
         }
 
         const data = (await response.json()) as YouTubeCommentThreadResponse;
@@ -1550,7 +1525,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   private async fetchTranscript(videoId: string): Promise<string | null> {
     try {
       const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-      const response = await fetch(watchUrl, {
+      const response = await this.pageHttp.raw(watchUrl, {
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -1569,7 +1544,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
       );
       const track = englishTrack ?? captionTracks[0];
 
-      const captionResponse = await fetch(track.baseUrl);
+      const captionResponse = await this.pageHttp.raw(track.baseUrl);
       if (!captionResponse.ok) return null;
 
       const captionXml = await captionResponse.text();
@@ -1649,15 +1624,20 @@ export default class YouTubeConnector extends ConnectorRuntime {
     return textSegments.join(' ');
   }
 
-  private async apiGet(url: string, auth: YouTubeAuth): Promise<Response> {
-    const parsedUrl = new URL(url);
-    if (auth.apiKey && !auth.accessToken) {
-      parsedUrl.searchParams.set('key', auth.apiKey);
-    }
-    const headers: Record<string, string> = {};
-    if (auth.accessToken) {
-      headers.Authorization = `Bearer ${auth.accessToken}`;
-    }
-    return this.http.raw(parsedUrl.toString(), { headers });
+  /** A YouTube Data API GET; a non-2xx throws HttpStatusError. */
+  private apiGet(url: string, auth: YouTubeAuth): Promise<Response> {
+    return this.http.request(url, { headers: this.authHeaders(auth) });
+  }
+
+  /** As {@link apiGet}, but a non-transient non-2xx comes back to the caller. */
+  private apiRaw(url: string, auth: YouTubeAuth): Promise<Response> {
+    return this.http.raw(url, { headers: this.authHeaders(auth) });
+  }
+
+  // The API key travels in a header, never the query string: an error names
+  // the request URL, and that message is stored and logged.
+  private authHeaders(auth: YouTubeAuth): Record<string, string> {
+    if (auth.accessToken) return { Authorization: `Bearer ${auth.accessToken}` };
+    return auth.apiKey ? { 'X-Goog-Api-Key': auth.apiKey } : {};
   }
 }

@@ -18,11 +18,13 @@ import {
   assertPositiveReadLimit,
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
   type EventEnvelope,
   type FeedReadContext,
   type FeedReadResult,
   type SyncContext,
   type SyncResult,
+  HttpStatusError,
   validatePublicUrl,
 } from '@lobu/connector-sdk';
 
@@ -123,6 +125,9 @@ export default class RSSConnector extends ConnectorRuntime {
   private readonly MAX_DEDUP_IDS = 500;
   private readonly FETCH_TIMEOUT_MS = 15000;
   private readonly USER_AGENT = 'Lobu-RSS-Connector/1.0.0';
+  // A feed fetch is bounded by FETCH_TIMEOUT_MS and a failure is recorded per
+  // feed, so it is never retried.
+  private readonly http = createHttpClient({ errorPrefix: 'RSS', retry: false });
 
   // -------------------------------------------------------------------------
   // sync
@@ -316,7 +321,13 @@ export default class RSSConnector extends ConnectorRuntime {
       } catch (err) {
         fetchErrors.push({
           url: feedUrl,
-          error: err instanceof Error ? err.message : String(err),
+          // The URL is recorded beside the error, so a status needs no echo of it.
+          error:
+            err instanceof HttpStatusError
+              ? `HTTP ${err.status}: ${err.statusText}`
+              : err instanceof Error
+                ? err.message
+                : String(err),
         });
       }
     }
@@ -344,16 +355,13 @@ export default class RSSConnector extends ConnectorRuntime {
     const timeoutId = setTimeout(() => controller.abort(), this.FETCH_TIMEOUT_MS);
 
     try {
-      const response = await fetch(feedUrl, {
+      const response = await this.http.request(feedUrl, {
         signal: controller.signal,
         headers: {
           'User-Agent': this.USER_AGENT,
           Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
         },
       });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
       const xml = await response.text();
       return this.parseXml(xml, feedUrl, maxItems);
     } finally {

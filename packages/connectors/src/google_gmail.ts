@@ -16,6 +16,7 @@ import {
   createHttpClient,
   type EventEnvelope,
   type HttpClient,
+  HttpStatusError,
   type FeedReadContext,
   type FeedReadResult,
   type RuntimeConnectorDefinition,
@@ -551,17 +552,22 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         maxResults: String(Math.min(100, maxResults - inspected)),
       });
       if (pageToken) params.set('pageToken', pageToken);
-      const listResponse = await http.raw(`${this.BASE_URL}/threads?${params.toString()}`);
-      if (!listResponse.ok) {
-        const detail = await listResponse.text();
+      let listResponse: Response;
+      try {
+        listResponse = await http.request(`${this.BASE_URL}/threads?${params.toString()}`);
+      } catch (error) {
         // Retry a stored cursor once on 400/404. Auth, quota and server errors
         // must still fail the run without restarting pagination.
-        if (staleCursorRecoverable && (listResponse.status === 400 || listResponse.status === 404)) {
+        if (
+          staleCursorRecoverable &&
+          error instanceof HttpStatusError &&
+          (error.status === 400 || error.status === 404)
+        ) {
           staleCursorRecoverable = false;
           pageToken = undefined;
           continue;
         }
-        throw new Error(`Gmail threads.list error (${listResponse.status}): ${detail}`);
+        throw error;
       }
       staleCursorRecoverable = false;
       const listData = (await listResponse.json()) as GmailThreadListResponse;
@@ -690,6 +696,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
           return await executeGoogleAction(GMAIL, ctx, http);
       }
     } catch (error) {
+      // An upstream HTTP failure reaches the runtime with its status, which
+      // classifies it; only this connector's own refusals become a result.
+      if (error instanceof HttpStatusError) throw error;
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -756,9 +765,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       for (const threadId of threadIds) {
         const params = new URLSearchParams({ format: 'metadata' });
         for (const header of ['From', 'To', 'Cc', 'List-Id', 'Precedence']) params.append('metadataHeaders', header);
-        const response = await http.raw(`${this.BASE_URL}/threads/${threadId}?${params}`);
-        if (!response.ok) throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
-        const thread = await response.json() as GmailThreadGetResponse;
+        const thread = await http.json<GmailThreadGetResponse>(`${this.BASE_URL}/threads/${threadId}?${params}`);
         if (!thread.messages?.length) throw new Error('Gmail returned a thread without messages');
         const messages = [...thread.messages].sort((a, b) => Number(a.internalDate) - Number(b.internalDate));
         if (this.resolvePersonAttribution(messages, true).personRelevant) relevant.add(threadId);
@@ -790,14 +797,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const params = new URLSearchParams({ maxResults: String(Math.min(100, limit)) });
     if (q) params.set('q', q);
     if (pageToken) params.set('pageToken', pageToken);
-    const res = await http.raw(`${this.BASE_URL}/messages?${params.toString()}`);
-    if (!res.ok) {
-      throw new Error(`Gmail messages.list error (${res.status}): ${await res.text()}`);
-    }
-    const data = (await res.json()) as {
+    const data = await http.json<{
       messages?: Array<{ id: string; threadId: string }>;
       nextPageToken?: string;
-    };
+    }>(`${this.BASE_URL}/messages?${params.toString()}`);
     return { messages: data.messages ?? [], nextPageToken: data.nextPageToken };
   }
 
@@ -808,9 +811,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const rows: Record<string, unknown>[] = [];
     for (const m of ids) {
       const url = `${this.BASE_URL}/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
-      const res = await http.raw(url);
-      if (!res.ok) throw new Error(`Gmail messages.get error (${res.status}): ${await res.text()}`);
-      const msg = (await res.json()) as GmailMessage;
+      const msg = await http.json<GmailMessage>(url);
       if (!msg.id || !msg.threadId) throw new Error('Gmail returned malformed message identity.');
       const rawFrom = this.getHeader(msg, 'From') || 'Unknown';
       const { name, email } = this.parseFromHeader(rawFrom);
@@ -857,18 +858,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const encoded = this.base64UrlEncode(rawMessage);
 
     const sendUrl = `${this.BASE_URL}/messages/send`;
-    const response = await http.raw(sendUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw: encoded }),
+    const result = await http.post<{ id: string; threadId: string; labelIds: string[] }>(sendUrl, {
+      raw: encoded,
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return { success: false, error: `Gmail send error (${response.status}): ${errText}` };
-    }
-
-    const result = (await response.json()) as { id: string; threadId: string; labelIds: string[] };
 
     return {
       success: true,
@@ -904,21 +896,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const draftBody: { message: { raw: string; threadId?: string } } = { message: { raw } };
     if (threadId) draftBody.message.threadId = threadId;
 
-    const response = await http.raw(`${this.BASE_URL}/drafts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(draftBody),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return { success: false, error: `Gmail draft error (${response.status}): ${errText}` };
-    }
-
-    const result = (await response.json()) as {
+    const result = await http.post<{
       id: string;
       message: { id: string; threadId: string };
-    };
+    }>(`${this.BASE_URL}/drafts`, draftBody);
     return {
       success: true,
       output: {
@@ -943,17 +924,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     }
 
     // Fetch the thread to get the last message's headers
-    const threadRes = await http.raw(
+    const thread = await http.json<{ messages: GmailMessage[] }>(
       `${this.BASE_URL}/threads/${threadId}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Message-ID`
     );
-    if (!threadRes.ok) {
-      return {
-        success: false,
-        error: `Failed to fetch thread (${threadRes.status}): ${await threadRes.text()}`,
-      };
-    }
-
-    const thread = (await threadRes.json()) as { messages: GmailMessage[] };
     const lastMsg = thread.messages[thread.messages.length - 1];
     const subject = this.getHeader(lastMsg, 'Subject') || '';
     const from = this.getHeader(lastMsg, 'From') || '';
@@ -971,18 +944,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 
     const raw = this.base64UrlEncode(messageParts.join('\r\n'));
 
-    const response = await http.raw(`${this.BASE_URL}/messages/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw, threadId }),
+    const result = await http.post<{ id: string; threadId: string }>(`${this.BASE_URL}/messages/send`, {
+      raw,
+      threadId,
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      return { success: false, error: `Gmail reply error (${response.status}): ${errText}` };
-    }
-
-    const result = (await response.json()) as { id: string; threadId: string };
     return {
       success: true,
       output: {
@@ -1009,16 +974,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       maxResults: String(maxResults),
     });
     const listUrl = `${this.BASE_URL}/messages?${params.toString()}`;
-    const listResponse = await http.raw(listUrl);
-
-    if (!listResponse.ok) {
-      const errText = await listResponse.text();
-      return { success: false, error: `Gmail search error (${listResponse.status}): ${errText}` };
-    }
-
-    const listData = (await listResponse.json()) as {
+    const listData = await http.json<{
       messages?: Array<{ id: string; threadId: string }>;
-    };
+    }>(listUrl);
 
     if (!listData.messages || listData.messages.length === 0) {
       return { success: true, output: { messages: [] } };
@@ -1098,10 +1056,13 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   /** Keep each HTTP response bounded by one message, even for long threads. */
   private async loadThread(http: HttpClient, threadId: string): Promise<GmailThreadGetResponse | null> {
     const params = new URLSearchParams({ format: 'minimal', fields: 'id,historyId,messages(id)' });
-    const response = await http.raw(`${this.BASE_URL}/threads/${encodeURIComponent(threadId)}?${params}`);
-    if (response.status === 404) return null;
-    if (!response.ok) throw new Error(`Gmail threads.get error (${response.status}): ${await response.text()}`);
-    const index = await response.json() as { id: string; historyId: string; messages?: Array<{ id: string }> };
+    let index: { id: string; historyId: string; messages?: Array<{ id: string }> };
+    try {
+      index = await http.json(`${this.BASE_URL}/threads/${encodeURIComponent(threadId)}?${params}`);
+    } catch (error) {
+      if (error instanceof HttpStatusError && error.status === 404) return null;
+      throw error;
+    }
     if (index.id !== threadId || !index.messages?.length) throw new Error('Gmail returned a thread without valid identity or messages');
     const ids = index.messages.map(message => message.id);
     if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) {
@@ -1111,9 +1072,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     // Bound provider concurrency without serializing dozens of independent reads.
     for (let start = 0; start < ids.length; start += 4) {
       messages.push(...await Promise.all(ids.slice(start, start + 4).map(async id => {
-        const result = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(id)}?format=full`);
-        if (!result.ok) throw new Error(`Gmail messages.get error (${result.status}): ${await result.text()}`);
-        const message = await result.json() as GmailMessage;
+        const message = await http.json<GmailMessage>(`${this.BASE_URL}/messages/${encodeURIComponent(id)}?format=full`);
         if (message.id !== id || message.threadId !== threadId || !message.payload) {
           throw new Error('Gmail returned malformed message identity or payload');
         }
@@ -1371,17 +1330,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     if (!messageId) return { success: false, error: 'message_id is required.' };
     if (!attachmentId) return { success: false, error: 'attachment_id is required.' };
 
-    const response = await http.raw(
+    const envelope = await http.json<{ data?: string; size?: number }>(
       `${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`
     );
-    if (!response.ok) {
-      return {
-        success: false,
-        error: `Gmail attachment error (${response.status}): ${await response.text()}`,
-      };
-    }
-
-    const envelope = (await response.json()) as { data?: string; size?: number };
     const filename = (input.filename as string) || attachmentId;
     const mimeType = (input.mime_type as string) || 'application/octet-stream';
 
@@ -1462,9 +1413,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     } else if (payload.body?.attachmentId) {
       // Gmail may externalize the body itself, even under format=full. A
       // failed fetch must not silently replace that body with its alternative.
-      const response = await http.raw(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(payload.body.attachmentId)}`);
-      if (!response.ok) throw new Error(`Gmail message body error (${response.status}): ${await response.text()}`);
-      const body = (await response.json()) as { data?: string };
+      const body = await http.json<{ data?: string }>(`${this.BASE_URL}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(payload.body.attachmentId)}`);
       if (typeof body.data !== 'string') throw new Error('Gmail returned a message body without data');
       text = this.base64UrlDecode(body.data, payload, messageId);
     }

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
 import { classifyToolError, isRetryable } from '@lobu/core';
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, fakeClient } from './connector-sdk.mock';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
 let Gmail: typeof import('../google_gmail').default;
@@ -27,7 +27,7 @@ describe('live source windows', () => {
   ])('Gmail preserves configured window scope %j', async (config, scope) => {
     let query = '';
     const c = new Gmail();
-    Object.assign(c, { createClient: () => ({ raw: async (url: string) => {
+    Object.assign(c, { createClient: () => fakeClient({ raw: async (url: string) => {
       query = new URL(url).searchParams.get('q') ?? '';
       return Response.json({ messages: [] });
     } }) });
@@ -38,7 +38,7 @@ describe('live source windows', () => {
   test('Gmail person filtering inspects thread metadata and preserves an empty page cursor', async () => {
     const threadRequests: string[] = [];
     const c = new Gmail();
-    Object.assign(c, { createClient: () => ({ raw: async (url: string) => {
+    Object.assign(c, { createClient: () => fakeClient({ raw: async (url: string) => {
       const u = new URL(url);
       if (u.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'm1', threadId: 't1' }], nextPageToken: 'more' });
       const message = { id: 'm1', threadId: 't1', internalDate: String(Date.parse(window.start)), payload: { headers: [{ name: 'From', value: 'Alice <alice@example.test>' }] } };
@@ -58,7 +58,7 @@ describe('live source windows', () => {
 
   test('Drive rejects a file without its window timestamp', async () => {
     const c = new Drive();
-    Object.assign(c, { client: () => ({ raw: async () => Response.json({ files: [{ id: 'file-1' }] }) }) });
+    Object.assign(c, { client: () => fakeClient({ raw: async () => Response.json({ files: [{ id: 'file-1' }] }) }) });
     await expect(c.read({ feedKey: 'files', config: {}, credentials, window })).rejects.toThrow(/modified|malformed/i);
   });
 
@@ -87,7 +87,7 @@ describe('live source windows', () => {
   test('Gmail uses internal arrival time, exact half-open bounds, and retains empty-page continuation', async () => {
     const requests: URL[] = [];
     const c = new Gmail();
-    Object.assign(c, { createClient: () => ({ raw: async (url: string) => {
+    Object.assign(c, { createClient: () => fakeClient({ raw: async (url: string) => {
       const u = new URL(url); requests.push(u);
       if (u.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'start' }, { id: 'end' }], nextPageToken: 'next-page' });
       const id = u.pathname.split('/').pop();
@@ -104,7 +104,7 @@ describe('live source windows', () => {
 
   test('Gmail fails the page when one message cannot be fetched', async () => {
     const c = new Gmail();
-    Object.assign(c, { createClient: () => ({ raw: async (url: string) =>
+    Object.assign(c, { createClient: () => fakeClient({ raw: async (url: string) =>
       new URL(url).pathname.endsWith('/messages')
         ? Response.json({ messages: [{ id: 'unavailable' }] })
         : new Response('provider unavailable', { status: 503 }),
@@ -115,7 +115,7 @@ describe('live source windows', () => {
   test('Drive combines configured scope, requested limit and fixed modified-time bounds', async () => {
     let request: URL | undefined;
     const c = new Drive();
-    Object.assign(c, { client: () => ({ raw: async (url: string) => {
+    Object.assign(c, { client: () => fakeClient({ raw: async (url: string) => {
       request = new URL(url); return Response.json({ files: [], nextPageToken: 'next' });
     } }) });
     const result = await c.read({ feedKey: 'files', config: { query: "name contains 'report'" }, credentials, window, limit: 2 });
@@ -129,7 +129,7 @@ describe('live source windows', () => {
 
   test('Drive rejects incomplete provider search results', async () => {
     const c = new Drive();
-    Object.assign(c, { client: () => ({ raw: async () => Response.json({ files: [], incompleteSearch: true }) }) });
+    Object.assign(c, { client: () => fakeClient({ raw: async () => Response.json({ files: [], incompleteSearch: true }) }) });
     await expect(c.read({ feedKey: 'files', config: {}, credentials, window })).rejects.toThrow(/incomplete/i);
   });
 

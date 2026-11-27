@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { connectorSdkMock } from "./connector-sdk.mock";
 
 mock.module("@lobu/connector-sdk", connectorSdkMock);
@@ -9,6 +9,11 @@ let parseYahooChartBody: typeof import("../market_quotes").parseYahooChartBody;
 let parseYahooHistoryBody: typeof import("../market_quotes").parseYahooHistoryBody;
 let quoteMany: typeof import("../market_quotes").quoteMany;
 let toProviderSymbol: typeof import("../market_quotes").toProviderSymbol;
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 beforeAll(async () => {
   const mod = await import("../market_quotes");
@@ -94,7 +99,7 @@ describe("market quote action", () => {
     };
 
     const connector = new MarketQuotesConnector();
-    connector.fetchImpl = fetchImpl;
+    globalThis.fetch = fetchImpl as typeof fetch;
     const result = await connector.execute({
       actionKey: "quote",
       input: {
@@ -208,7 +213,7 @@ describe("Yahoo history parsing", () => {
 describe("market history action", () => {
   const run = (input: Record<string, unknown>, fetchImpl?: typeof fetch) => {
     const connector = new MarketQuotesConnector();
-    if (fetchImpl) connector.fetchImpl = fetchImpl;
+    if (fetchImpl) globalThis.fetch = fetchImpl;
     return connector.execute({
       actionKey: "history",
       input,

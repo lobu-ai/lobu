@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, mock, test } from 'bun:test';
 // Both sync loops run through the cursor paginator; the shared mock provides a
 // faithful generator rather than a throwing stub, so these tests exercise the
 // real paging semantics.
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, httpClientFromRaw } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
@@ -52,8 +52,7 @@ function fakeDrive(routes: Route[]) {
         return 'files.get';
       });
     },
-    client: {
-      raw: async (raw: string) => {
+    client: httpClientFromRaw(async (raw: string) => {
         urls.push(raw);
         const url = new URL(raw);
         for (const route of routes) {
@@ -83,8 +82,7 @@ function fakeDrive(routes: Route[]) {
           }
         }
         throw new Error(`unrouted Drive request: ${raw}`);
-      },
-    },
+      }),
   };
 }
 
@@ -357,7 +355,7 @@ describe('GoogleDriveConnector page-token recovery', () => {
         credentials: { accessToken: 'tok' },
         checkpoint: { page_token: 'T1' },
       })
-    ).rejects.toThrow(/changes.list error \(403\)/);
+    ).rejects.toMatchObject({ name: 'HttpStatusError', status: 403 });
 
     expect(drive.trace).not.toContain('files.list');
   });
@@ -374,7 +372,7 @@ describe('GoogleDriveConnector page-token recovery', () => {
         credentials: { accessToken: 'tok' },
         checkpoint: { page_token: 'T1' },
       })
-    ).rejects.toThrow(/changes.list error \(401\)/);
+    ).rejects.toMatchObject({ name: 'HttpStatusError', status: 401 });
 
     expect(drive.trace).not.toContain('files.list');
   });

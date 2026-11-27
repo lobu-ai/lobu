@@ -19,13 +19,14 @@
  *    minted under a previous grant) drops both tokens and re-traverses once.
  *    Stable `origin_id`s make the replay a supersede, not a duplicate.
  */
-import type {
-  EventEnvelope,
-  FeedReadContext,
-  FeedReadResult,
-  HttpClient,
-  SyncContext,
-  SyncResult,
+import {
+  type EventEnvelope,
+  type FeedReadContext,
+  type FeedReadResult,
+  type HttpClient,
+  HttpStatusError,
+  type SyncContext,
+  type SyncResult,
 } from '@lobu/connector-sdk';
 import { buildGoogleRequest, type DiscoveryDocument, type DiscoveryMethod, findMethod } from './discovery';
 import { classifyGoogleError, type GoogleErrorCode } from './errors';
@@ -146,7 +147,10 @@ export async function syncTokenSync<F>(
       seenTokens.add(pageToken);
       params.set('pageToken', pageToken);
     }
-    const response = await http.raw(`${baseUrl}?${params.toString()}`);
+    const url = `${baseUrl}?${params.toString()}`;
+    // `raw`, not `request`: a token rejection is told apart by the FULL error
+    // body, which the client's own HttpStatusError truncates.
+    const response = await http.raw(url);
     if (!response.ok) {
       const body = await response.text();
       if (syncToken && TOKEN_REJECTIONS.includes(classifyGoogleError(response.status, body).code)) {
@@ -154,7 +158,14 @@ export async function syncTokenSync<F>(
         // genuinely missing scope fails the full traversal and propagates.
         return syncTokenSync(feed, { ...ctx, checkpoint: { scope } }, http);
       }
-      throw new Error(`${list.method.id} error (${response.status}): ${body}`);
+      throw new HttpStatusError({
+        prefix: list.method.id,
+        method: 'GET',
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        bodyText: body,
+      });
     }
 
     const data = (await response.json()) as Record<string, unknown>;
@@ -210,11 +221,7 @@ export async function listRead<F>(
   });
   if (ctx.cursor) params.set('pageToken', ctx.cursor);
   const url = `${buildGoogleRequest(list.doc, list.method, read.path(ctx.config)).url}?${params.toString()}`;
-  const response = await http.raw(url);
-  if (!response.ok) {
-    throw new Error(`${list.method.id} error (${response.status}): ${await response.text()}`);
-  }
-  const data = (await response.json()) as Record<string, unknown>;
+  const data = await http.json<Record<string, unknown>>(url);
   const rows = ((data[list.itemsKey] as Item[] | undefined) ?? [])
     .map(read.toRow)
     .filter((row): row is Record<string, unknown> => row !== null);

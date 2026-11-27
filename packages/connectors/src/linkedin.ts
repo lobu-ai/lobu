@@ -30,6 +30,7 @@ import {
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventAttributionRule,
   type EventEnvelope,
   extensionDomScrape,
@@ -2228,10 +2229,16 @@ function isLinkedInShortPostUrl(input: string | undefined): boolean {
   }
 }
 
+// Short-link resolution is best-effort: an unresolved link fails the sync
+// loudly instead, so a failure is never retried.
+const shortLinkHttp = createHttpClient({
+  errorPrefix: "LinkedIn short link",
+  retry: false,
+});
+
 /** Resolve LinkedIn's Copy-link short URL to its durable post URN URL. */
 export async function resolveLinkedInShortPostUrl(
-  input: string,
-  fetchImpl: typeof fetch = fetch
+  input: string
 ): Promise<string | null> {
   let shortUrl: URL;
   try {
@@ -2242,7 +2249,8 @@ export async function resolveLinkedInShortPostUrl(
   if (!isLinkedInShortPostUrl(shortUrl.href)) return null;
 
   try {
-    const response = await fetchImpl(shortUrl, {
+    // `raw`: the redirect this reads is a 3xx, which `request` would throw on.
+    const response = await shortLinkHttp.raw(shortUrl.href, {
       method: "HEAD",
       redirect: "manual",
       signal: AbortSignal.timeout(5_000),
@@ -2256,14 +2264,13 @@ export async function resolveLinkedInShortPostUrl(
 }
 
 export async function resolveHomeFeedPostUrls(
-  rows: HomeFeedRow[],
-  fetchImpl: typeof fetch = fetch
+  rows: HomeFeedRow[]
 ): Promise<HomeFeedRow[]> {
   return Promise.all(
     rows.map(async (row) => {
       const postUrl = row.post_url?.trim();
       if (!postUrl || normalizeLinkedInPostUrl(postUrl)) return row;
-      const resolved = await resolveLinkedInShortPostUrl(postUrl, fetchImpl);
+      const resolved = await resolveLinkedInShortPostUrl(postUrl);
       return resolved ? { ...row, post_url: resolved } : row;
     })
   );
@@ -3269,13 +3276,6 @@ export default class LinkedInConnector extends ConnectorRuntime<
   LinkedInCheckpoint,
   LinkedInConfig
 > {
-  private readonly fetchImpl: typeof fetch;
-
-  constructor(fetchImpl: typeof fetch = fetch) {
-    super();
-    this.fetchImpl = fetchImpl;
-  }
-
   readonly definition: RuntimeConnectorDefinition<
     LinkedInCheckpoint,
     LinkedInConfig
@@ -4570,7 +4570,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
       );
     }
 
-    const resolvedRows = await resolveHomeFeedPostUrls(rows, this.fetchImpl);
+    const resolvedRows = await resolveHomeFeedPostUrls(rows);
     const unresolvedShortUrlCount =
       unresolvedHomeFeedShortUrlCount(resolvedRows);
     if (unresolvedShortUrlCount > 0) {

@@ -36,7 +36,6 @@
       "!**/packages/client/src/generated/**",
       "!**/packages/connector-sdk/**",
       "!**/packages/connector-worker/**",
-      "!**/packages/connectors/**",
       "!**/packages/embeddings/**",
       "!**/packages/owletto/**",
       "!**/packages/device-connectors/generated/**",
@@ -50,6 +49,7 @@
   },
   "formatter": {
     "enabled": true,
+    "includes": ["**", "!**/packages/connectors/**"],
     "formatWithErrors": false,
     "indentStyle": "space",
     "indentWidth": 2,
@@ -60,6 +60,12 @@
   "assist": { "actions": { "source": { "organizeImports": "off" } } },
   "linter": {
     "enabled": true,
+    "includes": [
+      "**",
+      "!**/packages/connectors/**",
+      "**/packages/connectors/src/**/*.ts",
+      "!**/packages/connectors/src/__tests__/**"
+    ],
     "rules": {
       "recommended": true,
       "complexity": {
@@ -148,6 +154,31 @@
     }
   },
   "overrides": [
+    {
+      "includes": ["**/packages/connectors/**"],
+      "linter": {
+        "rules": {
+          "recommended": false,
+          "a11y": "off",
+          "complexity": "off",
+          "correctness": "off",
+          "nursery": "off",
+          "performance": "off",
+          "security": "off",
+          "suspicious": "off",
+          "style": {
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "fetch": "Built-in connectors call HTTP through the connector SDK client (createHttpClient / requireBearerClient) so a non-2xx response throws HttpStatusError with a numeric status the runtime classifies."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "includes": ["**/*.json"],
       "json": {

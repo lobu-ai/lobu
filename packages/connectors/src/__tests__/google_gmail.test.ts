@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, fakeClient } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
@@ -58,7 +58,7 @@ function fakeHttp(
 ) {
   const byId = new Map(threads.map((t) => [t.id, t]));
   let currentThread: ReturnType<typeof toThreadResponse>;
-  return {
+  return fakeClient({
     raw: async (url: string) => {
       onRequest?.(url);
       const u = new URL(url);
@@ -89,7 +89,7 @@ function fakeHttp(
         text: async () => '',
       } as unknown as Response;
     },
-  };
+  });
 }
 
 function toThreadResponse(thread: FakeThread | undefined) {
@@ -751,7 +751,7 @@ describe('complete Gmail sync input', () => {
   test('resumes the next page without advancing past unprocessed mail', async () => {
     const connector = new GmailConnector();
     const urls: string[] = [];
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       urls.push(url);
       const u = new URL(url);
       const id = u.pathname.match(/\/threads\/([^/]+)$/)?.[1] ?? u.pathname.match(/\/messages\/m-([^/]+)$/)?.[1];
@@ -761,7 +761,7 @@ describe('complete Gmail sync input', () => {
           ? { threads: [{ id: 'older' }] }
           : { threads: [{ id: 'newer' }], nextPageToken: 'page-two' },
       };
-    } });
+    } }));
     const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
     const first = await runSync(connector, context(prior, { max_results: 1 }));
     expect(first.checkpoint.last_sync_at).toBeUndefined();
@@ -781,9 +781,9 @@ describe('complete Gmail sync input', () => {
 
   test('keeps an empty page with a continuation token pending', async () => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({ raw: async () => ({
+    connector.createClient = () => (fakeClient({ raw: async () => ({
       ok: true, json: async () => ({ threads: [], nextPageToken: 'continue-empty' }),
-    }) });
+    }) }));
     const prior = { last_sync_at: '2026-07-01T00:00:00Z' };
     const result = await runSync(connector, context(prior));
     expect(result.events).toEqual([]);
@@ -794,9 +794,9 @@ describe('complete Gmail sync input', () => {
 
   test('rejects a repeated token instead of recording a completed window', async () => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({ raw: async () => ({
+    connector.createClient = () => (fakeClient({ raw: async () => ({
       ok: true, json: async () => ({ threads: [], nextPageToken: 'same' }),
-    }) });
+    }) }));
     await expect(runSync(connector, context({ schema_version: 3, scope: JSON.stringify(['label:INBOX', false]), pending: {
       query: 'after:1 before:2 (label:INBOX)',
       started_at: '2026-07-02T00:00:00Z', page_token: 'same',
@@ -827,19 +827,19 @@ describe('complete Gmail sync input', () => {
 
   test.each(['empty', 'undated'])('does not advance past malformed %s thread data', async (kind) => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({ raw: async (url: string) => ({
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => ({
       ok: true, status: 200, json: async () => url.includes('/threads/') || url.includes('/messages/')
         ? kind === 'empty' ? { id: kind, messages: [] }
           : threadResource(url, toThreadResponse({ id: kind, messages: [{ id: 'm', date: 'invalid-date' }] }))
         : { threads: [{ id: kind }] },
-    }) });
+    }) }));
     await expect(runSync(connector, context())).rejects.toThrow(/Gmail returned/);
   });
 
   test('restarts the window when Gmail retires the stored page token', async () => {
     const connector = new GmailConnector();
     const urls: string[] = [];
-    connector.createClient = () => ({
+    connector.createClient = () => (fakeClient({
       raw: async (url: string) => {
         urls.push(url);
         const u = new URL(url);
@@ -850,7 +850,7 @@ describe('complete Gmail sync input', () => {
         }
         return { ok: true, status: 200, json: async () => ({ threads: [{ id: 'first-page' }] }) };
       },
-    });
+    }));
     const result = await runSync(
       connector,
       context({
@@ -871,9 +871,9 @@ describe('complete Gmail sync input', () => {
 
   test('propagates a non-cursor list failure instead of restarting the window', async () => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({
+    connector.createClient = () => (fakeClient({
       raw: async () => ({ ok: false, status: 429, text: async () => 'rate limited' }),
-    });
+    }));
     await expect(
       runSync(
         connector,
@@ -888,11 +888,11 @@ describe('complete Gmail sync input', () => {
 
   test('does not checkpoint past a failed thread fetch', async () => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({ raw: async (url: string) =>
+    connector.createClient = () => (fakeClient({ raw: async (url: string) =>
       url.includes('/threads/')
         ? { ok: false, status: 503, text: async () => 'provider unavailable' }
         : { ok: true, json: async () => ({ threads: [{ id: 'retry-me' }] }) },
-    });
+    }));
     await expect(runSync(connector, context())).rejects.toThrow(/503/);
   });
 });
@@ -909,7 +909,7 @@ describe('Gmail externally stored message bodies', () => {
   function setup(attachmentStatus = 200) {
     const connector = new GmailConnector();
     const urls: string[] = [];
-    connector.createClient = () => ({
+    connector.createClient = () => (fakeClient({
       raw: async (url: string) => {
         urls.push(url);
         const attachment = url.includes('/attachments/');
@@ -946,7 +946,7 @@ describe('Gmail externally stored message bodies', () => {
           },
         };
       },
-    });
+    }));
     return { connector, urls };
   }
 
@@ -992,14 +992,14 @@ describe('Gmail empty MIME alternatives', () => {
         { mimeType: 'text/html', body: { data: Buffer.from(html).toString('base64url') } },
       ],
     };
-    connector.createClient = () => ({ raw: async (url: string) => ({
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => ({
       ok: !url.includes('/attachments/') || attachmentStatus === 200,
       status: attachmentStatus,
       text: async () => 'body unavailable',
       json: async () => url.includes('/attachments/') ? { data: '' }
         : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
         : { threads: [{ id: 'alternatives' }] },
-    }) });
+    }) }));
     return connector;
   }
 
@@ -1053,7 +1053,7 @@ describe('Gmail multipart body sections', () => {
         { mimeType: 'text/plain', headers: [{ name: 'Content-Disposition', value: 'attachment' }], body: { attachmentId: 'excluded' } },
       ],
     };
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       urls.push(url);
       return {
         ok: !url.includes('/attachments/') || externalStatus === 200,
@@ -1063,7 +1063,7 @@ describe('Gmail multipart body sections', () => {
           : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
           : { threads: [{ id: thread.id }] },
       };
-    } });
+    } }));
     return { connector, urls };
   }
 
@@ -1127,12 +1127,12 @@ describe('Gmail MIME syntax', () => {
     ])(`${mode} handles valid MIME syntax in %s`, async (_name, payload) => {
       const connector = new GmailConnector();
       const thread = toThreadResponse({ id: 'mime-thread', messages: [{ id: 'mime-message' }] });
-      connector.createClient = () => ({ raw: async (url: string) => ({
+      connector.createClient = () => (fakeClient({ raw: async (url: string) => ({
         ok: true,
         json: async () => url.includes('/threads/') || url.includes('/messages/')
           ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
           : { threads: [{ id: thread.id }] },
-      }) });
+      }) }));
       const body = mode === 'sync'
         ? (await runSync(connector, context)).events[0].payload_text
         : (await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials: context.credentials })).output.messages[0].body;
@@ -1160,7 +1160,7 @@ describe('Gmail poison-thread quarantine', () => {
     };
     const threads = poisonFirst ? [poison, good] : [good, poison];
     const urls: string[] = [];
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       urls.push(url);
       const id = new URL(url).pathname.match(/\/threads\/([^/]+)$/)?.[1];
       const messageId = new URL(url).pathname.match(/\/messages\/([^/]+)$/)?.[1];
@@ -1169,7 +1169,7 @@ describe('Gmail poison-thread quarantine', () => {
         ? threadResource(url, thread)
         : { threads: threads.map((thread) => ({ id: thread.id })) },
       };
-    } });
+    } }));
     const checkpoint = {
       schema_version: 3,
       scope: JSON.stringify(['label:INBOX', false]),
@@ -1202,9 +1202,9 @@ describe('Gmail poison-thread quarantine', () => {
       { id: 'good-thread', messages: [] },
     ]);
     const original = connector.createClient();
-    connector.createClient = () => ({ raw: (url: string) => new URL(url).pathname.endsWith('/threads')
+    connector.createClient = () => (fakeClient({ raw: (url: string) => new URL(url).pathname.endsWith('/threads')
       ? capped.raw(url) : original.raw(url),
-    });
+    }));
     const first = await runSync(connector, { ...context, config: { max_results: 1 }, checkpoint });
     expect(first.events).toEqual([]);
     expect(first.checkpoint.last_sync_at).toBe(checkpoint.last_sync_at);
@@ -1239,12 +1239,12 @@ describe('Gmail MIME body charset', () => {
       body: external ? { attachmentId: 'encoded-body', size: bytes.length }
         : { data: bytes.toString('base64url'), size: bytes.length },
     };
-    connector.createClient = () => ({ raw: async (url: string) => ({
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => ({
       ok: true,
       json: async () => url.includes('/attachments/') ? { data: bytes.toString('base64url') }
         : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, { ...thread, messages: [{ ...thread.messages[0], payload }] })
         : { threads: [{ id: thread.id }] },
-    }) });
+    }) }));
     return connector;
   }
 
@@ -1304,12 +1304,12 @@ describe('Gmail readable HTML sync bodies', () => {
       body: external ? { attachmentId: 'html-body' } : { data: Buffer.from(html).toString('base64url') },
     };
     const urls: string[] = [];
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       urls.push(url);
       return { ok: true, status: 200, json: async () => url.includes('/attachments/')
         ? { data: Buffer.from(html).toString('base64url') }
         : url.includes('/threads/') || url.includes('/messages/') ? threadResource(url, thread) : { threads: [{ id: thread.id }] } };
-    } });
+    } }));
     return { connector, urls };
   }
 
@@ -1369,7 +1369,7 @@ describe('Gmail attachment download', () => {
   function setup(attachmentBody?: (id: string) => Record<string, unknown>) {
     const connector = new GmailConnector();
     const urls: string[] = [];
-    connector.createClient = () => ({
+    connector.createClient = () => (fakeClient({
       raw: async (url: string) => {
         urls.push(url);
         const attachmentMatch = url.match(/\/attachments\/([^/?]+)/);
@@ -1406,7 +1406,7 @@ describe('Gmail attachment download', () => {
           },
         };
       },
-    });
+    }));
     const download = (input: Record<string, unknown>) =>
       connector.execute({
         actionKey: 'download_attachment',
@@ -1569,7 +1569,7 @@ describe('Gmail attachment download', () => {
     const byId = new Map([[thread.id, thread], [plainThread.id, plainThread]]);
     let current = thread;
     const connector = new GmailConnector();
-    connector.createClient = () => ({
+    connector.createClient = () => (fakeClient({
       raw: async (url: string) => {
         const path = new URL(url).pathname;
         const threadId = path.match(/\/threads\/([^/]+)$/)?.[1];
@@ -1579,7 +1579,7 @@ describe('Gmail attachment download', () => {
           : threadResource(url, current as ReturnType<typeof toThreadResponse>);
         return { ok: true, status: 200, text: async () => '', json: async () => body };
       },
-    });
+    }));
 
     const result = await runSync(connector, {
       feedKey: 'threads',
@@ -1631,7 +1631,7 @@ describe('Gmail threads larger than the per-response transport cap', () => {
       id: `large-message-${i}`, body: 'x'.repeat(750_000) + `END-${i}`,
     })) });
     const urls: string[] = [];
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       urls.push(url);
       const parsed = new URL(url);
       const messageId = parsed.pathname.match(/\/messages\/([^/]+)$/)?.[1];
@@ -1649,7 +1649,7 @@ describe('Gmail threads larger than the per-response transport cap', () => {
         throw new Error('fetch response body exceeded the 16777216-byte cap');
       }
       return { ok: true, status: 200, json: async () => body };
-    } });
+    } }));
     return { connector, urls };
   }
 
@@ -1672,11 +1672,19 @@ describe('Gmail threads larger than the per-response transport cap', () => {
     expect(commit).not.toHaveBeenCalled();
   });
 
-  test.each([404, 503, 'oversized'] as const)('get_thread refuses partial output after message failure %s', async failure => {
+  test.each([404, 503] as const)('get_thread fails with the upstream status after message failure %s', async failure => {
     const { connector } = setup(failure);
+    // Thrown, not returned: the runtime classifies the run by this status.
+    await expect(
+      connector.execute({ actionKey: 'get_thread', input: { thread_id: 'large-thread' }, credentials })
+    ).rejects.toMatchObject({ name: 'HttpStatusError', status: failure });
+  });
+
+  test('get_thread refuses partial output after an oversized message', async () => {
+    const { connector } = setup('oversized');
     const result = await connector.execute({ actionKey: 'get_thread', input: { thread_id: 'large-thread' }, credentials });
     expect(result.success).toBe(false);
-    expect(result.error).toContain(failure === 'oversized' ? 'cap' : String(failure));
+    expect(result.error).toContain('cap');
     expect(result.output).toBeUndefined();
   });
 
@@ -1689,10 +1697,10 @@ describe('Gmail threads larger than the per-response transport cap', () => {
     ['missing payload', { id: 'thread', messages: [{ id: 'message' }] }, { id: 'message', threadId: 'thread' }],
   ])('does not commit malformed provider data: %s', async (_kind, index, message) => {
     const connector = new GmailConnector();
-    connector.createClient = () => ({ raw: async (url: string) => ({
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => ({
       ok: true, status: 200, json: async () => url.includes('/messages/') ? message
         : url.includes('/threads/') ? index : { threads: [{ id: 'thread' }] },
-    }) });
+    }) }));
     const commit = mock(async () => {});
     await expect(runSync(connector, { ...context, commit })).rejects.toThrow('Gmail returned');
     expect(commit).not.toHaveBeenCalled();
@@ -1705,7 +1713,7 @@ describe('Gmail threads larger than the per-response transport cap', () => {
     let peak = 0;
     const completed: string[] = [];
     const pending: Array<() => void> = [];
-    connector.createClient = () => ({ raw: async (url: string) => {
+    connector.createClient = () => (fakeClient({ raw: async (url: string) => {
       const body = threadResource(url, thread);
       if (url.includes('/messages/')) {
         active++;
@@ -1721,7 +1729,7 @@ describe('Gmail threads larger than the per-response transport cap', () => {
         active--;
       }
       return { ok: true, status: 200, json: async () => body };
-    } });
+    } }));
     const result = await connector.execute({ actionKey: 'get_thread', input: { thread_id: thread.id }, credentials });
     expect(result.success).toBe(true);
     const ids = thread.messages.map(message => message.id);

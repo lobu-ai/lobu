@@ -1,9 +1,10 @@
 /** Gmail mailbox additions, retained as references rather than email content. */
-import type {
-  EventEnvelope,
-  HttpClient,
-  SyncContext,
-  SyncResult,
+import {
+  type EventEnvelope,
+  type HttpClient,
+  HttpStatusError,
+  type SyncContext,
+  type SyncResult,
 } from '@lobu/connector-sdk';
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -53,14 +54,10 @@ function nativeId(value: unknown): string {
 async function profile(
   http: HttpClient,
 ): Promise<{ account: string; history: string }> {
-  const result = await http.raw(
-    `${BASE}/profile?fields=emailAddress,historyId`,
-  );
-  if (!result.ok) throw new Error(`Gmail profile error (${result.status})`);
-  const data = (await result.json()) as {
+  const data = await http.json<{
     emailAddress?: string;
     historyId?: string;
-  };
+  }>(`${BASE}/profile?fields=emailAddress,historyId`);
   const account = data.emailAddress?.trim().toLowerCase();
   if (!account || !/^[^\s@]+@[^\s@]+$/.test(account))
     throw new Error('Gmail returned an invalid account identity');
@@ -247,11 +244,14 @@ export async function syncGmailReferences(
       });
       if (state.inventory.page_token)
         params.set('pageToken', state.inventory.page_token);
-      const result = await http.raw(`${BASE}/messages?${params}`);
-      if (!result.ok) {
+      let data: { messages?: MessageIdentity[]; nextPageToken?: string };
+      try {
+        data = await http.json(`${BASE}/messages?${params}`);
+      } catch (error) {
         if (
           state.inventory.page_token &&
-          (result.status === 400 || result.status === 404)
+          error instanceof HttpStatusError &&
+          (error.status === 400 || error.status === 404)
         ) {
           // Retain this generation's original pre-inventory history baseline.
           await commit([], { ...state, inventory: {} });
@@ -260,12 +260,8 @@ export async function syncGmailReferences(
             metadata: { items_found: found, inventory_restarted: true },
           };
         }
-        throw new Error(`Gmail reference inventory error (${result.status})`);
+        throw error;
       }
-      const data = (await result.json()) as {
-        messages?: MessageIdentity[];
-        nextPageToken?: string;
-      };
       const messages = data.messages === undefined ? [] : data.messages;
       if (!Array.isArray(messages))
         throw new Error('Gmail returned invalid inventory messages');
@@ -299,11 +295,14 @@ export async function syncGmailReferences(
           'history(id,messagesAdded(message(id,threadId))),historyId,nextPageToken',
       });
       if (state.history_page) params.set('pageToken', state.history_page.token);
-      const result = await http.raw(`${BASE}/history?${params}`);
-      if (!result.ok) {
+      let page: HistoryPage;
+      try {
+        page = await http.json(`${BASE}/history?${params}`);
+      } catch (error) {
+        if (!(error instanceof HttpStatusError)) throw error;
         if (
           state.history_page &&
-          (result.status === 400 || result.status === 404)
+          (error.status === 400 || error.status === 404)
         ) {
           // A retired page token does not prove the history boundary expired.
           // Replay from that boundary, retaining any partially consumed record.
@@ -312,10 +311,9 @@ export async function syncGmailReferences(
           await commit([], next);
           return { status: 'more', metadata: { items_found: found } };
         }
-        if (result.status === 404) return recover('history_expired');
-        throw new Error(`Gmail reference history error (${result.status})`);
+        if (error.status === 404) return recover('history_expired');
+        throw error;
       }
-      const page = (await result.json()) as HistoryPage;
       const head = historyId(page.historyId);
       if (BigInt(head) < BigInt(state.history_id))
         throw new Error('Gmail history moved backwards');

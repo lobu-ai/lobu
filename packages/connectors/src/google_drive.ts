@@ -33,6 +33,7 @@ import {
   createHttpClient,
   type EventEnvelope,
   type HttpClient,
+  HttpStatusError,
   paginateByCursor,
   type FeedReadContext,
   type FeedReadResult,
@@ -489,13 +490,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     });
     if (ctx.cursor) params.set('pageToken', ctx.cursor);
 
-    const response = await http.raw(`${this.BASE_URL}/files?${params.toString()}`);
-    if (!response.ok) {
-      throw new Error(
-        `Drive files.list error (${response.status}): ${await response.text()}`
-      );
-    }
-
+    const response = await http.request(`${this.BASE_URL}/files?${params.toString()}`);
     const data = (await response.json()) as DriveFileListResponse;
     if (data.incompleteSearch) throw new Error('Drive returned an incomplete search; the window was not processed.');
     if (ctx.window && (data.files ?? []).some((file) => !file.id || !Number.isFinite(Date.parse(file.modifiedTime ?? '')))) {
@@ -615,12 +610,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
         });
         if (cursor) params.set('pageToken', cursor);
 
-        const response = await http.raw(`${this.BASE_URL}/files?${params.toString()}`);
-        if (!response.ok) {
-          throw new Error(
-            `Drive files.list error (${response.status}): ${await response.text()}`
-          );
-        }
+        const response = await http.request(`${this.BASE_URL}/files?${params.toString()}`);
         const data = (await response.json()) as DriveFileListResponse;
         nextListPageToken = data.nextPageToken;
         // Google sets this when an `allDrives` search could not reach every
@@ -729,15 +719,15 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
           includeItemsFromAllDrives: 'true',
         });
 
-        const response = await http.raw(`${this.BASE_URL}/changes?${params.toString()}`);
-        if (!response.ok) {
-          if (isPageTokenRejection(response.status)) {
+        let response: Response;
+        try {
+          response = await http.request(`${this.BASE_URL}/changes?${params.toString()}`);
+        } catch (error) {
+          if (error instanceof HttpStatusError && isPageTokenRejection(error.status)) {
             rejected = true;
             return { items: [], nextCursor: undefined };
           }
-          throw new Error(
-            `Drive changes.list error (${response.status}): ${await response.text()}`
-          );
+          throw error;
         }
 
         const data = (await response.json()) as DriveChangeListResponse;
@@ -807,14 +797,9 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
 
   private async fetchStartPageToken(http: HttpClient): Promise<string> {
     const params = new URLSearchParams({ supportsAllDrives: 'true' });
-    const response = await http.raw(
+    const response = await http.request(
       `${this.BASE_URL}/changes/startPageToken?${params.toString()}`
     );
-    if (!response.ok) {
-      throw new Error(
-        `Drive changes.getStartPageToken error (${response.status}): ${await response.text()}`
-      );
-    }
     const data = (await response.json()) as DriveStartPageTokenResponse;
     // Failing here is the honest outcome: without a token the traversal cannot
     // hand off to the change stream, and reporting it as a finished bootstrap
@@ -850,6 +835,9 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
           return await executeGoogleAction(DRIVE, ctx, http);
       }
     } catch (error) {
+      // An upstream HTTP failure reaches the runtime with its status, which
+      // classifies it; only this connector's own refusals become a result.
+      if (error instanceof HttpStatusError) throw error;
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -989,14 +977,7 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
     const declaredTooBig = downloadSizeError(parseSize(file.size), file.name ?? file.id);
     if (declaredTooBig) return { ok: false, error: declaredTooBig };
 
-    const response = await http.raw(request.url);
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: `Drive ${request.exportMime ? 'files.export' : 'files.get'} error (${response.status}): ${await response.text()}`,
-      };
-    }
-
+    const response = await http.request(request.url);
     const bytes = Buffer.from(await response.arrayBuffer());
     // Drive omits `size` for native docs, so the export path only learns the
     // real size here. Same refusal, after the fact.
@@ -1080,16 +1061,14 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
       fields: FILE_FIELDS,
       supportsAllDrives: 'true',
     });
-    const response = await http.raw(
-      `${this.BASE_URL}/files/${encodeURIComponent(fileId)}?${params.toString()}`
-    );
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new Error(
-        `Drive files.get error (${response.status}): ${await response.text()}`
+    try {
+      return await http.json<DriveFile>(
+        `${this.BASE_URL}/files/${encodeURIComponent(fileId)}?${params.toString()}`
       );
+    } catch (error) {
+      if (error instanceof HttpStatusError && error.status === 404) return null;
+      throw error;
     }
-    return (await response.json()) as DriveFile;
   }
 
   // -------------------------------------------------------------------------
@@ -1296,8 +1275,8 @@ export default class GoogleDriveConnector extends ConnectorRuntime<
   }
 
   // Auth-aware client (Bearer + retry/backoff on transient 429/5xx). Built per
-  // token so each sync/action uses its own credentials. `.raw()` preserves the
-  // status-code branching the page-token and export paths depend on.
+  // token so each sync/action uses its own credentials. A non-2xx throws
+  // HttpStatusError; `.raw()` is kept only for the best-effort content read.
   private client(token: string): HttpClient {
     return createHttpClient({ token, errorPrefix: 'Drive API' });
   }

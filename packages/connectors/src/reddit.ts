@@ -821,24 +821,30 @@ export default class RedditConnector extends ConnectorRuntime {
 
     const userAgent =
       ((ctx.config as Record<string, unknown>).REDDIT_USER_AGENT as string) || this.USER_AGENT;
-    const response = await fetch('https://www.reddit.com/api/v1/access_token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
-        'User-Agent': userAgent,
-      },
-      body: 'grant_type=client_credentials',
-    });
-
-    if (!response.ok) {
+    // A refused grant falls back to unauthenticated reads, so it is not retried.
+    const http = createHttpClient({ errorPrefix: 'Reddit app-only auth', retry: false });
+    let data: { access_token?: string };
+    try {
+      data = await http.post<{ access_token?: string }>(
+        'https://www.reddit.com/api/v1/access_token',
+        undefined,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+            'User-Agent': userAgent,
+          },
+          body: 'grant_type=client_credentials',
+        }
+      );
+    } catch (error) {
+      if (!(error instanceof HttpStatusError)) throw error;
       console.error(
-        `Reddit app-only auth failed (${response.status}), falling back to unauthenticated`
+        `Reddit app-only auth failed (${error.status}), falling back to unauthenticated`
       );
       return undefined;
     }
 
-    const data = (await response.json()) as { access_token?: string };
     if (data.access_token) {
       this.appOnlyToken = data.access_token;
       return data.access_token;
@@ -854,21 +860,14 @@ export default class RedditConnector extends ConnectorRuntime {
     const configured = (ctx.config.username as string | undefined)?.trim();
     if (configured) return configured.replace(/^u\//, '');
 
-    const response = await fetch('https://oauth.reddit.com/api/v1/me', {
-      headers: {
-        Authorization: `Bearer ${userAccessToken}`,
-        'User-Agent': this.USER_AGENT,
-      },
+    const http = createHttpClient({
+      token: userAccessToken,
+      headers: { 'User-Agent': this.USER_AGENT },
+      errorPrefix: 'Reddit username lookup (set "username" in feed config or re-authenticate)',
     });
-    if (!response.ok) {
-      throw new Error(
-        `Failed to resolve Reddit username via /api/v1/me (${response.status}). ` +
-          'Set "username" in feed config or re-authenticate.'
-      );
-    }
-    const data = (await response.json()) as { name?: string };
+    const data = await http.json<{ name?: string }>('https://oauth.reddit.com/api/v1/me');
     if (!data.name) {
-      throw new Error('Reddit /api/v1/me returned no username.');
+      throw new Error('Reddit /api/v1/me returned no username. Set "username" in feed config or re-authenticate.');
     }
     return data.name;
   }

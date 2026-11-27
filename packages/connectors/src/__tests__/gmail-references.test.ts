@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, fakeClient } from './connector-sdk.mock';
 import { runSync, type SyncRun } from './sync-harness';
 
 let sleeps = 0;
@@ -25,7 +25,7 @@ type Handler = (url: URL) => Response | Promise<Response>;
 function fixture(handler?: Handler) {
   const calls: URL[] = [];
   const connector = new GmailConnector();
-  connector.createClient = () => ({
+  connector.createClient = () => (fakeClient({
     raw: async (raw: string) => {
       const url = new URL(raw);
       calls.push(url);
@@ -51,7 +51,7 @@ function fixture(handler?: Handler) {
         return response({ historyId: '100' });
       throw new Error(`Unexpected ${url.pathname}`);
     },
-  });
+  }));
   const sync = (
     checkpoint: SyncRun['checkpoint'] = null,
     config: Record<string, unknown> = {},
