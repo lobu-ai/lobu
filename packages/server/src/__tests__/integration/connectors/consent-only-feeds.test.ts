@@ -275,17 +275,26 @@ describe('consent-only connections — feed creation is rejected by construction
       scope: 'mcp:read mcp:write connections:token',
     });
     const app = buildCloudApp();
-    const res = await app.fetch(
-      new Request('http://cloud.local/oauth/connection-token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${ownerPat.token}`,
-        },
-        body: JSON.stringify({ org: org.id, connector_key: connectorKey }),
-      }),
-      TEST_ENV
-    );
+    // Only a lender workspace's grants are delegated.
+    const savedLenderOrgs = process.env.LOBU_MANAGED_AUTH_ORGS;
+    process.env.LOBU_MANAGED_AUTH_ORGS = org.slug;
+    let res: Response;
+    try {
+      res = await app.fetch(
+        new Request('http://cloud.local/oauth/connection-token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${ownerPat.token}`,
+          },
+          body: JSON.stringify({ org: org.id, connector_key: connectorKey }),
+        }),
+        TEST_ENV
+      );
+    } finally {
+      if (savedLenderOrgs === undefined) delete process.env.LOBU_MANAGED_AUTH_ORGS;
+      else process.env.LOBU_MANAGED_AUTH_ORGS = savedLenderOrgs;
+    }
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
