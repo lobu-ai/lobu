@@ -3788,7 +3788,7 @@ export default class LinkedInConnector extends ConnectorRuntime<
         name: "List sent invitations",
         kind: "read",
         description:
-          "List the connection requests you have sent that are still pending, newest first: member name, headline, profile URL and when it was sent, read from LinkedIn's sent-invitations page in the paired Chrome browser. Read-only.",
+          "List the connection requests you have sent that are still pending, newest first: member name, headline, profile URL and when it was sent, read from LinkedIn's sent invitations with the signed-in session in the paired Chrome browser. Read-only.",
         annotations: {
           openWorldHint: true,
           destructiveHint: false,
@@ -3812,7 +3812,11 @@ export default class LinkedInConnector extends ConnectorRuntime<
                   name: { type: "string" },
                   headline: { type: ["string", "null"] },
                   profile_url: { type: ["string", "null"] },
-                  sent: { type: ["string", "null"] },
+                  sent: {
+                    type: ["string", "null"],
+                    format: "date-time",
+                    description: "When the invitation was sent.",
+                  },
                 },
               },
             },
