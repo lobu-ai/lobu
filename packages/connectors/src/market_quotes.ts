@@ -10,6 +10,8 @@ import {
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
+  HttpStatusError,
 } from "@lobu/connector-sdk";
 
 type QuoteOk = {
@@ -68,13 +70,10 @@ type QuoteSymbolInput = {
   provider_symbol?: string;
 };
 
-type FetchLike = (
-  input: string | URL | Request,
-  init?: RequestInit
-) => Promise<Response>;
-
 const YAHOO_CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart";
 const QUOTE_TIMEOUT_MS = 8_000;
+// A symbol the provider cannot quote is reported per row, never retried.
+const yahoo = createHttpClient({ errorPrefix: "Yahoo chart", retry: false });
 const STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
 const MAX_CONCURRENT_QUOTES = 5;
 const MAX_SYMBOLS = 50;
@@ -279,8 +278,7 @@ export function parseYahooHistoryBody(
 
 async function requestYahooChart(
   providerSymbol: string,
-  query: string,
-  fetchImpl: FetchLike
+  query: string
 ): Promise<{ ok: true; body: unknown } | { ok: false; reason: string }> {
   if (!providerSymbol) {
     return { ok: false, reason: "missing symbol" };
@@ -289,18 +287,18 @@ async function requestYahooChart(
     providerSymbol
   )}?${query}`;
   try {
-    const response = await fetchImpl(url, {
+    const response = await yahoo.request(url, {
       headers: {
         Accept: "application/json",
         "User-Agent": "LobuMarketQuotes/1.0 (+https://lobu.ai)",
       },
       signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS),
     });
-    if (!response.ok) {
-      return { ok: false, reason: `quote provider HTTP ${response.status}` };
-    }
     return { ok: true, body: await response.json() };
   } catch (error) {
+    if (error instanceof HttpStatusError) {
+      return { ok: false, reason: `quote provider HTTP ${error.status}` };
+    }
     return {
       ok: false,
       reason: error instanceof Error ? error.message : String(error),
@@ -309,16 +307,14 @@ async function requestYahooChart(
 }
 
 async function fetchYahooQuote(
-  providerSymbol: string,
-  fetchImpl: FetchLike = fetch
+  providerSymbol: string
 ): Promise<
   | { ok: true; price: number; currency: string; asOf: string }
   | { ok: false; reason: string }
 > {
   const chart = await requestYahooChart(
     providerSymbol,
-    "interval=1d&range=1d",
-    fetchImpl
+    "interval=1d&range=1d"
   );
   if (!chart.ok) return chart;
   const parsed = parseYahooChartBody(chart.body, providerSymbol);
@@ -353,9 +349,8 @@ async function forEachConcurrently(
 
 export async function quoteMany(
   inputs: Array<QuoteSymbolInput | string>,
-  options?: { fetchImpl?: FetchLike; now?: Date }
+  options?: { now?: Date }
 ): Promise<QuoteRow[]> {
-  const fetchImpl = options?.fetchImpl ?? fetch;
   const now = options?.now ?? new Date();
   const normalized = inputs.map(normalizeSymbolInput);
   const results = new Array<QuoteRow>(normalized.length);
@@ -375,7 +370,7 @@ export async function quoteMany(
       return;
     }
 
-    const quote = await fetchYahooQuote(item.provider_symbol, fetchImpl);
+    const quote = await fetchYahooQuote(item.provider_symbol);
     if (!quote.ok) {
       results[index] = {
         status: "quote_unavailable",
@@ -438,10 +433,8 @@ export function validateHistoryRange(
 
 export async function historyMany(
   inputs: Array<QuoteSymbolInput | string>,
-  range: HistoryRange,
-  options?: { fetchImpl?: FetchLike }
+  range: HistoryRange
 ): Promise<HistoryRow[]> {
-  const fetchImpl = options?.fetchImpl ?? fetch;
   const normalized = inputs.map(normalizeSymbolInput);
   const results = new Array<HistoryRow>(normalized.length);
   // Widen the window by a day on each side so every exchange timezone's local
@@ -463,11 +456,7 @@ export async function historyMany(
       results[index] = unavailable("missing symbol");
       return;
     }
-    const chart = await requestYahooChart(
-      item.provider_symbol,
-      query,
-      fetchImpl
-    );
+    const chart = await requestYahooChart(item.provider_symbol, query);
     if (!chart.ok) {
       results[index] = unavailable(chart.reason);
       return;
@@ -605,8 +594,6 @@ export default class MarketQuotesConnector extends ConnectorRuntime {
     optionsSchema: { type: "object", properties: {} },
   };
 
-  fetchImpl: FetchLike = fetch;
-
   async execute(ctx: ActionContext): Promise<ActionResult> {
     if (ctx.actionKey === "history") {
       return this.history(ctx.input);
@@ -621,8 +608,7 @@ export default class MarketQuotesConnector extends ConnectorRuntime {
     }
 
     const quotes = await quoteMany(
-      symbols as Array<QuoteSymbolInput | string>,
-      { fetchImpl: this.fetchImpl }
+      symbols as Array<QuoteSymbolInput | string>
     );
     return {
       success: true,
@@ -653,8 +639,7 @@ export default class MarketQuotesConnector extends ConnectorRuntime {
     }
     const series = await historyMany(
       symbols as Array<QuoteSymbolInput | string>,
-      range,
-      { fetchImpl: this.fetchImpl }
+      range
     );
     return { success: true, output: { provider: "yahoo", series } };
   }

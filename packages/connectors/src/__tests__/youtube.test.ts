@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, fakeClient } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', connectorSdkMock);
@@ -13,7 +13,7 @@ beforeAll(async () => {
 });
 
 function fakeHttp(handlers: Record<string, (url: URL) => unknown>) {
-  return {
+  return fakeClient({
     raw: async (url: string) => {
       const u = new URL(url);
       const key = u.pathname.split('/').pop() ?? '';
@@ -33,7 +33,7 @@ function fakeHttp(handlers: Record<string, (url: URL) => unknown>) {
         text: async () => JSON.stringify(body),
       } as Response;
     },
-  };
+  });
 }
 
 describe('YouTubeConnector personal feeds', () => {
@@ -377,7 +377,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
     let call = 0;
     return {
       pageTokens,
-      http: {
+      http: fakeClient({
         raw: async (url: string) => {
           const u = new URL(url);
           if (u.pathname.endsWith('/search')) {
@@ -427,7 +427,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
             text: async () => '',
           } as unknown as Response;
         },
-      },
+      }),
     };
   }
 
@@ -499,7 +499,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
     const pageTokens: Array<string | null> = [];
     return {
       pageTokens,
-      http: {
+      http: fakeClient({
         raw: async (url: string) => {
           const u = new URL(url);
           if (u.pathname.endsWith('/search')) {
@@ -553,7 +553,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
             text: async () => '',
           } as unknown as Response;
         },
-      },
+      }),
     };
   }
 
@@ -589,7 +589,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
     // Drop the politeness delay: 200 pages x 200ms would blow the test timeout.
     connector.RATE_LIMIT_MS = 0;
     let calls = 0;
-    connector.http = {
+    connector.http = fakeClient({
       raw: async () => {
         calls++;
         // Runaway guard well above the 200-page ceiling: without maxPages this
@@ -615,7 +615,7 @@ describe('YouTubeConnector stale page-token recovery', () => {
           text: async () => '',
         } as unknown as Response;
       },
-    };
+    });
 
     const result = await runSync(connector, {
       feedKey: 'subscriptions',

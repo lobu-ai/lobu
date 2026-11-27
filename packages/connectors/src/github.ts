@@ -16,6 +16,7 @@ import {
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   createHttpClient,
+  HttpStatusError,
   type EventAttributionRule,
   type EventEnvelope,
   type FeedWebhookDeclaration,
@@ -1016,6 +1017,9 @@ export default class GitHubConnector extends ConnectorRuntime {
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
     } catch (error) {
+      // An upstream HTTP failure reaches the runtime with its status, which
+      // classifies it; only this connector's own refusals become a result.
+      if (error instanceof HttpStatusError) throw error;
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),

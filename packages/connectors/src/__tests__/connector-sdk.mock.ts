@@ -72,14 +72,79 @@ async function* paginateByOffset<T>(
 
 export class HttpStatusError extends Error {
   readonly status: number;
+  readonly bodyText: string;
   readonly body: string;
 
-  constructor(args: { status: number; body?: string; message?: string }) {
-    super(args.message ?? `HTTP ${args.status}`);
+  /** Accepts the SDK's constructor shape, plus a short `{ status, body }` form for test fixtures. */
+  constructor(args: {
+    status: number;
+    body?: string;
+    message?: string;
+    prefix?: string;
+    method?: string;
+    url?: string;
+    statusText?: string;
+    bodyText?: string;
+  }) {
+    const bodyText = args.bodyText ?? args.body ?? '';
+    super(
+      args.message ??
+        (args.prefix
+          ? `${args.prefix} ${args.method} ${args.url} failed (${args.status}): ${bodyText}`
+          : `HTTP ${args.status}`)
+    );
     this.name = 'HttpStatusError';
     this.status = args.status;
-    this.body = args.body ?? '';
+    this.bodyText = bodyText;
+    this.body = bodyText;
   }
+}
+
+type RawFetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** A hand-built fake that serves only `raw`, completed with the SDK's other methods. */
+// biome-ignore lint/suspicious/noExplicitAny: fakes return Response-shaped literals
+export function fakeClient<T extends { raw: (url: string, init?: RequestInit) => any }>(fake: T) {
+  return { ...httpClientFromRaw(fake.raw), ...fake };
+}
+
+/**
+ * The SDK `HttpClient` surface built over one `raw` transport, mirroring
+ * connector-sdk/src/http-client.ts minus retries: `raw` hands back any status,
+ * every other method throws HttpStatusError on a non-2xx. Tests that fake a
+ * connector's client pass their own `raw` so the connector's `request`/`json`
+ * paths see the same status handling the SDK gives them.
+ */
+export function httpClientFromRaw(raw: RawFetch, errorPrefix = 'HTTP') {
+  const request = async (url: string, init?: RequestInit) => {
+    const response = await raw(url, init);
+    if (response.ok) return response;
+    throw new HttpStatusError({
+      prefix: errorPrefix,
+      method: (init?.method ?? 'GET').toUpperCase(),
+      url,
+      status: response.status,
+      statusText: response.statusText ?? '',
+      bodyText: await response.text(),
+    });
+  };
+  const json = async (url: string, init?: RequestInit) => (await request(url, init)).json();
+  return {
+    raw,
+    request,
+    json,
+    get: (url: string, init?: RequestInit) => json(url, { ...init, method: 'GET' }),
+    post: (url: string, body?: unknown, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      if (!headers.has('content-type')) headers.set('Content-Type', 'application/json');
+      return json(url, {
+        ...init,
+        method: 'POST',
+        headers,
+        body: body === undefined ? init.body : JSON.stringify(body),
+      });
+    },
+  };
 }
 
 export function connectorSdkMock() {
@@ -127,35 +192,23 @@ export function connectorSdkMock() {
   }
   class IntegrationConnector extends ConnectorRuntime {}
   // Connectors create their HTTP client as a class field at construction, so a
-  // throwing stub would break `new XConnector()`. `get`/`post` are faithful
-  // minimal implementations over global fetch (HttpStatusError on non-2xx,
-  // mirroring connector-sdk/src/http-client.ts) so tests can drive a
-  // connector's real request and error paths by stubbing `globalThis.fetch`.
-  // The remaining methods throw only IF actually called — tests that need
-  // them override `connector.http` / `connector.requestJson` first.
-  const createHttpClient = () => ({
-    get: async (url: string) => {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new HttpStatusError({ status: response.status, body: await response.text() });
-      }
-      return response.json();
-    },
-    json: notUsed('http.json'),
-    request: notUsed('http.request'),
-    raw: notUsed('http.raw'),
-    post: async (url: string, body?: unknown) => {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+  // throwing stub would break `new XConnector()`. Every method is a faithful
+  // minimal implementation over global fetch (see httpClientFromRaw), so tests
+  // drive a connector's real request and error paths by stubbing
+  // `globalThis.fetch`. Configured headers and the bearer token are sent.
+  const createHttpClient = (
+    options: { token?: string; headers?: Record<string, string>; errorPrefix?: string } = {}
+  ) =>
+    httpClientFromRaw((url, init) => {
+      const headers = new Headers(options.headers);
+      new Headers(init?.headers).forEach((value, key) => {
+        headers.set(key, value);
       });
-      if (!response.ok) {
-        throw new HttpStatusError({ status: response.status, body: await response.text() });
+      if (options.token && !headers.has('authorization')) {
+        headers.set('Authorization', `Bearer ${options.token}`);
       }
-      return response.json();
-    },
-  });
+      return fetch(url, { ...init, headers });
+    }, options.errorPrefix);
 
   return {
     requireBrowser,

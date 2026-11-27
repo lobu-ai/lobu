@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
-import { connectorSdkMock } from './connector-sdk.mock';
+import { connectorSdkMock, fakeClient } from './connector-sdk.mock';
 import { runSync } from './sync-harness';
 
 mock.module('@lobu/connector-sdk', () => connectorSdkMock());
@@ -49,7 +49,7 @@ function fakeHttp(pages: CalPage[]) {
   return {
     calls,
     urls,
-    client: {
+    client: fakeClient({
       raw: async (url: string) => {
         urls.push(url);
         const u = new URL(url);
@@ -68,7 +68,7 @@ function fakeHttp(pages: CalPage[]) {
           text: async () => 'err',
         } as unknown as Response;
       },
-    },
+    }),
   };
 }
 
@@ -366,7 +366,7 @@ function rejectingTokenHttp(status: number, body: string) {
   let call = 0;
   return {
     calls,
-    client: {
+    client: fakeClient({
       raw: async (url: string) => {
         const u = new URL(url);
         calls.push({
@@ -394,7 +394,7 @@ function rejectingTokenHttp(status: number, body: string) {
           text: async () => '',
         } as unknown as Response;
       },
-    },
+    }),
   };
 }
 
@@ -486,7 +486,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
     const connector = new GoogleCalendarConnector();
     // Both the incremental AND the full-sync retry are rejected — the signature
     // of a scope the user never granted. Recovery must not mask this.
-    connector.client = () => ({
+    connector.client = () => (fakeClient({
       raw: async () =>
         ({
           ok: false,
@@ -494,7 +494,7 @@ describe('GoogleCalendarConnector poisoned sync token recovery', () => {
           json: async () => JSON.parse(SCOPE_REJECTION_BODY),
           text: async () => SCOPE_REJECTION_BODY,
         }) as unknown as Response,
-    });
+    }));
 
     await expect(
       runSync(connector, {
@@ -535,7 +535,7 @@ describe('GoogleCalendarConnector incremental sync', () => {
     // calls are the full-sync path and succeed.
     let call = 0;
     const calls: Array<Record<string, string | null>> = [];
-    connector.client = () => ({
+    connector.client = () => (fakeClient({
       raw: async (url: string) => {
         const u = new URL(url);
         calls.push({
@@ -557,7 +557,7 @@ describe('GoogleCalendarConnector incremental sync', () => {
           text: async () => '',
         } as unknown as Response;
       },
-    });
+    }));
 
     const result = await runSync(connector, {
       feedKey: 'events',

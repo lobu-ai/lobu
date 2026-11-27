@@ -16,6 +16,7 @@
 import { createHash } from 'node:crypto';
 import {
   ConnectorRuntime,
+  createHttpClient,
   type EventAttributionRule,
   type EventEnvelope,
   type FeedReadContext,
@@ -28,8 +29,9 @@ import {
 const API_VERSION = '2026-07';
 
 /**
- * A Shopify failure carrying the HTTP status the runtime classifies it by
- * (`status` crosses the isolate boundary as `httpStatus`).
+ * A GraphQL `errors[]` failure carrying the HTTP status it stands for, which the
+ * runtime classifies it by (`status` crosses the isolate boundary as
+ * `httpStatus`). A non-2xx response already throws the client's HttpStatusError.
  */
 class ShopifyApiError extends Error {
   constructor(
@@ -282,16 +284,14 @@ export default class ShopifyConnector extends ConnectorRuntime {
   }
 
   private async gql<T>(shop: string, token: string, query: string, variables: Record<string, unknown>): Promise<T> {
-    const r = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-      body: JSON.stringify({ query, variables }),
+    const http = createHttpClient({
+      headers: { 'X-Shopify-Access-Token': token },
+      errorPrefix: 'Shopify GraphQL',
     });
-    if (!r.ok) throw new ShopifyApiError(`Shopify GraphQL ${r.status}: ${(await r.text()).slice(0, 300)}`, r.status);
-    const json = (await r.json()) as {
+    const json = await http.post<{
       data?: T;
       errors?: Array<{ message: string; extensions?: { code?: unknown } }>;
-    };
+    }>(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, { query, variables });
     if (json.errors?.length) {
       const message = `Shopify GraphQL: ${json.errors
         .map((e) => e.message)

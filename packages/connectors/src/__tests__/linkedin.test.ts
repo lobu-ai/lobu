@@ -1,5 +1,5 @@
 import { runSync } from "./sync-harness";
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { connectorSdkMock } from "./connector-sdk.mock";
 import { constrainBrowserInput } from "@lobu/connector-sdk/browser-requirement";
@@ -72,6 +72,11 @@ function buildHomeFeedEvents(rows: any[], occurredAt: Date): any[] {
     occurredAt
   );
 }
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 beforeAll(async () => {
   const mod = await import("../linkedin");
@@ -3046,7 +3051,8 @@ describe("LinkedInConnector home_feed", () => {
         },
       }),
     };
-    const connector = new LinkedInConnector(fetchImpl);
+    globalThis.fetch = fetchImpl as typeof fetch;
+    const connector = new LinkedInConnector();
 
     const result = await runSync(connector, {
       feedKey: "home_feed",
@@ -3082,7 +3088,8 @@ describe("LinkedInConnector home_feed", () => {
         },
       }),
     };
-    const connector = new LinkedInConnector(failedFetch);
+    globalThis.fetch = failedFetch as typeof fetch;
+    const connector = new LinkedInConnector();
     await expect(
       runSync(connector, {
         feedKey: "home_feed",
@@ -3507,8 +3514,8 @@ describe("prepare_comment helpers", () => {
 
   test("resolves a Copy-link short URL to the durable LinkedIn share id", async () => {
     const calls: Array<{ input: string; init: RequestInit }> = [];
-    const fetchImpl = async (input: URL, init: RequestInit) => {
-      calls.push({ input: input.href, init });
+    globalThis.fetch = (async (input: string, init: RequestInit) => {
+      calls.push({ input: String(input), init });
       return new Response(null, {
         status: 301,
         headers: {
@@ -3516,10 +3523,10 @@ describe("prepare_comment helpers", () => {
             "https://www.linkedin.com/posts/example-user_example-share-1234567890123456789-abcd/?utm_source=share",
         },
       });
-    };
+    }) as typeof fetch;
 
     await expect(
-      resolveLinkedInShortPostUrl("https://lnkd.in/p/example-token", fetchImpl)
+      resolveLinkedInShortPostUrl("https://lnkd.in/p/example-token")
     ).resolves.toBe(
       "https://www.linkedin.com/feed/update/urn:li:share:1234567890123456789"
     );
@@ -3531,7 +3538,7 @@ describe("prepare_comment helpers", () => {
 
   test("resolves only LinkedIn post short links and leaves other rows untouched", async () => {
     let fetchCount = 0;
-    const fetchImpl = async () => {
+    globalThis.fetch = (async () => {
       fetchCount += 1;
       return new Response(null, {
         status: 301,
@@ -3540,7 +3547,7 @@ describe("prepare_comment helpers", () => {
             "https://www.linkedin.com/posts/example-user_activity-1234567890123456789-abcd",
         },
       });
-    };
+    }) as typeof fetch;
     const rows = [
       {
         id: "short",
@@ -3560,7 +3567,7 @@ describe("prepare_comment helpers", () => {
       },
     ];
 
-    const resolved = await resolveHomeFeedPostUrls(rows, fetchImpl);
+    const resolved = await resolveHomeFeedPostUrls(rows);
     expect(fetchCount).toBe(1);
     expect(resolved[0].post_url).toBe(
       "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789"

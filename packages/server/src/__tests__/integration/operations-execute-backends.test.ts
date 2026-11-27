@@ -3,10 +3,12 @@ import { resolveRunConnectorPolicy } from "../../authz/operation-run-policy";
 import { connectionOperationsExecutor } from "../../gateway/connections/platforms/connector-chat-platform";
 import type { PlatformConnection } from "../../gateway/connections/types";
 import GoogleCalendarConnector from "@lobu/connectors/google_calendar";
+import { createIsolateConnectorCompiler } from "@lobu/connector-worker/compile";
 import { fileInputSchema } from "@lobu/connector-sdk";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MCP_PROTOCOL_VERSION, REDACTED_SENTINEL } from "@lobu/core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../../index";
@@ -37,6 +39,10 @@ const LOCAL = "demo.ops.backend.local";
 const INLINE_FILE_BYTES = Buffer.from("%PDF-1.4 inline attachment bytes");
 const MCP = "demo.ops.backend.mcp";
 const HTTP = "demo.ops.backend.http";
+// The bundled Google Drive connector, compiled for the isolate exactly as the
+// catalog ships it, under a test key.
+const DRIVE = "demo.ops.backend.drive";
+const DRIVE_SOURCE = fileURLToPath(new URL("../../../../connectors/src/google_drive.ts", import.meta.url));
 const GOOGLE_CALENDAR_DELETE_ACTION = new GoogleCalendarConnector().definition
 	.actions?.events_delete;
 
@@ -59,6 +65,7 @@ describe("operations.execute backend lifecycle", () => {
 	let mcpConnectionId: number;
 	let secondMcpConnectionId: number;
 	let httpConnectionId: number;
+	let driveConnectionId: number;
 	let automationId: number;
 	let sourceRunId: number;
 	let failedTransportCallCount = 0;
@@ -87,6 +94,7 @@ describe("operations.execute backend lifecycle", () => {
 			[LOCAL, "Local backend"],
 			[MCP, "MCP backend"],
 			[HTTP, "HTTP backend"],
+			[DRIVE, "Drive backend"],
 		] as const) {
 			await createTestConnectorDefinition({
 				key,
@@ -169,9 +177,6 @@ describe("operations.execute backend lifecycle", () => {
 						if (ctx.input.value === 'nul-error') {
 							throw new Error('local\\u0000boom');
 						}
-						if (ctx.input.value === 'target-missing') {
-							throw Object.assign(new Error('Synthetic target was not found'), { status: 404 });
-						}
 						if (ctx.input.value === 'delivery-refused') {
 							return { success: false, error: 'Synthetic delivery was refused', error_code: 'ACTION_FAILED' };
 						}
@@ -203,6 +208,26 @@ describe("operations.execute backend lifecycle", () => {
 				module.exports = { ConnectorRuntime };
 			`}
 			WHERE connector_key = ${LOCAL}
+		`;
+		await sql`
+			UPDATE connector_definitions
+			SET actions_schema = ${sql.json({
+				download_file: {
+					name: "Download File",
+					kind: "read",
+					input_schema: {
+						type: "object",
+						properties: { file_id: { type: "string" } },
+						required: ["file_id"],
+					},
+				},
+			})}
+			WHERE organization_id = ${orgId} AND key = ${DRIVE}
+		`;
+		await sql`
+			UPDATE connector_versions
+			SET compiled_code = ${await createIsolateConnectorCompiler().compileConnectorForIsolateFromFile(DRIVE_SOURCE)}
+			WHERE connector_key = ${DRIVE}
 		`;
 		await sql`
 			UPDATE connector_definitions
@@ -244,11 +269,18 @@ describe("operations.execute backend lifecycle", () => {
 			created_by: userId,
 			visibility: "private",
 		});
+		const drive = await createTestConnection({
+			organization_id: orgId,
+			connector_key: DRIVE,
+			created_by: userId,
+			visibility: "private",
+		});
 		localConnectionId = local.id;
+		driveConnectionId = drive.id;
 		mcpConnectionId = mcp.id;
 		secondMcpConnectionId = secondMcp.id;
 		httpConnectionId = http.id;
-		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download", "download_source_copy"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]]] as const) {
+		for (const [connectorKey, keys] of [[LOCAL, ["echo", "stage_browser", "download", "download_source_copy"]], [MCP, ["remote_echo"]], [HTTP, ["create_item", "get_repo", "get_content", "get_environment"]], [DRIVE, ["download_file"]]] as const) {
 			// Every other action of these connectors asks, so the approval cases have something to hold.
 			await upsertEntityApprovalPolicy(orgId, {
 				resourceClass: "connector_action", connectorKey, effects: { execute: "approval" },
@@ -263,6 +295,7 @@ describe("operations.execute backend lifecycle", () => {
 			[MCP, mcp.id],
 			[MCP, secondMcp.id],
 			[HTTP, http.id],
+			[DRIVE, drive.id],
 		] as const) {
 			const accountId = `acct_${connectionId}_${connectorKey}`;
 			await sql`
@@ -297,6 +330,13 @@ describe("operations.execute backend lifecycle", () => {
 			"fetch",
 			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
+				if (url.startsWith("https://www.googleapis.com/drive/v3/files/deleted-file")) {
+					// Drive still lists the file; its content is gone by the time it is read.
+					if (!url.includes("alt=media")) {
+						return jsonResponse({ id: "deleted-file", name: "notes.txt", mimeType: "text/plain", size: "12" });
+					}
+					return jsonResponse({ error: { code: 404, message: "File not found: deleted-file.", status: "NOT_FOUND" } }, 404);
+				}
 				if (url === "https://api.example.test/openapi-execute-backends.json") {
 					return jsonResponse({
 						openapi: "3.0.0",
@@ -1723,7 +1763,7 @@ describe("operations.execute backend lifecycle", () => {
 	});
 
 	it.each([
-		["a connector error's HTTP status", "local", { value: "target-missing" }, "NOT_FOUND", "user"],
+		["a bundled connector's upstream HTTP status", "drive", { file_id: "deleted-file" }, "NOT_FOUND", "user"],
 		["the code a refused action names", "local", { value: "delivery-refused" }, "ACTION_FAILED", "user"],
 		["no cause for a refusal naming a code outside the catalog", "local", { value: "forged-code" }, undefined, "system"],
 		["an upstream HTTP status", "http", { body: { value: "nul-failure" } }, "UPSTREAM_5XX", "dependency"],
@@ -1735,6 +1775,7 @@ describe("operations.execute backend lifecycle", () => {
 	] as const)("records an inline failure under %s", async (_label, backend, input, code, kind) => {
 		const target = {
 			local: { connection_id: localConnectionId, operation_key: "echo" },
+			drive: { connection_id: driveConnectionId, operation_key: "download_file" },
 			http: { connection_id: httpConnectionId, operation_key: "create_item" },
 			mcp: { connection_id: mcpConnectionId, operation_key: "remote_echo" },
 		}[backend];

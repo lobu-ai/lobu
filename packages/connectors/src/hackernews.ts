@@ -10,7 +10,9 @@ import {
   type RuntimeConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  HttpStatusError,
   sleep,
   type SyncContext,
   type SyncResult,
@@ -143,9 +145,6 @@ function rankByThreadSize(nodes: AlgoliaItem[] | undefined): AlgoliaItem[] {
 // ---------------------------------------------------------------------------
 // Connector
 // ---------------------------------------------------------------------------
-
-/** Algolia answered a reply fetch with 429: stop fetching replies this sync. */
-class HnRateLimited extends Error {}
 
 export default class HackerNewsConnector extends ConnectorRuntime {
   readonly definition: RuntimeConnectorDefinition = {
@@ -363,6 +362,12 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   };
 
   private readonly BASE_URL = 'https://hn.algolia.com/api/v1';
+  // Search pages honour Algolia's Retry-After (up to a minute) before a 429
+  // gives up the page.
+  private readonly http = createHttpClient({ errorPrefix: 'Algolia API', maxRetryAfterMs: 60_000 });
+  // Reply and article fetches are best-effort inside a fixed budget, so a
+  // failure is skipped rather than retried.
+  private readonly bestEffortHttp = createHttpClient({ errorPrefix: 'Hacker News', retry: false });
   private readonly ENGAGEMENT_THRESHOLD = 50;
   private readonly CONTENT_FETCH_TIMEOUT = 5000;
   private readonly MAX_PAGES = 50;
@@ -429,21 +434,15 @@ export default class HackerNewsConnector extends ConnectorRuntime {
           `&restrictSearchableAttributes=${encodeURIComponent(searchFields.join(','))}` +
           `&numericFilters=${encodeURIComponent(`created_at_i>${lookbackTimestamp}`)}`;
 
-      const response = await fetch(url);
-
-      // Honor Algolia's rate-limit response so we don't hammer them and turn
-      // a transient 429 into "Unexpected token < in JSON" when the next call
-      // returns an HTML error page.
-      if (response.status === 429) {
-        const retryAfter = response.headers.get('Retry-After');
-        const waitMs = retryAfter ? Math.min(60_000, Math.max(1, Number(retryAfter)) * 1000) : 5000;
-        await sleep(Number.isFinite(waitMs) ? waitMs : 5000);
-        continue;
-      }
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`Algolia API error (${response.status}): ${text}`);
+      let response: Response;
+      try {
+        response = await this.http.request(url);
+      } catch (error) {
+        // Still rate-limited after the client waited out Retry-After: try the
+        // page again until the sync budget runs out, rather than turning a
+        // transient 429 into a failed sync.
+        if (error instanceof HttpStatusError && error.status === 429) continue;
+        throw error;
       }
 
       // Algolia normally returns JSON, but proxies/captive portals occasionally
@@ -544,17 +543,15 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       let item: AlgoliaItem;
       try {
         item = await withinReplyBudget(replyDeadline, async (signal) => {
-          const response = await fetch(
+          return await this.bestEffortHttp.json<AlgoliaItem>(
             `${this.BASE_URL}/items/${encodeURIComponent(hit.objectID)}`,
             { signal }
           );
-          if (response.status === 429) throw new HnRateLimited();
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return (await response.json()) as AlgoliaItem;
         });
       } catch (error) {
         failures++;
-        if (error instanceof HnRateLimited) break;
+        // Algolia is rate-limiting: stop fetching replies this sync.
+        if (error instanceof HttpStatusError && error.status === 429) break;
         continue;
       }
 
@@ -743,14 +740,16 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     const timeoutId = setTimeout(() => controller.abort(), this.CONTENT_FETCH_TIMEOUT);
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await this.bestEffortHttp.raw(url, {
         signal: controller.signal,
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; HNBot/1.0)',
           Accept: 'text/html,application/xhtml+xml',
         },
       });
-    } catch {
+    } catch (error) {
+      // The site answered with a transient status: no article, egress is fine.
+      if (error instanceof HttpStatusError) return { ok: false, network: false };
       // Timeout/abort/DNS/connection refused — a genuine egress failure.
       return { ok: false, network: true };
     } finally {
