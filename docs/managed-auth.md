@@ -85,8 +85,11 @@ hold, so it never leaks which one failed:
 2. the connection is the caller's own (`created_by`),
 3. it is a consent-only grant holder (`config.consent_only = 'true'`).
 
-Membership of the lender org is not required: owning the grant is the
-authorization, so a lender can be private and have no members. A grant in your
+Membership of the lender org is not required to fetch the token: owning the
+grant is the authorization. Removing a user from the lender therefore does not
+revoke their token access; delete or disable the connection to do that. (New
+grants are still created through `connect_managed`, which joins the public
+lender.) A grant in your
 own personal workspace cannot be delegated to a local install, by design — the
 endpoint exists only to delegate managed grant holders, never to export
 ordinary connection tokens. An org that does not exist answers with the same
