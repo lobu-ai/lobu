@@ -207,6 +207,7 @@ describe("UI review proof", () => {
         { filename: "apps/chrome/src/sidepanel/index.ts" },
         { filename: "apps/mac/Owletto/AppDelegate.swift" },
         { filename: "scripts/check-manifest.mjs" },
+        { filename: ".github/workflows/lobu-watch.yml" },
       ])
     ).toBe(true);
 
