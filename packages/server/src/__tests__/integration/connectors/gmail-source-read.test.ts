@@ -4,8 +4,8 @@
  * The DB-level seam is covered by `source-feed-read.test.ts` (with Postgres as
  * the stand-in source). This test covers Gmail's per-feed `read` handler.
  *
- * The only external dependency — the Gmail HTTP API — is stubbed at the
- * `HttpClient.raw()` boundary (the connector's single egress seam), so this is
+ * The only external dependency — the Gmail HTTP API — is stubbed under the
+ * `HttpClient` boundary (the connector's single egress seam), so this is
  * deterministic and needs no network or DB. It verifies:
  *  - configured and caller Gmail queries are AND-composed;
  *  - the stable column set + row shape (id, thread_id, subject, from fields, date, snippet, url);
@@ -16,6 +16,7 @@
  *  - missing credentials and an empty `q` throw.
  */
 
+import { HttpStatusError, type HttpClient } from '@lobu/connector-sdk';
 import { describe, expect, it } from 'vitest';
 import GmailConnector from '@lobu/connectors/google_gmail';
 
@@ -108,14 +109,21 @@ function fakeClient(
     }
     throw new Error(`unexpected url: ${url}`);
   };
-  // Only raw() is used by the pushdown; the rest satisfy the interface unused.
-  return {
-    raw,
-    request: raw,
-    json: async () => ({}),
-    get: async () => ({}),
-    post: async () => ({}),
-  } as unknown as import('@lobu/connector-sdk').HttpClient;
+  // Same status contract as the SDK client: a non-2xx throws HttpStatusError.
+  const request = async (url: string): Promise<Response> => {
+    const response = await raw(url);
+    if (response.ok) return response;
+    throw new HttpStatusError({
+      prefix: 'Gmail API',
+      method: 'GET',
+      url,
+      status: response.status,
+      statusText: response.statusText,
+      bodyText: await response.text(),
+    });
+  };
+  const json = async (url: string) => (await request(url)).json();
+  return { raw, request, json, get: json } as unknown as HttpClient;
 }
 
 /** A GmailConnector whose HTTP boundary is the fake client. */

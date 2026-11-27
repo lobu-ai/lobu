@@ -1,24 +1,20 @@
-import { describe, expect, mock, test } from "bun:test";
-import {
-	connectorSdkMock,
-	HttpStatusError,
-} from "./connector-sdk.mock";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { connectorSdkMock } from "./connector-sdk.mock";
 import { runSync } from './sync-harness';
 
-mock.module("@lobu/connector-sdk", () => ({
-	...connectorSdkMock(),
-	createHttpClient: () => ({
-		get: async () => {
-			throw new HttpStatusError({ status: 403, message: "Forbidden" });
-		},
-		json: async () => {
-			throw new HttpStatusError({ status: 403, message: "Forbidden" });
-		},
-		request: async () => {
-			throw new HttpStatusError({ status: 403, message: "Forbidden" });
-		},
-	}),
-}));
+// The shared mock's createHttpClient goes over global fetch, so the 403 is
+// stubbed there. Overriding createHttpClient in mock.module would leak into
+// every later connector test in the run (bun shares the mock registry).
+mock.module("@lobu/connector-sdk", connectorSdkMock);
+
+const realFetch = globalThis.fetch;
+beforeEach(() => {
+	globalThis.fetch = (async () =>
+		new Response("Forbidden", { status: 403, statusText: "Forbidden" })) as unknown as typeof fetch;
+});
+afterEach(() => {
+	globalThis.fetch = realFetch;
+});
 
 const { default: XConnector } = await import("../x");
 
