@@ -37,6 +37,8 @@ function linkedIn(
     signedIn?: string;
     company?: { following: boolean };
     sentTotal?: number;
+    /** Rows LinkedIn's API returns per page, whatever count was asked for. */
+    sentPageCap?: number;
     /** Accounts without an overflow menu see the relationship control in the header itself. */
     header?: "menu" | "buttons" | "unrecognized" | "popup";
   } = {}
@@ -103,7 +105,7 @@ function linkedIn(
       const start = Number(query.get("start"));
       const count = Number(query.get("count"));
       return json({
-        elements: pending.slice(start, start + count).map(([slug, firstName, lastName, occupation, sentTime]) => ({
+        elements: pending.slice(start, start + Math.min(count, options.sentPageCap ?? count)).map(([slug, firstName, lastName, occupation, sentTime]) => ({
           invitation: {
             sentTime,
             toMember: { firstName, lastName, publicIdentifier: slug, ...(occupation ? { occupation } : {}) },
@@ -702,6 +704,10 @@ test(
     const more = await linkedIn({}, { sentTotal: 3 }).run("list_sent_invitations", { limit: 2 });
     expect(more.output).toMatchObject({ total: 3, truncated: true });
     expect(more.output.invitations).toHaveLength(2);
+    // A short page ends the read early; LinkedIn's count still shows it is incomplete.
+    const short = await linkedIn({}, { sentTotal: 3, sentPageCap: 1 }).run("list_sent_invitations", {});
+    expect(short.output).toMatchObject({ total: 3, truncated: true });
+    expect(short.output.invitations).toHaveLength(1);
     expect(li.tabsClosed()).toBe(true);
   },
   SLOW

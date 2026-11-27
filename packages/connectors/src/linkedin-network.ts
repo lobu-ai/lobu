@@ -138,7 +138,7 @@ export function buildLinkedInNetworkExpression(
     const assertPage = () => {
       if (!onTarget()) throw new Error('LinkedIn page changed; refusing to act');
     };
-    /** A read from LinkedIn's own API with the signed-in session; null when it refuses. */
+    /** A read from LinkedIn's own API with the signed-in session. */
     const voyager = async path => {
       const cookie = document.cookie.split('; ').find(c => c.startsWith('JSESSIONID='));
       if (!cookie) throw new Error('Not logged into LinkedIn');
@@ -148,11 +148,11 @@ export function buildLinkedInNetworkExpression(
         credentials: 'include',
         headers: { 'csrf-token': csrf, 'x-restli-protocol-version': '2.0.0' },
       });
-      return response.ok ? response.json() : { status: response.status };
+      return { ok: response.ok, status: response.status, body: response.ok ? await response.json() : null };
     };
     const assertAccount = async () => {
-      const self = await voyager('/voyager/api/me');
-      if (self.status) throw new Error('LinkedIn account check failed (HTTP ' + self.status + ')');
+      const { ok, status, body: self } = await voyager('/voyager/api/me');
+      if (!ok) throw new Error('LinkedIn account check failed (HTTP ' + status + ')');
       if (self?.miniProfile?.entityUrn !== req.account)
         throw new Error('The signed-in LinkedIn account is not the connected account; refusing to act');
     };
@@ -399,8 +399,8 @@ export function buildLinkedInNetworkExpression(
       const listed = [];
       for (let start = 0; listed.length <= req.limit;) {
         const count = Math.min(100, req.limit + 1 - listed.length);
-        const page = await voyager('/voyager/api/relationships/sentInvitationViewsV2?count=' + count + '&invitationType=CONNECTION&q=invitationType&start=' + start);
-        if (page.status || !Array.isArray(page.elements)) throw new Error('LinkedIn sent invitations did not load' + (page.status ? ' (HTTP ' + page.status + ')' : ''));
+        const { ok, status, body: page } = await voyager('/voyager/api/relationships/sentInvitationViewsV2?count=' + count + '&invitationType=CONNECTION&q=invitationType&start=' + start);
+        if (!ok || !Array.isArray(page?.elements)) throw new Error('LinkedIn sent invitations did not load' + (ok ? '' : ' (HTTP ' + status + ')'));
         listed.push(...page.elements);
         if (page.elements.length < count) break;
         start += page.elements.length;
@@ -415,10 +415,11 @@ export function buildLinkedInNetworkExpression(
           sent: Number.isFinite(invitation.sentTime) ? new Date(invitation.sentTime).toISOString() : null,
         };
       });
-      const truncated = listed.length > req.limit;
       // The People tab carries LinkedIn's count; a complete read is its own count.
       const tab = await wait(() => [...document.querySelectorAll('main a[href*="/invitation-manager/sent/"]')].map(text).find(t => t.startsWith('People')), null, 15);
       const shownTotal = tab ? Number(tab.slice('People'.length).trim().split(' ')[0].split(',').join('')) : NaN;
+      // A short page can end the read early, so LinkedIn's own count also decides.
+      const truncated = listed.length > req.limit || (Number.isFinite(shownTotal) && shownTotal > invitations.length);
       const total = Number.isFinite(shownTotal) ? shownTotal : truncated ? null : invitations.length;
       return { invitations, total, truncated };
     }
