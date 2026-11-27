@@ -223,6 +223,7 @@ export const COMPARE_FILE_CAP = 300;
  *   apps/chrome/ the browser extension — distributed as a Web Store zip
  *   apps/mac/    the native Mac app — distributed as a signed build
  *   scripts/     build and post-build checks — run in CI, never served
+ *   .github/     CI workflows and repo config — run on GitHub, never served
  *
  * The extension and the Mac app do have their own UI (the Owletto side panel,
  * for one), and this exemption deliberately does NOT claim otherwise. It says
@@ -247,6 +248,7 @@ export const UNHOSTED_PREFIXES = [
   "apps/chrome/",
   "apps/mac/",
   "scripts/",
+  ".github/",
   // Markdown design notes. Not referenced by vite.config.ts and never enter the
   // hosted SPA, so a docs-only pointer change has no UI to screenshot.
   "docs/",
