@@ -261,6 +261,67 @@ interface WaitForDeviceActionRunOptions {
   onClaimed?: () => void;
 }
 
+interface WaitedRun {
+  status: string;
+  approval_status: string;
+  action_output: unknown;
+  error_message: string | null;
+  claimed_at: Date | string | null;
+  error_code: string | null;
+  claim_horizon_open: boolean;
+}
+
+async function readWaitedRun(
+  sql: DbClient,
+  runId: number,
+  organizationId: string
+): Promise<WaitedRun | undefined> {
+  const rows = (await sql`
+    SELECT status, approval_status, action_output, error_message, claimed_at,
+      run_metadata->>'error_code' AS error_code,
+      COALESCE(expires_at > now(), false) AS claim_horizon_open
+    FROM runs
+    WHERE id = ${runId} AND organization_id = ${organizationId}
+    LIMIT 1
+  `) as WaitedRun[];
+  return rows[0];
+}
+
+function disappearedOutcome(runId: number): DeviceActionRunOutcome {
+  return {
+    status: 'failed',
+    error_message: `Run ${runId} disappeared from runs table while waiting.`,
+  };
+}
+
+/**
+ * The caller's outcome for a run that has settled, or null while it is still
+ * pending or running. The poll loop and the timeout-race re-read both answer
+ * through this, so the two cannot drift on what a settled row means.
+ */
+function settledOutcome(runId: number, row: WaitedRun): DeviceActionRunOutcome | null {
+  if (row.status === 'completed') {
+    return { status: 'completed', output: row.action_output ?? {} };
+  }
+  if (row.status === 'pending' && row.approval_status === 'pending') {
+    return { status: 'pending_approval' };
+  }
+  if (row.status === 'failed' || row.status === 'timeout' || row.status === 'cancelled') {
+    const errorCode = toToolErrorCode(row.error_code);
+    return {
+      status: row.status === 'timeout' ? 'timeout' : 'failed',
+      output: row.action_output ?? {},
+      error_message:
+        row.status === 'failed'
+          ? operationFailureMessage(runId, row.error_message)
+          : row.error_message ?? `Run ${runId} ${row.status}`,
+      ...(row.status === 'cancelled' ? { cancelled: true } : {}),
+      ...(errorCode ? { error_code: errorCode } : {}),
+    };
+  }
+  return null;
+}
+
 export function waitForDeviceActionRun(
   runId: number,
   organizationId: string,
@@ -308,51 +369,10 @@ export async function waitForDeviceActionRunWithOptions(
   );
 
   while (true) {
-    const rows = (await sql`
-      SELECT status, approval_status, action_output, error_message, claimed_at,
-        run_metadata->>'error_code' AS error_code,
-        COALESCE(expires_at > now(), false) AS claim_horizon_open
-      FROM runs
-      WHERE id = ${runId} AND organization_id = ${organizationId}
-      LIMIT 1
-    `) as Array<{
-      status: string;
-      approval_status: string;
-      action_output: unknown;
-      error_message: string | null;
-      claimed_at: Date | string | null;
-      error_code: string | null;
-      claim_horizon_open: boolean;
-    }>;
-    const row = rows[0];
-    if (!row) {
-      return {
-        status: 'failed',
-        error_message: `Run ${runId} disappeared from runs table while waiting.`,
-      };
-    }
-    if (row.status === 'completed') {
-      return {
-        status: 'completed',
-        output: row.action_output ?? {},
-      };
-    }
-    if (row.status === 'pending' && row.approval_status === 'pending') {
-      return { status: 'pending_approval' };
-    }
-    if (row.status === 'failed' || row.status === 'timeout' || row.status === 'cancelled') {
-      const errorCode = toToolErrorCode(row.error_code);
-      return {
-        status: row.status === 'timeout' ? 'timeout' : 'failed',
-        output: row.action_output ?? {},
-        error_message:
-          row.status === 'failed'
-            ? operationFailureMessage(runId, row.error_message)
-            : row.error_message ?? `Run ${runId} ${row.status}`,
-        ...(row.status === 'cancelled' ? { cancelled: true } : {}),
-        ...(errorCode ? { error_code: errorCode } : {}),
-      };
-    }
+    const row = await readWaitedRun(sql, runId, organizationId);
+    if (!row) return disappearedOutcome(runId);
+    const outcome = settledOutcome(runId, row);
+    if (outcome) return outcome;
     // Still pending or running. Check the right deadline for this phase.
     if (row.claimed_at && claimedAtMs == null) {
       claimedAtMs =
@@ -460,39 +480,13 @@ export async function waitForDeviceActionRunWithOptions(
   })) as Array<{ id: number }>;
 
   if (updated.length === 0) {
-    // Worker won the race. Re-read to return whatever it actually said.
-    const finalRows = (await sql`
-      SELECT status, approval_status, action_output, error_message
-      FROM runs
-      WHERE id = ${runId} AND organization_id = ${organizationId}
-      LIMIT 1
-    `) as Array<{
-      status: string;
-      approval_status: string;
-      action_output: Record<string, unknown> | null;
-      error_message: string | null;
-    }>;
-    const final = finalRows[0];
-    if (final?.status === 'completed') {
-      return {
-        status: 'completed',
-        output: (final.action_output ?? {}) as Record<string, unknown>,
-      };
-    }
-    if (final?.status === 'pending' && final.approval_status === 'pending') {
-      return { status: 'pending_approval' };
-    }
-    if (final?.status === 'failed' || final?.status === 'cancelled') {
-      return {
-        status: 'failed',
-        output: final.action_output ?? {},
-        error_message:
-          final.status === 'failed'
-            ? operationFailureMessage(runId, final.error_message)
-            : final.error_message ?? `Run ${runId} cancelled`,
-        ...(final.status === 'cancelled' ? { cancelled: true } : {}),
-      };
-    }
+    // Someone else settled the run first (the device's verdict, or another
+    // finalizer). Return what the row says, read exactly as the poll loop
+    // reads it.
+    const final = await readWaitedRun(sql, runId, organizationId);
+    if (!final) return disappearedOutcome(runId);
+    const outcome = settledOutcome(runId, final);
+    if (outcome) return outcome;
     // Shouldn't reach here, but fall through to timeout.
   }
 

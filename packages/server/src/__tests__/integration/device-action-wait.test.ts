@@ -178,6 +178,34 @@ async function claim(
   `;
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** Resolve once some backend is parked on a lock `blockerPid` holds. */
+async function waitForBackendBlockedBy(blockerPid: number): Promise<void> {
+  const sql = getTestDb();
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const rows = (await sql`
+      SELECT count(*)::int AS blocked
+      FROM pg_stat_activity a
+      WHERE ${blockerPid}::int = ANY(pg_blocking_pids(a.pid))
+    `) as unknown as Array<{ blocked: number }>;
+    if ((rows[0]?.blocked ?? 0) > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        'Timed out waiting for the waiter to park on the device write — its timeout UPDATE no longer contends for the run row.'
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 const FAST_BUDGETS = { queueMs: 400, postClaimMs: 600, pollMs: 30 };
 const WORKER_ID = 'worker-test';
 
@@ -600,6 +628,59 @@ describe('waitForDeviceActionRun', () => {
     expect(final[0].status).toBe('timeout');
     expect(final[0].action_output).toBeNull();
   });
+
+  // The device's verdict lands between the waiter's last poll and its timeout
+  // UPDATE. Holding the device's write uncommitted until the waiter's UPDATE is
+  // parked on the row makes that interleaving deterministic: on commit, the
+  // UPDATE re-checks its `status IN ('pending', 'running')` guard, matches
+  // nothing, and the waiter must return the device's verdict exactly as the
+  // poll loop would have, typed code included.
+  it('a device verdict that wins the timeout race keeps its error code', async () => {
+    const sql = getTestDb();
+    const org = await createTestOrganization();
+    await insertChromeConnector(org.id);
+    const connId = await insertChromeConnection(org.id);
+    const runId = await insertPendingActionRun(org.id, connId, {});
+    await claim(runId, WORKER_ID);
+
+    const deviceReady = deferred<number>();
+    const releaseDevice = deferred<void>();
+    const device = sql.begin(async (tx) => {
+      await tx`
+        UPDATE runs
+        SET status = 'failed',
+            completed_at = current_timestamp,
+            error_message = 'worker-failed',
+            run_metadata = COALESCE(run_metadata, '{}'::jsonb) || '{"error_code":"NOT_FOUND"}'::jsonb
+        WHERE id = ${runId} AND status = 'running'
+      `;
+      const pidRows = (await tx`SELECT pg_backend_pid()::int AS pid`) as unknown as Array<{
+        pid: number;
+      }>;
+      deviceReady.resolve(pidRows[0].pid);
+      await releaseDevice.promise;
+    });
+
+    try {
+      const devicePid = await deviceReady.promise;
+      const waiting = waitForDeviceActionRunWithOptions(runId, org.id, {
+        queueMs: 50,
+        postClaimMs: 60,
+        pollMs: 20,
+      });
+      await waitForBackendBlockedBy(devicePid);
+      releaseDevice.resolve();
+      await device;
+      expect(await waiting).toMatchObject({
+        status: 'failed',
+        error_message: 'worker-failed',
+        error_code: 'NOT_FOUND',
+      });
+    } finally {
+      releaseDevice.resolve();
+      await device.catch(() => {});
+    }
+  }, 30_000);
 
   // Calls the default-budget entry point so the abortSignal wiring is covered
   // exactly as production callers use it: an automation reaction hitting its
