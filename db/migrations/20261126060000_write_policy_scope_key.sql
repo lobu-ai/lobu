@@ -45,7 +45,7 @@ CREATE TRIGGER write_approval_policies_scope_key
 
 -- Bounded policy configuration: the trigger keys every row.
 UPDATE write_approval_policies SET scope_key = NULL;
--- squawk-ignore adding-not-nullable-field -- backfilled above; bounded policy configuration
+-- squawk-ignore prefer-robust-stmts,adding-not-nullable-field -- backfilled above; dbmate wraps the migration in a transaction
 ALTER TABLE write_approval_policies ALTER COLUMN scope_key SET NOT NULL;
 
 -- squawk-ignore require-concurrent-index-creation -- bounded policy configuration
