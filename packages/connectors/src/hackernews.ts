@@ -362,9 +362,9 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   };
 
   private readonly BASE_URL = 'https://hn.algolia.com/api/v1';
-  // Search pages honour Algolia's Retry-After (up to a minute) before a 429
-  // gives up the page.
-  private readonly http = createHttpClient({ errorPrefix: 'Algolia API', maxRetryAfterMs: 60_000 });
+  // Search pages run inside SYNC_BUDGET_MS, so the loop owns its 429 backoff
+  // (clamped to what is left of the budget); a client retry would sleep past it.
+  private readonly http = createHttpClient({ errorPrefix: 'Algolia API', retry: false });
   // Reply and article fetches are best-effort inside a fixed budget, so a
   // failure is skipped rather than retried.
   private readonly bestEffortHttp = createHttpClient({ errorPrefix: 'Hacker News', retry: false });
@@ -423,6 +423,7 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     let page = 0;
     let hasMore = true;
     const deadline = Date.now() + this.SYNC_BUDGET_MS;
+    let rateLimitBackoffMs = 5_000;
 
     while (hasMore && page < this.MAX_PAGES && Date.now() < deadline) {
       const url = isFrontPage
@@ -438,10 +439,13 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       try {
         response = await this.http.request(url);
       } catch (error) {
-        // Still rate-limited after the client waited out Retry-After: try the
-        // page again until the sync budget runs out, rather than turning a
-        // transient 429 into a failed sync.
-        if (error instanceof HttpStatusError && error.status === 429) continue;
+        // Rate-limited: back off and try the page again until the sync budget
+        // runs out, rather than turning a transient 429 into a failed sync.
+        if (error instanceof HttpStatusError && error.status === 429) {
+          await sleep(Math.min(rateLimitBackoffMs, Math.max(0, deadline - Date.now())));
+          rateLimitBackoffMs = Math.min(rateLimitBackoffMs * 2, 60_000);
+          continue;
+        }
         throw error;
       }
 

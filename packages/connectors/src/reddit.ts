@@ -863,11 +863,11 @@ export default class RedditConnector extends ConnectorRuntime {
     const http = createHttpClient({
       token: userAccessToken,
       headers: { 'User-Agent': this.USER_AGENT },
-      errorPrefix: 'Reddit username lookup',
+      errorPrefix: 'Reddit username lookup (set "username" in feed config or re-authenticate)',
     });
     const data = await http.json<{ name?: string }>('https://oauth.reddit.com/api/v1/me');
     if (!data.name) {
-      throw new Error('Reddit /api/v1/me returned no username.');
+      throw new Error('Reddit /api/v1/me returned no username. Set "username" in feed config or re-authenticate.');
     }
     return data.name;
   }

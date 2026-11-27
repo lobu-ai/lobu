@@ -68,6 +68,26 @@ test('stories enrichment short-circuits after consecutive egress failures', asyn
   expect(contentFetches).toBeLessThanOrEqual(3);
 }, 20_000);
 
+test('sustained Algolia 429s end the search at the sync budget', async () => {
+  let searches = 0;
+  globalThis.fetch = (async () => {
+    searches++;
+    return new Response('rate limited', { status: 429, headers: { 'Retry-After': '1' } });
+  }) as typeof fetch;
+
+  const { default: HackerNewsConnector } = await import('../hackernews');
+  const connector = new HackerNewsConnector();
+  // A 300ms budget: every rate-limit wait must fit inside what is left of it.
+  Object.assign(connector, { SYNC_BUDGET_MS: 300 });
+  const started = Date.now();
+  // biome-ignore lint/suspicious/noExplicitAny: minimal SyncContext for unit test
+  const result = await runSync(connector, { feedKey: 'stories', config: { search_query: 'x' } } as any);
+
+  expect(Date.now() - started).toBeLessThan(2_000);
+  expect(result.events).toHaveLength(0);
+  expect(searches).toBeGreaterThanOrEqual(1);
+}, 10_000);
+
 test('non-HTML/non-OK results do NOT trip the egress short-circuit', async () => {
   // First three content fetches succeed at the HTTP level but return non-article
   // content (PDF, image, 404); the fourth is a real HTML article. Egress is
