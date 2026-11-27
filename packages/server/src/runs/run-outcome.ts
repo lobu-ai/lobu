@@ -27,7 +27,10 @@
  *     superseded by the Automation's arrival mark is infra for the same reason.
  *  2. A known `AgentErrorCode` → infra_error. The catalog (core/errors.ts) is
  *     exclusively provider/worker/config failures today; an agent-fault code
- *     added there must be mapped here explicitly.
+ *     added there must be mapped here explicitly. A `ToolErrorCode` (a script
+ *     Automation's typed sandbox failure) goes by its `classifyErrorKind` kind:
+ *     a rejection of what the Automation sent is agent_error, a dependency
+ *     failure infra_error. Its message is never consulted.
  *  3. Message patterns, ordered agent-protocol → provider catalog → platform
  *     infra → agent-process, with unknown failures defaulting to agent_error:
  *     fail toward VISIBILITY. An unrecognized failure shows up in the
@@ -38,7 +41,13 @@
  *     and the catalog separately, which is how the two drifted.
  */
 
-import { AGENT_ERRORS, AgentErrorCode, classifyErrorMessage } from "@lobu/core";
+import {
+	AGENT_ERRORS,
+	AgentErrorCode,
+	classifyErrorKind,
+	classifyErrorMessage,
+	toToolErrorCode,
+} from "@lobu/core";
 
 export type RunOutcome = "infra_error" | "agent_error" | "scoreable";
 
@@ -174,6 +183,12 @@ export function classifyRunOutcome(input: {
 
 	if (input.errorCode && KNOWN_AGENT_ERROR_CODES.has(input.errorCode)) {
 		return "infra_error";
+	}
+	const toolErrorCode = toToolErrorCode(input.errorCode);
+	if (toolErrorCode) {
+		const kind = classifyErrorKind(toolErrorCode, null);
+		if (kind === "user") return "agent_error";
+		if (kind === "dependency") return "infra_error";
 	}
 
 	const message = input.errorMessage ?? "";

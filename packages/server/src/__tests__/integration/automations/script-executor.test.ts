@@ -258,6 +258,7 @@ describe('Automation script executor', () => {
       const [run] = await seed.sql`SELECT status, run_metadata FROM runs WHERE id = ${seed.runId}`;
       expect(run.status).toBe('failed');
       expect(run.run_metadata.preparation_sources).toBeUndefined();
+      expect(run.run_metadata.error_code).toBe('VALIDATION');
     },
   );
 
@@ -879,11 +880,28 @@ describe('Automation script executor', () => {
       explicitNull.taskRunId
     );
     const [failed] =
-      await explicitNull.sql`SELECT status, error_message FROM runs WHERE id = ${explicitNull.runId}`;
+      await explicitNull.sql`SELECT status, outcome, error_message, run_metadata FROM runs WHERE id = ${explicitNull.runId}`;
     expect(failed).toMatchObject({
       status: 'failed',
+      outcome: 'agent_error',
       error_message:
         'ValidationError: Automation scripts must return an object or no value.',
+      run_metadata: { error_code: 'VALIDATION' },
+    });
+  });
+
+  it('records the typed code when the server rejects what the script sent', async () => {
+    const { sql, runId, taskRunId, payload } = await dispatchedScript(
+      'export default async (_ctx, client) => { await client.notifications.send({ title: "Synthetic", body: "x".repeat(1001) }); };'
+    );
+    await runAutomationScriptTask(payload, TEST_ENV, taskRunId);
+    const [run] =
+      await sql`SELECT status, outcome, error_message, run_metadata FROM runs WHERE id = ${runId}`;
+    expect(run).toMatchObject({
+      status: 'failed',
+      outcome: 'agent_error',
+      error_message: expect.stringMatching(/^ValidationError: /),
+      run_metadata: { error_code: 'VALIDATION' },
     });
   });
 

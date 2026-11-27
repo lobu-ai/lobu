@@ -98,6 +98,7 @@ export async function runAutomationPreparationTask(
     env: env as Record<string, string | undefined>,
   });
   let error = result.error;
+  let errorCode = result.code;
   let sources: PreparationSources | undefined;
   if (result.success) {
     try {
@@ -105,11 +106,12 @@ export async function runAutomationPreparationTask(
     } catch (failure) {
       if (!(failure instanceof ToolUserError)) throw failure;
       error = `ValidationError: ${failure.message}`;
+      errorCode = 'VALIDATION';
     }
   }
   if (!result.success || error) {
     if (attempt >= 3 || reactionErrorIsNonTransient(error, result.retryable)) {
-      await markAutomationRunFailed(sql, payload.sourceRunId, error ?? 'Automation preparation failed');
+      await markAutomationRunFailed(sql, payload.sourceRunId, error ?? 'Automation preparation failed', errorCode);
       return;
     }
     // The executor already recorded this failure as its one error.
