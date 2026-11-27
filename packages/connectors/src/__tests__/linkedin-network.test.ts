@@ -84,16 +84,36 @@ function linkedIn(
     },
   });
   doc.cookie = 'JSESSIONID="ajax:0000000000000000001"; path=/';
-  (win as any).fetch = async (url: string) =>
-    url === "/voyager/api/me"
-      ? {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            miniProfile: { entityUrn: options.signedIn ?? ACCOUNT },
-          }),
-        }
-      : { ok: false, status: 404, json: async () => ({}) };
+  // LinkedIn's pending invitations, newest first. The page renders only the
+  // first two: a background tab never loads the rest.
+  const pending = [
+    ["ada-example", "Ada", "Example", "Engineer at Example Co", Date.UTC(2026, 0, 13)],
+    ["bo-sample", "Bo", "Sample", "Founder", Date.UTC(2026, 0, 8)],
+    ["cy-third", "Cy", "Third", null, Date.UTC(2025, 11, 1)],
+  ].slice(0, options.sentTotal ?? 2) as [string, string, string, string | null, number][];
+  const SENT_API = "/voyager/api/relationships/sentInvitationViewsV2?";
+  const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+  (win as any).fetch = async (url: string) => {
+    if (url === "/voyager/api/me")
+      return json({ miniProfile: { entityUrn: options.signedIn ?? ACCOUNT } });
+    if (url.startsWith(SENT_API)) {
+      const query = new URLSearchParams(url.slice(SENT_API.length));
+      if (query.get("q") !== "invitationType" || query.get("invitationType") !== "CONNECTION")
+        return { ok: false, status: 400, json: async () => ({}) };
+      const start = Number(query.get("start"));
+      const count = Number(query.get("count"));
+      return json({
+        elements: pending.slice(start, start + count).map(([slug, firstName, lastName, occupation, sentTime]) => ({
+          invitation: {
+            sentTime,
+            toMember: { firstName, lastName, publicIdentifier: slug, ...(occupation ? { occupation } : {}) },
+          },
+        })),
+        paging: { start, count },
+      });
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
 
   let page: Member = { ...world.member };
   let companyPage = { ...world.company };
@@ -670,7 +690,7 @@ test(
             name: "Ada Example",
             headline: "Engineer at Example Co",
             profile_url: PROFILE,
-            sent: "Sent 2 days ago",
+            sent: "2026-01-13T00:00:00.000Z",
           },
         ],
         total: 2,
@@ -679,10 +699,27 @@ test(
     });
     const all = await li.run("list_sent_invitations", { limit: 2 });
     expect(all.output).toMatchObject({ total: 2, truncated: false });
-    // Loading stops at the limit; LinkedIn's count shows more exist.
     const more = await linkedIn({}, { sentTotal: 3 }).run("list_sent_invitations", { limit: 2 });
     expect(more.output).toMatchObject({ total: 3, truncated: true });
     expect(more.output.invitations).toHaveLength(2);
+    expect(li.tabsClosed()).toBe(true);
+  },
+  SLOW
+);
+
+test(
+  "lists invitations the background tab never rendered",
+  async () => {
+    const li = linkedIn({}, { sentTotal: 3 });
+    const listed = await li.run("list_sent_invitations", {});
+    expect(listed.success).toBe(true);
+    expect(listed.output).toMatchObject({ total: 3, truncated: false });
+    expect(listed.output.invitations[2]).toEqual({
+      name: "Cy Third",
+      headline: null,
+      profile_url: "https://www.linkedin.com/in/cy-third/",
+      sent: "2025-12-01T00:00:00.000Z",
+    });
     expect(li.tabsClosed()).toBe(true);
   },
   SLOW

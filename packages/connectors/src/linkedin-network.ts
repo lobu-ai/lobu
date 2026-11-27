@@ -138,17 +138,21 @@ export function buildLinkedInNetworkExpression(
     const assertPage = () => {
       if (!onTarget()) throw new Error('LinkedIn page changed; refusing to act');
     };
-    const assertAccount = async () => {
+    /** A read from LinkedIn's own API with the signed-in session; null when it refuses. */
+    const voyager = async path => {
       const cookie = document.cookie.split('; ').find(c => c.startsWith('JSESSIONID='));
       if (!cookie) throw new Error('Not logged into LinkedIn');
       let csrf = decoded(cookie.slice('JSESSIONID='.length));
       if (csrf.startsWith('"') && csrf.endsWith('"')) csrf = csrf.slice(1, -1);
-      const response = await fetch('/voyager/api/me', {
+      const response = await fetch(path, {
         credentials: 'include',
         headers: { 'csrf-token': csrf, 'x-restli-protocol-version': '2.0.0' },
       });
-      if (!response.ok) throw new Error('LinkedIn account check failed (HTTP ' + response.status + ')');
-      const self = await response.json();
+      return response.ok ? response.json() : { status: response.status };
+    };
+    const assertAccount = async () => {
+      const self = await voyager('/voyager/api/me');
+      if (self.status) throw new Error('LinkedIn account check failed (HTTP ' + self.status + ')');
       if (self?.miniProfile?.entityUrn !== req.account)
         throw new Error('The signed-in LinkedIn account is not the connected account; refusing to act');
     };
@@ -389,39 +393,34 @@ export function buildLinkedInNetworkExpression(
 
     if (req.op === 'list') {
       await assertAccount();
-      const rows = () => [...document.querySelectorAll('main a[aria-label^="Withdraw invitation sent to "]')].filter(shown).map(link => {
-        let row = link.parentElement;
-        while (row && row !== document.body && !row.querySelector('a[href*="/in/"]')) row = row.parentElement;
-        const profile = row && row.querySelector('a[href*="/in/"]');
-        const lines = text(row).split('\n').map(line => line.trim()).filter(Boolean);
-        const name = link.getAttribute('aria-label').slice('Withdraw invitation sent to '.length);
-        const at = lines.indexOf(name);
+      // The rendered list loads more rows only while its tab is visible, and
+      // this scratch tab never is. LinkedIn's own API pages in the background.
+      // One extra row shows whether more exist past the limit.
+      const listed = [];
+      for (let start = 0; listed.length <= req.limit;) {
+        const count = Math.min(100, req.limit + 1 - listed.length);
+        const page = await voyager('/voyager/api/relationships/sentInvitationViewsV2?count=' + count + '&invitationType=CONNECTION&q=invitationType&start=' + start);
+        if (page.status || !Array.isArray(page.elements)) throw new Error('LinkedIn sent invitations did not load' + (page.status ? ' (HTTP ' + page.status + ')' : ''));
+        listed.push(...page.elements);
+        if (page.elements.length < count) break;
+        start += page.elements.length;
+      }
+      const invitations = listed.slice(0, req.limit).map(({ invitation = {} }) => {
+        const member = invitation.toMember || {};
+        const slug = member.publicIdentifier;
         return {
-          name,
-          headline: at >= 0 && lines[at + 1] && !lines[at + 1].startsWith('Sent ') ? lines[at + 1] : null,
-          profile_url: profile ? profile.href : null,
-          sent: lines.find(line => line.startsWith('Sent ')) || null,
+          name: [member.firstName, member.lastName].filter(Boolean).join(' '),
+          headline: member.occupation || null,
+          profile_url: slug ? 'https://www.linkedin.com/in/' + encodeURIComponent(slug) + '/' : null,
+          sent: Number.isFinite(invitation.sentTime) ? new Date(invitation.sentTime).toISOString() : null,
         };
       });
-      await wait(() => document.querySelector('main') && (rows().length || text(document.querySelector('main')).includes('Sent')), 'LinkedIn sent invitations did not load');
-      await sleep(800);
-      let seen = rows().length;
-      for (let i = 0; i < 20 && seen < req.limit; i++) {
-        const more = buttonNamed(document, ['Load more', 'Show more', 'Show more results'])[0];
-        if (more) more.click(); else window.scrollTo(0, document.body.scrollHeight);
-        await sleep(1200);
-        const now = rows().length;
-        if (now === seen && !more) break;
-        seen = now;
-      }
-      const tab = [...document.querySelectorAll('main a[href*="/invitation-manager/sent/"]')].map(text).find(t => t.startsWith('People'));
-      const total = tab ? Number(tab.slice('People'.length).trim().split(' ')[0].split(',').join('')) : NaN;
-      const all = rows();
-      const invitations = all.slice(0, req.limit);
-      // Loading stops once the limit is reached, so LinkedIn's own count is what
-      // shows whether more invitations exist.
-      const more = all.length > req.limit || (Number.isFinite(total) && total > invitations.length);
-      return { invitations, total: Number.isFinite(total) ? total : null, truncated: more };
+      const truncated = listed.length > req.limit;
+      // The People tab carries LinkedIn's count; a complete read is its own count.
+      const tab = await wait(() => [...document.querySelectorAll('main a[href*="/invitation-manager/sent/"]')].map(text).find(t => t.startsWith('People')), null, 15);
+      const shownTotal = tab ? Number(tab.slice('People'.length).trim().split(' ')[0].split(',').join('')) : NaN;
+      const total = Number.isFinite(shownTotal) ? shownTotal : truncated ? null : invitations.length;
+      return { invitations, total, truncated };
     }
 
     /**
