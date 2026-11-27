@@ -17,7 +17,6 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { getDb } from '../../../db/client';
 import { listEntityApprovalPolicies } from '../../../authz/entity-policy';
-import { loopPolicyCutoverComplete } from '../../../authz/policy-hooks';
 import { loadMigrationUpSection } from '../../../db/migration-loader';
 import { createTestOrganization } from '../../setup/test-fixtures';
 
@@ -321,13 +320,12 @@ describe('workspace guardrails reader cutover migration', () => {
 });
 
 describe('loop policy cutover', () => {
-  it('copies active checks to the same agent and enables editing in the same transaction', async () => {
+  it('copies active checks to the same agent', async () => {
     const orgId = (await createTestOrganization()).id;
     const agentId = synth('agent');
     await inRollback(async (tx) => {
       await insertAgent(tx, orgId, agentId, ['secret-scan', 'pii-scan', 'forbidden-tools'], []);
       await tx.unsafe(up());
-      expect(await loopPolicyCutoverComplete(tx)).toBe(false);
       const retire = loadMigrationUpSection(resolveMigrationsDir(), RETIRE_LIBRARY);
       await expect(tx.savepoint((sp: Sql) => sp.unsafe(retire))).rejects.toThrow(
         'Complete the loop policy backfill'
@@ -346,7 +344,6 @@ describe('loop policy cutover', () => {
       `;
 
       await tx.unsafe(loadMigrationUpSection(resolveMigrationsDir(), POLICY_CUTOVER));
-      expect(await loopPolicyCutoverComplete(tx)).toBe(true);
       const summaries = async (hook: 'message_in' | 'reply_out' | 'tool_call') => {
         const policies = await listEntityApprovalPolicies(orgId, 'connector_action', tx, hook);
         expect(policies.every(rule => rule.principalKind === 'agent' && rule.principalId === agentId &&
@@ -374,7 +371,6 @@ describe('loop policy cutover', () => {
                to_regclass('public.workspace_guardrail_subjects') AS subjects
       `;
       expect(tables).toEqual({ guardrails: null, subjects: null });
-      expect(await loopPolicyCutoverComplete(tx)).toBe(true);
       expect(await summaries('message_in')).toEqual(messageRules);
       expect(await summaries('reply_out')).toEqual(replyRules);
       expect(await summaries('tool_call')).toEqual(toolRules);

@@ -9,6 +9,7 @@ import {
 } from "../../../authz/entity-policy";
 import { connectorPolicyNoteSuffix, evaluateConnectorPolicy, explainConnectorPolicy } from "../../../authz/connector-policy";
 import { qualifiedOperationKey } from "../../../tools/admin/manage_operations/handlers/shared";
+import type { DbClient } from "../../../db/client";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	createTestAgent,
@@ -581,5 +582,43 @@ describe("org connector policy scopes", () => {
 				(row) => row.id,
 			),
 		).toEqual([org.id]);
+	});
+
+	it("a writer that omits a newer scope column only addresses rules that leave it unset", async () => {
+		// The next release adds a nullable scope column and keys on it; this code omits it.
+		const scope = {
+			resourceClass: "connector_action" as const,
+			connectionId,
+			operationKey: qualifiedOperationKey(operation.connector_key, operation.operation_key),
+			kind: "guardrail" as const,
+		};
+		const rollback = new Error("rollback");
+		const run = getTestDb().begin(async (sql) => {
+			const tx = sql as unknown as DbClient;
+			await sql.unsafe(`
+				ALTER TABLE write_approval_policies ADD COLUMN variant text;
+				ALTER FUNCTION write_approval_policy_scope_key(write_approval_policies) RENAME TO released_scope_key;
+				CREATE FUNCTION write_approval_policy_scope_key(p write_approval_policies) RETURNS text LANGUAGE sql STABLE
+				AS $$ SELECT CASE WHEN p.variant IS NULL THEN released_scope_key(p) ELSE md5(released_scope_key(p) || p.variant) END $$`);
+			const base = await upsertEntityApprovalPolicy(orgId, { ...scope, effects: { execute: "deny" } }, tx);
+			const [variant] = await sql`
+				INSERT INTO write_approval_policies (organization_id, resource_class, connection_id, operation_key, kind, note, variant)
+				SELECT organization_id, resource_class, connection_id, operation_key, kind, 'variant', 'v'
+				FROM write_approval_policies WHERE id = ${base.id} RETURNING id`;
+			await sql`INSERT INTO write_policy_action_effects (policy_id, action, effect) VALUES (${variant.id}, 'execute', 'log')`;
+			const rows = async () => (await listEntityApprovalPolicies(orgId, "connector_action", tx))
+				.filter((row) => row.operationKey === scope.operationKey)
+				.map((row) => ({ id: row.id, note: row.note, execute: row.effects.execute }));
+
+			await upsertEntityApprovalPolicy(orgId, { ...scope, note: "edited", effects: { execute: "approval" } }, tx);
+			expect(await rows()).toEqual([
+				{ id: base.id, note: "edited", execute: "approval" },
+				{ id: Number(variant.id), note: "variant", execute: "log" },
+			]);
+			expect(await deleteEntityApprovalPolicy({ organizationId: orgId, ...scope }, tx)).toBe(true);
+			expect(await rows()).toEqual([{ id: Number(variant.id), note: "variant", execute: "log" }]);
+			throw rollback;
+		});
+		await expect(run).rejects.toBe(rollback);
 	});
 });

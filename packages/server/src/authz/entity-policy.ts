@@ -44,7 +44,7 @@ import {
 	type PolicyClassifyLookup,
 	type PolicyClassifyRequest,
 } from "./policy-classify";
-import { parsePolicyConditions, type StoredPolicyConditions } from "./policy-conditions";
+import { parsePolicyConditions, policyConditionsKey, type StoredPolicyConditions } from "./policy-conditions";
 import { parsePolicyToolPatterns, type PolicyHook } from "./policy-hooks";
 import { resolveEntityCreator } from "../utils/resolve-entity-creator";
 import {
@@ -1281,218 +1281,147 @@ export function withConnectorPolicyTransaction<T>(organizationId: string, write:
 	});
 }
 
+/** The columns that identify a rule, in the order the connector collection sorts by. */
+type PolicyScope = {
+	resource_class: WriteResourceClass;
+	principal_kind: PolicyPrincipalKind | null;
+	principal_id: string | null;
+	connector_key: string | null;
+	connection_id: number | null;
+	operation_key: string | null;
+	operation_category: ConnectorPolicyCategory | null;
+	kind: ConnectorPolicyKind;
+	audience: PolicyAudience | null;
+	condition: StoredPolicyConditions;
+	hook: PolicyHook;
+	tool_patterns: string[] | null;
+	target_agent_id: string | null;
+	entity_type_slug: string | null;
+	field_path: string | null;
+	entity_id: number | null;
+};
+
+/**
+ * A rule's canonical scope. Every write addresses its row by the stored
+ * scope_key the database derives from these columns
+ * (write_approval_policy_scope_key), so upsert and delete share this one input.
+ */
+function policyScope(input: EntityApprovalPolicyInput): PolicyScope {
+	const resourceClass = normalizeResourceClass(input.resourceClass);
+	const principalKind = normalizePrincipalKind(input.principalKind);
+	const connector = resourceClass === "connector_action";
+	const entity = resourceClass === "entity";
+	const operationKey = connector ? input.operationKey?.trim() || null : null;
+	const { connectorKey, connectionId, operationCategory } = canonicalConnectorPolicyScope(
+		connector ? { ...input, operationKey } : {},
+	);
+	const hook = input.hook ?? "operation";
+	return {
+		resource_class: resourceClass,
+		principal_kind: principalKind,
+		// A principal id is only meaningful with a kind.
+		principal_id: principalKind ? input.principalId?.trim() || null : null,
+		connector_key: connectorKey,
+		connection_id: connectionId,
+		operation_key: operationKey,
+		operation_category: operationCategory,
+		kind: normalizePolicyKind(input.kind),
+		audience: input.audience ?? null,
+		condition: input.condition ?? null,
+		hook,
+		tool_patterns: parsePolicyToolPatterns(hook, input.toolPatterns),
+		target_agent_id: resourceClass === "agent_config" ? input.targetAgentId?.trim() || null : null,
+		entity_type_slug: entity ? input.entityTypeSlug?.trim() || null : null,
+		field_path: entity ? input.fieldPath?.trim() || null : null,
+		entity_id: entity ? (input.entityId ?? null) : null,
+	};
+}
+
+/** Two inputs name the same rule exactly when their keys are equal, as the stored scope_key does. */
+export function policyScopeKey(input: EntityApprovalPolicyInput): string {
+	const scope = policyScope(input);
+	return JSON.stringify(Object.values({ ...scope, condition: policyConditionsKey(scope.condition) }));
+}
+
 export async function upsertEntityApprovalPolicy(
 	organizationId: string,
 	input: EntityApprovalPolicyInput,
 	transaction?: DbClient,
 ): Promise<EntityApprovalPolicy> {
-	const resourceClass = normalizeResourceClass(input.resourceClass);
-	const principalKind = normalizePrincipalKind(input.principalKind);
-	// A principal id is only meaningful with a kind; ignore it otherwise.
-	const principalId = principalKind ? input.principalId?.trim() || null : null;
-	// operation_key scopes a connector_action row to one operation; meaningless (and
-	// dropped) for any other class so an entity/agent_config row can't smuggle one in.
-	const operationKey =
-		resourceClass === "connector_action"
-			? input.operationKey?.trim() || null
-			: null;
-	const { connectorKey, connectionId, operationCategory } = canonicalConnectorPolicyScope(
-		resourceClass === "connector_action" ? { ...input, operationKey } : {},
-	);
-	const targetAgentId =
-		resourceClass === "agent_config"
-			? input.targetAgentId?.trim() || null
-			: null;
-	const entityTypeSlug =
-		resourceClass === "entity" ? input.entityTypeSlug?.trim() || null : null;
-	const fieldPath =
-		resourceClass === "entity" ? input.fieldPath?.trim() || null : null;
-	const entityId = resourceClass === "entity" ? (input.entityId ?? null) : null;
-	const { kind, note } = validatePolicyKindAndNote({ ...input, resourceClass });
-	const audience = input.audience ?? null;
-	const condition = input.condition == null ? null : JSON.stringify(parsePolicyConditions(input.condition));
-	const hook = input.hook ?? "operation";
-	const patterns = parsePolicyToolPatterns(hook, input.toolPatterns);
-	const toolPatterns = patterns === null ? null : pgTextArray(patterns);
-	const effectSet = actionEffectSetForInput(resourceClass, input);
-	const approvalConnectionId = input.approvalConnectionId?.trim() || null;
-	const approvalChannelId = input.approvalChannelId?.trim() || null;
-	const approvalTeamId = input.approvalTeamId?.trim() || null;
-	const approvalChannelName = input.approvalChannelName?.trim() || null;
+	const scope = policyScope({
+		...input,
+		condition: input.condition == null ? null : parsePolicyConditions(input.condition),
+	});
+	const { note } = validatePolicyKindAndNote({ ...input, resourceClass: scope.resource_class });
+	const effectSet = actionEffectSetForInput(scope.resource_class, input);
 	// Effect-only callers (the permissions PUT) don't carry a delivery target and
-	// must not clobber the one already stored. When preserveDelivery is set, COALESCE
-	// each column to its existing value so an omitted (null) field keeps the header's
-	// current target; a caller that MEANS to write delivery leaves the flag unset.
+	// must not clobber the one already stored: with preserveDelivery an existing
+	// target wins. A caller that MEANS to write delivery leaves the flag unset.
 	const preserveDelivery = input.preserveDelivery === true;
-
 	const sql = getDb();
-	// Upsert the header row (scope/principal/delivery only — effects live in the
-	// child table). The identity tuple the unique index keys on; reused by both
-	// UPDATE arms so the "lost the insert race" recovery targets the same row.
-	const applyUpdate = (tx: DbClient) => tx<EntityApprovalPolicyRow>`
-      UPDATE write_approval_policies
-      SET approval_connection_id = ${
-				preserveDelivery
-					? sql`COALESCE(approval_connection_id, ${approvalConnectionId})`
-					: approvalConnectionId
-			},
-          approval_channel_id = ${
-						preserveDelivery
-							? sql`COALESCE(approval_channel_id, ${approvalChannelId})`
-							: approvalChannelId
-					},
-          approval_team_id = ${
-						preserveDelivery
-							? sql`COALESCE(approval_team_id, ${approvalTeamId})`
-							: approvalTeamId
-					},
-          approval_channel_name = ${
-						preserveDelivery
-							? sql`COALESCE(approval_channel_name, ${approvalChannelName})`
-							: approvalChannelName
-					},
-          note = ${note === undefined ? sql`note` : note},
-          updated_at = now()
-      WHERE organization_id = ${organizationId}
-        AND resource_class = ${resourceClass}
-        AND principal_kind IS NOT DISTINCT FROM ${principalKind}
-        AND principal_id IS NOT DISTINCT FROM ${principalId}
-        AND operation_key IS NOT DISTINCT FROM ${operationKey}
-        AND connector_key IS NOT DISTINCT FROM ${connectorKey}
-        AND connection_id IS NOT DISTINCT FROM ${connectionId}
-        AND operation_category IS NOT DISTINCT FROM ${operationCategory}
-        AND target_agent_id IS NOT DISTINCT FROM ${targetAgentId}
-        AND entity_type_slug IS NOT DISTINCT FROM ${entityTypeSlug}
-        AND field_path IS NOT DISTINCT FROM ${fieldPath}
-        AND entity_id IS NOT DISTINCT FROM ${entityId}
-        AND kind = ${kind}
-        AND audience IS NOT DISTINCT FROM ${audience}
-        AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
-        AND hook = ${hook}
-        AND tool_patterns IS NOT DISTINCT FROM ${toolPatterns}::text[]
-      RETURNING id, organization_id, resource_class, principal_kind, principal_id,
-       operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
-       kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
-       approval_connection_id, approval_channel_id, approval_team_id,
-       approval_channel_name
-    `;
-
+	// Effects live in the child table; the header row is keyed by its scope.
 	const write = async (tx: DbClient) => {
-		let header = (await applyUpdate(tx))[0] ?? null;
-
-		if (!header) {
-			const inserted = await tx<EntityApprovalPolicyRow>`
-      INSERT INTO write_approval_policies (
+		const [header] = await tx<EntityApprovalPolicyRow>`
+      INSERT INTO write_approval_policies AS p (
         organization_id, resource_class, principal_kind, principal_id,
         operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
         kind, note, audience, condition, hook, tool_patterns,
         approval_connection_id, approval_channel_id, approval_team_id,
         approval_channel_name, created_at, updated_at
       ) VALUES (
-        ${organizationId}, ${resourceClass}, ${principalKind}, ${principalId},
-        ${operationKey}, ${connectorKey}, ${connectionId}, ${operationCategory}, ${targetAgentId}, ${entityTypeSlug}, ${fieldPath}, ${entityId},
-        ${kind}, ${note ?? null}, ${audience}, ${condition}::text::jsonb, ${hook}, ${toolPatterns}::text[],
-        ${approvalConnectionId},
-        ${approvalChannelId}, ${approvalTeamId}, ${approvalChannelName},
+        ${organizationId}, ${scope.resource_class}, ${scope.principal_kind}, ${scope.principal_id},
+        ${scope.operation_key}, ${scope.connector_key}, ${scope.connection_id}, ${scope.operation_category},
+        ${scope.target_agent_id}, ${scope.entity_type_slug}, ${scope.field_path}, ${scope.entity_id},
+        ${scope.kind}, ${note ?? null}, ${scope.audience},
+        ${scope.condition === null ? null : JSON.stringify(scope.condition)}::text::jsonb, ${scope.hook},
+        ${scope.tool_patterns === null ? null : pgTextArray(scope.tool_patterns)}::text[],
+        ${input.approvalConnectionId?.trim() || null}, ${input.approvalChannelId?.trim() || null},
+        ${input.approvalTeamId?.trim() || null}, ${input.approvalChannelName?.trim() || null},
         now(), now()
       )
-      ON CONFLICT DO NOTHING
+      ON CONFLICT (organization_id, scope_key) DO UPDATE SET
+        approval_connection_id = COALESCE(CASE WHEN ${preserveDelivery}::boolean THEN p.approval_connection_id END, EXCLUDED.approval_connection_id),
+        approval_channel_id = COALESCE(CASE WHEN ${preserveDelivery}::boolean THEN p.approval_channel_id END, EXCLUDED.approval_channel_id),
+        approval_team_id = COALESCE(CASE WHEN ${preserveDelivery}::boolean THEN p.approval_team_id END, EXCLUDED.approval_team_id),
+        approval_channel_name = COALESCE(CASE WHEN ${preserveDelivery}::boolean THEN p.approval_channel_name END, EXCLUDED.approval_channel_name),
+        note = ${note === undefined ? sql`p.note` : sql`EXCLUDED.note`},
+        updated_at = now()
       RETURNING id, organization_id, resource_class, principal_kind, principal_id,
        operation_key, connector_key, connection_id, operation_category, target_agent_id, entity_type_slug, field_path, entity_id,
        kind, note, audience, condition, hook, to_jsonb(tool_patterns) AS tool_patterns,
        approval_connection_id, approval_channel_id, approval_team_id,
        approval_channel_name
     `;
-			header = inserted[0] ?? null;
-			// Lost the insert race to a concurrent save — apply this request on top.
-			if (!header) header = (await applyUpdate(tx))[0] ?? null;
-		}
-
-		if (!header) return null;
 		await writeActionEffects(tx, Number(header.id), effectSet);
-		header.effects = {};
-		for (const { action, effect } of effectSet) header.effects[action] = effect;
+		header.effects = Object.fromEntries(effectSet.map(({ action, effect }) => [action, effect]));
 		return header;
 	};
-	const row = transaction ? await write(transaction) : resourceClass === "connector_action"
+	const row = transaction ? await write(transaction) : scope.resource_class === "connector_action"
 		? await withConnectorPolicyTransaction(organizationId, write) : await sql.begin(write);
-	if (!row) throw new Error("Failed to save entity approval policy");
 	return rowToPolicy(row);
 }
 
-export async function deleteEntityApprovalPolicy(args: ConnectorPolicyScope & {
-	organizationId: string;
-	resourceClass?: WriteResourceClass;
-	principalKind?: PolicyPrincipalKind | null;
-	principalId?: string | null;
-	operationKey?: string | null;
-	targetAgentId?: string | null;
-	entityTypeSlug?: string | null;
-	fieldPath?: string | null;
-	entityId?: number | null;
-	kind?: ConnectorPolicyKind;
-	audience?: PolicyAudience | null;
-	condition?: StoredPolicyConditions;
-	hook?: PolicyHook;
-	toolPatterns?: string[] | null;
-}, transaction?: DbClient): Promise<boolean> {
-	const resourceClass = normalizeResourceClass(args.resourceClass);
-	const kind = normalizePolicyKind(args.kind);
-	const audience = args.audience ?? null;
-	const condition = args.condition == null ? null : JSON.stringify(args.condition);
-	const hook = args.hook ?? "operation";
-	const toolPatterns = args.toolPatterns == null ? null : pgTextArray(args.toolPatterns);
-	const principalKind = normalizePrincipalKind(args.principalKind);
-	const principalId = principalKind ? args.principalId?.trim() || null : null;
-	const operationKey =
-		resourceClass === "connector_action"
-			? args.operationKey?.trim() || null
-			: null;
-	const { connectorKey, connectionId, operationCategory } = canonicalConnectorPolicyScope(
-		resourceClass === "connector_action" ? { ...args, operationKey } : {},
-	);
-	const targetAgentId =
-		resourceClass === "agent_config"
-			? args.targetAgentId?.trim() || null
-			: null;
-	const entityTypeSlug =
-		resourceClass === "entity" ? args.entityTypeSlug?.trim() || null : null;
-	const fieldPath =
-		resourceClass === "entity" ? args.fieldPath?.trim() || null : null;
-	const entityId = resourceClass === "entity" ? (args.entityId ?? null) : null;
-	// Guard: never let a request delete the workspace default (entity class, any
-	// principal, unscoped) — that row is the fallback and is edited, not removed.
-	if (
-		resourceClass === "entity" &&
-		principalKind === null &&
-		!entityTypeSlug &&
-		!fieldPath &&
-		entityId === null
-	) {
+export async function deleteEntityApprovalPolicy(
+	args: EntityApprovalPolicyInput & { organizationId: string },
+	transaction?: DbClient,
+): Promise<boolean> {
+	const scope = policyScope(args);
+	// Never delete the workspace default (entity class, any principal, unscoped):
+	// that row is the fallback and is edited, not removed.
+	if (scope.resource_class === "entity" && scope.principal_kind === null && !scope.entity_type_slug &&
+		!scope.field_path && scope.entity_id === null) {
 		return false;
 	}
+	// A column this code does not name reads as NULL, its default, so the key never
+	// matches a row that sets a newer scope column.
 	const remove = (sql: DbClient) => sql<{ id: number }>`
     DELETE FROM write_approval_policies
     WHERE organization_id = ${args.organizationId}
-      AND resource_class = ${resourceClass}
-      AND principal_kind IS NOT DISTINCT FROM ${principalKind}
-      AND principal_id IS NOT DISTINCT FROM ${principalId}
-      AND operation_key IS NOT DISTINCT FROM ${operationKey}
-      AND connector_key IS NOT DISTINCT FROM ${connectorKey}
-      AND connection_id IS NOT DISTINCT FROM ${connectionId}
-      AND operation_category IS NOT DISTINCT FROM ${operationCategory}
-      AND target_agent_id IS NOT DISTINCT FROM ${targetAgentId}
-      AND entity_type_slug IS NOT DISTINCT FROM ${entityTypeSlug}
-      AND field_path IS NOT DISTINCT FROM ${fieldPath}
-      AND entity_id IS NOT DISTINCT FROM ${entityId}
-      AND kind = ${kind}
-      AND audience IS NOT DISTINCT FROM ${audience}
-      AND condition IS NOT DISTINCT FROM ${condition}::text::jsonb
-      AND hook = ${hook}
-      AND tool_patterns IS NOT DISTINCT FROM ${toolPatterns}::text[]
+      AND scope_key = write_approval_policy_scope_key(
+        jsonb_populate_record(NULL::write_approval_policies, ${JSON.stringify(scope)}::text::jsonb))
     RETURNING id
   `;
-	const rows = transaction ? await remove(transaction) : resourceClass === "connector_action"
+	const rows = transaction ? await remove(transaction) : scope.resource_class === "connector_action"
 		? await withConnectorPolicyTransaction(args.organizationId, remove) : await remove(getDb());
 	return rows.length > 0;
 }
