@@ -1,3 +1,4 @@
+import { toToolErrorCode } from "@lobu/core";
 import type { DbClient } from "../db/client";
 import { getDb, pgTextArray } from "../db/client";
 import { classifyRunOutcome } from "../runs/run-outcome";
@@ -153,6 +154,10 @@ export async function markAutomationRunFailed(
 	errorCode?: string | null,
 	expectedMessageId?: string
 ): Promise<boolean> {
+	// A script failure's ToolErrorCode is stored under the same key operation
+	// runs use. An AgentErrorCode is not: its catalog text in error_message is
+	// what read paths derive it from (runErrorCode).
+	const toolErrorCode = toToolErrorCode(errorCode) ?? null;
 	return sql.begin(async (tx) => {
 		const [failed] = await tx<{
 			automation_id: string | number | null;
@@ -164,7 +169,9 @@ export async function markAutomationRunFailed(
       SET status = 'failed',
           outcome = ${classifyRunOutcome({ status: "failed", errorCode, errorMessage: message })},
           completed_at = current_timestamp,
-          error_message = ${message}
+          error_message = ${message},
+          run_metadata = CASE WHEN ${toolErrorCode}::text IS NULL THEN run_metadata
+            ELSE COALESCE(run_metadata, '{}'::jsonb) || jsonb_build_object('error_code', ${toolErrorCode}::text) END
       WHERE id = ${runId}
         AND (${expectedMessageId ?? null}::text IS NULL OR dispatched_message_id = ${expectedMessageId ?? null})
         AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])

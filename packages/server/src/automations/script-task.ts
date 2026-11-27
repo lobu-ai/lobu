@@ -95,6 +95,7 @@ export async function runAutomationScriptTask(
     env: env as Record<string, string | undefined>,
   });
   let error = result.error;
+  let errorCode = result.code;
   if (
     result.success &&
     result.didReturnValue === true &&
@@ -104,6 +105,7 @@ export async function runAutomationScriptTask(
   ) {
     error =
       'ValidationError: Automation scripts must return an object or no value.';
+    errorCode = 'VALIDATION';
   }
   if (!result.success || error) {
     if (attempt >= 3 || reactionErrorIsNonTransient(error, result.retryable)) {
@@ -111,7 +113,8 @@ export async function runAutomationScriptTask(
         await markAutomationRunFailed(
           sql,
           payload.sourceRunId,
-          error ?? 'Automation script failed'
+          error ?? 'Automation script failed',
+          errorCode
         )
       ) {
         await dispatchNextPendingAutomationRuns([payload.automationId], sql);

@@ -66,6 +66,25 @@ describe("classifyRunOutcome", () => {
 		}
 	});
 
+	// A script Automation's failure carries the sandbox's typed ToolErrorCode.
+	// Its kind decides the bucket, whatever the message happens to quote.
+	it("classifies a ToolErrorCode by its kind, never by its wording", () => {
+		expect(
+			classifyRunOutcome({
+				status: "failed",
+				errorCode: "VALIDATION",
+				errorMessage: "ValidationError: timeout_ms must not exceed the quota",
+			}),
+		).toBe("agent_error");
+		expect(
+			classifyRunOutcome({
+				status: "failed",
+				errorCode: "UPSTREAM_5XX",
+				errorMessage: "ClientSdkActionError: bad gateway from the source",
+			}),
+		).toBe("infra_error");
+	});
+
 	// The message corpus below is verbatim from prod (14-day window, 2026-08-06)
 	// — the z.ai quota storm that motivated the taxonomy plus the long tail.
 	const PROD_INFRA_MESSAGES = [
