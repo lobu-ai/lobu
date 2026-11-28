@@ -1,23 +1,21 @@
 /**
  * Managed-connector connection-token endpoint.
  *
- * Public-org managed connectors: a managed connector lives in a PUBLIC org
- * (`organization.visibility = 'public'`) named in `LOBU_MANAGED_AUTH_ORGS`,
- * with a managed `oauth_app`. A user
- * JOINS that org (a `member` row) and CONNECTS normally — consent against the
- * managed app mints a connection OWNED by them (`connections.created_by`). The
- * managed client secret + refresh token stay in the cloud and never leave it.
+ * A lender workspace (named in `LOBU_MANAGED_AUTH_ORGS`) holds managed
+ * `oauth_app` profiles. When a user consents against one of those apps, the
+ * resulting consent-only connection (`config.consent_only = true`) is OWNED by
+ * that user (`connections.created_by`). The managed client secret and the
+ * refresh token stay in the cloud.
  *
  * At RUNTIME the user's LOCAL Lobu instance fetches a fresh ACCESS token for
- * its own user's connection via this endpoint, authenticating with any valid
- * bearer carrying the `connections:token` scope — in practice the user's own
- * `lobu login` OAuth access token (verified via `provider.verifyAccessToken`),
- * or an explicitly-scoped PAT. The token is resolved/refreshed server-side via
- * the existing `CredentialService` (`resolveExecutionAuth`) and ONLY the access
- * token + expiry are returned — never the refresh token or client secret.
+ * its own grant via this endpoint, authenticating with any valid bearer that
+ * carries the `connections:token` scope: in practice the user's own
+ * `lobu login` OAuth access token, or an explicitly-scoped PAT. The token is
+ * resolved/refreshed server-side through `resolveExecutionAuth`, and ONLY the
+ * access token + expiry are returned.
  *
- * Owner-scoped: the lookup is keyed on `created_by = <authed user>`, so a user
- * can only fetch tokens for connections they own.
+ * Membership of the lender workspace is NOT required: owning the grant is the
+ * authorization. A lender workspace can therefore stay private and memberless.
  *
  * Endpoint (bearer with `connections:token` scope):
  *   - POST /oauth/connection-token  { org, connector_key, connection_slug? }
@@ -33,9 +31,10 @@ import { TypeCompiler } from "@sinclair/typebox/compiler";
 import { Hono } from "hono";
 import { OAuthProvider } from "../auth/oauth/provider";
 import { CONNECTIONS_TOKEN_SCOPE } from "../auth/oauth/scopes";
-import { getDb } from "../db/client";
+import { getDb, pgTextArray } from "../db/client";
 import { resolveExecutionAuth } from "../utils/execution-context";
 import logger from "../utils/logger";
+import { managedAuthProviderSlugs } from "../workspace/managed-auth-discovery";
 
 type ConnectionTokenEnv = {
 	Bindings: Env;
@@ -65,7 +64,7 @@ const connectionTokenRoutes = new Hono<ConnectionTokenEnv>();
  *   - the `connections:token` scope (403 otherwise), before any org/connection
  *     lookup.
  * The resolved user is stashed on the context for the handler's owner-scoped
- * lookup; the handler verifies membership of the BODY's `org` explicitly.
+ * lookup.
  */
 connectionTokenRoutes.use("/oauth/connection-token", async (c, next) => {
 	const authHeader = c.req.header("Authorization");
@@ -142,12 +141,10 @@ const tokenValidator = TypeCompiler.Compile(TokenBody);
  * never a user's ordinary connection tokens):
  *   - 403 `insufficient_scope` if the PAT lacks `connections:token` (enforced in
  *     the auth middleware, before any lookup).
- *   - 403 if the authed user is not a `member` of `org` (`org` matches an
- *     organization id OR slug).
- *   - 404 unless the connection is the user's OWN (`created_by`), in a PUBLIC
- *     org (`organization.visibility = 'public'`), and a consent-only managed
- *     grant-holder (`config.consent_only = true`). The not-found shape is the
- *     same regardless of which condition failed (no leak).
+ *   - 404 unless `org` (an organization id OR slug) is a lender workspace named
+ *     in `LOBU_MANAGED_AUTH_ORGS`, and the connection is the user's OWN
+ *     (`created_by`) consent-only managed grant (`config.consent_only = true`).
+ *     The not-found shape is the same whichever condition failed (no leak).
  */
 connectionTokenRoutes.post("/oauth/connection-token", async (c) => {
 	const raw = await c.req.json().catch(() => null);
@@ -167,89 +164,50 @@ connectionTokenRoutes.post("/oauth/connection-token", async (c) => {
 	const authedUserId = c.get("authedUserId");
 	const sql = getDb();
 
-	// Resolve `org` by EITHER id or slug → the canonical org id, used uniformly
-	// in the membership + connection queries below. A caller may pass either.
-	const orgRows = (await sql`
-    SELECT id
-    FROM "organization"
-    WHERE id = ${raw.org} OR slug = ${raw.org}
-    LIMIT 1
-  `) as unknown as Array<{ id: string }>;
-	const organizationId = orgRows[0]?.id ?? null;
-	if (!organizationId) {
-		// Unknown org is indistinguishable from "not a member" → same 403 shape so
-		// org existence can't be probed.
-		return c.json(
-			{
-				error: "forbidden",
-				error_description: "Not a member of this organization",
-			},
-			403,
-		);
-	}
-
-	// Membership check: the authed user must be a member of the target org. A
-	// PAT's own org binding does NOT imply membership in an ARBITRARY `org` in
-	// the body — managed connectors live in a separate public org the user has
-	// joined, so verify membership explicitly.
-	const memberRows = (await sql`
-    SELECT 1
-    FROM "member"
-    WHERE "userId" = ${authedUserId}
-      AND "organizationId" = ${organizationId}
-    LIMIT 1
-  `) as unknown as Array<unknown>;
-	if (memberRows.length === 0) {
-		return c.json(
-			{
-				error: "forbidden",
-				error_description: "Not a member of this organization",
-			},
-			403,
-		);
-	}
-
-	// Scoped connection lookup. This endpoint exists ONLY to delegate a managed
-	// grant-holder's token, so the lookup is deliberately narrow — it must NOT be
-	// usable to export a user's ordinary connection tokens:
-	//   - owner-scoped: the user must OWN the connection (`created_by`); a
-	//     connection owned by another member is indistinguishable from not-found;
-	//   - the org must be a PUBLIC org (`organization.visibility = 'public'`) —
-	//     where managed connectors live — never a user's private org;
-	//   - the connection must be a consent-only managed grant-holder
-	//     (`config.consent_only = true`).
-	// Any connection that isn't all three → 404 (same not-found shape; we don't
-	// leak which condition failed).
-	// LIMIT 2 exists only to detect ambiguity on an unpinned request; a pinned
-	// slug matches at most one row (slug is unique per org).
-	const rows = (await sql`
-		SELECT c.id, c.auth_profile_id, c.app_auth_profile_id
-		FROM connections c
-		JOIN "organization" o ON o.id = c.organization_id
-		WHERE c.organization_id = ${organizationId}
-			AND c.connector_key = ${raw.connector_key}
-			${raw.connection_slug ? sql`AND c.slug = ${raw.connection_slug}` : sql``}
-			AND c.created_by = ${authedUserId}
-			AND c.deleted_at IS NULL
-			AND c.status = 'active'
-			AND o.visibility = 'public'
-			AND c.config->>'consent_only' = 'true'
-		ORDER BY c.id
-		LIMIT 2
-	`) as unknown as Array<{
-		id: number;
-		auth_profile_id: number | null;
-		app_auth_profile_id: number | null;
-	}>;
-	if (rows.length === 0) {
-		return c.json(
+	const notFound = () =>
+		c.json(
 			{
 				error: "not_found",
 				error_description: "No active managed connection found for this connector",
 			},
 			404,
 		);
-	}
+
+	const lenderSlugs = managedAuthProviderSlugs();
+	if (lenderSlugs.length === 0) return notFound();
+
+	// Scoped connection lookup. This endpoint exists ONLY to delegate a managed
+	// grant's token, so the lookup is deliberately narrow and must NOT be usable
+	// to export a user's ordinary connection tokens:
+	//   - `org` (id or slug) must be a lender workspace named in
+	//     `LOBU_MANAGED_AUTH_ORGS`, never an arbitrary workspace;
+	//   - owner-scoped: the user must OWN the connection (`created_by`);
+	//   - the connection must be a consent-only managed grant
+	//     (`config.consent_only = true`).
+	// Anything else is the same 404, so which condition failed does not leak.
+	// LIMIT 2 exists only to detect ambiguity on an unpinned request; a pinned
+	// slug matches at most one row (slug is unique per org).
+	const rows = (await sql`
+		SELECT c.id, c.organization_id, c.auth_profile_id, c.app_auth_profile_id
+		FROM connections c
+		JOIN "organization" o ON o.id = c.organization_id
+		WHERE (o.id = ${raw.org} OR o.slug = ${raw.org})
+			AND lower(o.slug) = ANY(${pgTextArray(lenderSlugs)}::text[])
+			AND c.connector_key = ${raw.connector_key}
+			${raw.connection_slug ? sql`AND c.slug = ${raw.connection_slug}` : sql``}
+			AND c.created_by = ${authedUserId}
+			AND c.deleted_at IS NULL
+			AND c.status = 'active'
+			AND c.config->>'consent_only' = 'true'
+		ORDER BY c.id
+		LIMIT 2
+	`) as unknown as Array<{
+		id: number;
+		organization_id: string;
+		auth_profile_id: number | null;
+		app_auth_profile_id: number | null;
+	}>;
+	if (rows.length === 0) return notFound();
 	if (!raw.connection_slug && rows.length > 1) {
 		return c.json(
 			{
@@ -262,6 +220,7 @@ connectionTokenRoutes.post("/oauth/connection-token", async (c) => {
 	}
 
 	const connection = rows[0];
+	const organizationId = connection.organization_id;
 
 	const { credentials } = await resolveExecutionAuth({
 		organizationId,

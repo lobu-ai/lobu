@@ -1,17 +1,17 @@
 /**
  * Managed-connector connection-token endpoint + local resolver.
  *
- * The model: a managed connector lives in a PUBLIC org with a managed
- * `oauth_app`. A user JOINS the org (a `member` row) and CONNECTS normally —
- * consent against the managed app mints a connection OWNED by them
- * (`connections.created_by`). The managed client secret + refresh token stay in
+ * The model: a lender workspace named in `LOBU_MANAGED_AUTH_ORGS` holds a
+ * managed `oauth_app`. Consent against that app mints a consent-only
+ * connection OWNED by the user (`connections.created_by`); membership of the
+ * lender workspace is not required to fetch its token. The managed client secret + refresh token stay in
  * the cloud. The user's LOCAL Lobu fetches a fresh ACCESS token for its own
  * user's connection at runtime via `POST /oauth/connection-token`, with the
  * instance's cloud PAT.
  *
  * Proven here without a real external provider:
  *
- *   1. A public org has a connector (whose oauth method `tokenUrl` points at a
+ *   1. A lender org has a connector (whose oauth method `tokenUrl` points at a
  *      scoped fake public provider), a managed `oauth_app` (fake client_id/secret), an
  *      `oauth_account` profile + `account` row holding an EXPIRING access token
  *      + a refresh token, and a connection OWNED by a member (`created_by`).
@@ -20,8 +20,10 @@
  *      token with its secret, and returns ONLY `{ access_token, expires_at }` —
  *      never the refresh token or client secret.
  *   3. Owner-scope: a DIFFERENT member's PAT for the SAME org cannot fetch the
- *      owner's connection token (404). A NON-member PAT → 403. No PAT → 401, bad
- *      PAT → 401, malformed body → 400.
+ *      owner's connection token (404). The owner needs no membership of the
+ *      lender org. A grant in an org not named in `LOBU_MANAGED_AUTH_ORGS` →
+ *      404, whatever its visibility. No PAT → 401, bad PAT → 401, malformed
+ *      body → 400.
  *   4. Local resolver: a `managedBy` connection resolves its access token by
  *      calling the cloud endpoint (cloud = the in-process server in-test).
  */
@@ -85,6 +87,7 @@ let cloudBaseUrl = "";
 // Saved instance cloud-config env so afterAll can restore it.
 let savedCloudUrl: string | undefined;
 let savedCloudPat: string | undefined;
+let savedLenderOrgs: string | undefined;
 
 function buildCloudApp(): Hono<{ Bindings: Env }> {
 	const app = new Hono<{ Bindings: Env }>();
@@ -113,6 +116,7 @@ beforeAll(async () => {
 
 	savedCloudUrl = process.env.LOBU_CLOUD_URL;
 	savedCloudPat = process.env.LOBU_CLOUD_PAT;
+	savedLenderOrgs = process.env.LOBU_MANAGED_AUTH_ORGS;
 });
 
 afterAll(async () => {
@@ -120,12 +124,15 @@ afterAll(async () => {
 	else process.env.LOBU_CLOUD_URL = savedCloudUrl;
 	if (savedCloudPat === undefined) delete process.env.LOBU_CLOUD_PAT;
 	else process.env.LOBU_CLOUD_PAT = savedCloudPat;
+	if (savedLenderOrgs === undefined) delete process.env.LOBU_MANAGED_AUTH_ORGS;
+	else process.env.LOBU_MANAGED_AUTH_ORGS = savedLenderOrgs;
 	await new Promise<void>((done) =>
 		cloudServer ? cloudServer.close(() => done()) : done(),
 	);
 });
 
 beforeEach(() => {
+	process.env.LOBU_MANAGED_AUTH_ORGS = "";
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url =
 			typeof input === "string"
@@ -153,7 +160,7 @@ interface SeededManagedConnection {
 	orgSlug: string;
 	/** The connection OWNER (created_by). */
 	ownerId: string;
-	/** The owner's PAT — member of the public org, WITH `connections:token`. */
+	/** The owner's PAT, WITH `connections:token`. */
 	ownerPat: string;
 	/** Same owner/org, but WITHOUT `connections:token` — must be rejected (403). */
 	ownerPatNoScope: string;
@@ -163,20 +170,26 @@ interface SeededManagedConnection {
 }
 
 /**
- * Seed a PUBLIC org with a managed `oauth_app`, an `oauth_account` grant (an
+ * Seed a lender org with a managed `oauth_app`, an `oauth_account` grant (an
  * `account` row with an EXPIRING access token + refresh token), a connector
  * whose tokenUrl points at the fake provider, and a connection OWNED by a
  * member. The connector endpoints live in the org's OWN metadata — the cloud
  * resolves them server-side; the caller never supplies them.
  *
- * By default the org is PUBLIC and the connection is a consent-only managed
- * grant-holder (the only shape the token endpoint will delegate). The `opts`
- * let a test seed the rejected shapes — a private org, or a non-consent-only
- * connection — to prove they are NOT exported (404).
+ * By default the org is named in `LOBU_MANAGED_AUTH_ORGS`, the owner is a
+ * member, and the connection is a consent-only managed grant (the only shape
+ * the token endpoint will delegate). The `opts` seed the other shapes: an org
+ * that is not a lender, a non-consent-only connection, or an owner who is not
+ * a member of the lender org.
  */
 async function seedManagedConnection(
 	orgName: string,
-	opts?: { visibility?: "public" | "private"; consentOnly?: boolean },
+	opts?: {
+		visibility?: "public" | "private";
+		consentOnly?: boolean;
+		lender?: boolean;
+		ownerIsMember?: boolean;
+	},
 ): Promise<SeededManagedConnection> {
 	const sql = getTestDb();
 	const visibility = opts?.visibility ?? "public";
@@ -185,8 +198,24 @@ async function seedManagedConnection(
 		name: orgName,
 		visibility,
 	});
+	if (opts?.lender ?? true) {
+		process.env.LOBU_MANAGED_AUTH_ORGS = [
+			process.env.LOBU_MANAGED_AUTH_ORGS,
+			org.slug,
+		]
+			.filter(Boolean)
+			.join(",");
+	}
 	const owner = await createTestUser({ name: `${orgName} Owner` });
-	await addUserToOrganization(owner.id, org.id, "member");
+	// The owner's PAT is bound to a workspace of its own, as a `lobu login`
+	// token is; membership of the lender org is optional.
+	const ownerHome = await createTestOrganization({
+		name: `${orgName} Owner Home`,
+	});
+	await addUserToOrganization(owner.id, ownerHome.id, "owner");
+	if (opts?.ownerIsMember ?? true) {
+		await addUserToOrganization(owner.id, org.id, "member");
+	}
 
 	const connectorKey = "demo.oauth";
 	await createTestConnectorDefinition({
@@ -269,10 +298,10 @@ async function seedManagedConnection(
 
 	// Happy-path PAT carries the least-privilege `connections:token` scope; a
 	// sibling PAT for the same owner/org WITHOUT it proves the scope gate.
-	const ownerPat = await createTestPAT(owner.id, org.id, {
+	const ownerPat = await createTestPAT(owner.id, ownerHome.id, {
 		scope: "mcp:read mcp:write connections:token",
 	});
-	const ownerPatNoScope = await createTestPAT(owner.id, org.id, {
+	const ownerPatNoScope = await createTestPAT(owner.id, ownerHome.id, {
 		scope: "mcp:read mcp:write",
 	});
 	return {
@@ -456,28 +485,34 @@ describe("managed connector — POST /oauth/connection-token", () => {
 		expect(lastRefreshBody).toEqual({});
 	});
 
-	it("rejects a NON-member PAT (403)", async () => {
-		const seeded = await seedManagedConnection("Public Org");
-
-		// A user with their OWN private org — NOT a member of the public org. PAT
-		// carries `connections:token` so the scope gate passes and we exercise the
-		// downstream membership check.
-		const outsider = await createTestUser({ name: "Outsider" });
-		const outsiderOrg = await createTestOrganization({ name: "Outsider Org" });
-		await addUserToOrganization(outsider.id, outsiderOrg.id, "owner");
-		const outsiderPat = await createTestPAT(outsider.id, outsiderOrg.id, {
-			scope: "mcp:read mcp:write connections:token",
-		});
-
+	it("returns the token to an owner who is NOT a member of the lender org", async () => {
+		// A lender workspace can be private and memberless: owning the
+		// consent-only grant is the authorization, not membership.
+		const { ownerPat, orgId, connectorKey } = await seedManagedConnection(
+			"Memberless Private Lender",
+			{ visibility: "private", ownerIsMember: false },
+		);
 		const app = buildCloudApp();
 		const res = await tokenRequest(app, {
-			pat: outsiderPat.token,
-			body: { org: seeded.orgId, connector_key: seeded.connectorKey },
+			pat: ownerPat,
+			body: { org: orgId, connector_key: connectorKey },
 		});
 
-		expect(res.status).toBe(403);
+		expect(res.status).toBe(200);
 		const body = (await res.json()) as Record<string, unknown>;
-		expect(body.error).toBe("forbidden");
+		expect(body.access_token).toBe(REFRESHED.access_token);
+	});
+
+	it("404 for an unknown org, the same shape as a missing grant", async () => {
+		const { ownerPat, connectorKey } = await seedManagedConnection("Public Org");
+		const app = buildCloudApp();
+		const res = await tokenRequest(app, {
+			pat: ownerPat,
+			body: { org: "no-such-org", connector_key: connectorKey },
+		});
+		expect(res.status).toBe(404);
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body.error).toBe("not_found");
 	});
 
 	it("rejects a malformed body (400) — validated, not cast", async () => {
@@ -542,24 +577,26 @@ describe("managed connector — POST /oauth/connection-token", () => {
 		expect(lastRefreshBody).toEqual({});
 	});
 
-	it("does NOT export a consent-only connection in a PRIVATE org (404)", async () => {
-		// Consent-only, owned by the caller, but the org is PRIVATE — managed
-		// connectors only live in public orgs, so a private-org connection (even a
-		// consent-only one) must not be exported.
-		const { ownerPat, orgId, connectorKey } = await seedManagedConnection(
-			"Private Org Consent",
-			{ visibility: "private", consentOnly: true },
-		);
-		const app = buildCloudApp();
-		const res = await tokenRequest(app, {
-			pat: ownerPat,
-			body: { org: orgId, connector_key: connectorKey },
+	for (const visibility of ["public", "private"] as const) {
+		it(`does NOT export a consent-only grant in a ${visibility} org that is not a lender (404)`, async () => {
+			// Consent-only and owned by the caller, but the org is not named in
+			// LOBU_MANAGED_AUTH_ORGS: only a lender's grants are delegated, so the
+			// endpoint cannot export tokens from an arbitrary workspace.
+			const { ownerPat, orgId, connectorKey } = await seedManagedConnection(
+				`Not A Lender ${visibility}`,
+				{ visibility, lender: false },
+			);
+			const app = buildCloudApp();
+			const res = await tokenRequest(app, {
+				pat: ownerPat,
+				body: { org: orgId, connector_key: connectorKey },
+			});
+			expect(res.status).toBe(404);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.error).toBe("not_found");
+			expect(lastRefreshBody).toEqual({});
 		});
-		expect(res.status).toBe(404);
-		const body = (await res.json()) as Record<string, unknown>;
-		expect(body.error).toBe("not_found");
-		expect(lastRefreshBody).toEqual({});
-	});
+	}
 });
 
 describe("managed connector — local resolver (env LOBU_CLOUD_PAT fallback)", () => {

@@ -81,19 +81,23 @@ receiving only `{ access_token, expires_at }`. The connector then runs locally.
 `/oauth/connection-token` returns the same not-found shape unless **all three**
 hold, so it never leaks which one failed:
 
-1. the connection is the caller's own (`created_by`),
-2. its org is **public** (`organization.visibility = 'public'`),
+1. the org (id or slug) is a lender named in the server's `LOBU_MANAGED_AUTH_ORGS`,
+2. the connection is the caller's own (`created_by`),
 3. it is a consent-only grant holder (`config.consent_only = 'true'`).
 
-A grant in your own personal workspace therefore cannot be delegated to a local
-install, by design — the endpoint exists only to delegate managed grant holders,
-never to export ordinary connection tokens.
+Membership of the lender org is not required to fetch the token: owning the
+grant is the authorization. Removing a user from the lender therefore does not
+revoke their token access; delete or disable the connection to do that. (New
+grants are still created through `connect_managed`, which joins the public
+lender.) A grant in your
+own personal workspace cannot be delegated to a local install, by design — the
+endpoint exists only to delegate managed grant holders, never to export
+ordinary connection tokens. An org that does not exist answers with the same
+404, so org existence cannot be probed.
 
 The other failure shapes, so a 404 is not your only suspect:
 
 - **403 `insufficient_scope`** — the login token lacks `connections:token`.
-- **403 `forbidden`** — you are not a member of that org. An org that does not
-  exist answers identically, so org existence cannot be probed.
 - **409 `ambiguous_connection`** — no `connectionSlug` and more than one active
   managed connection matched.
 - **502 `no_token`** — the grant resolved but holds no access token.
@@ -138,7 +142,7 @@ managed bearer — that is what proves the token actually travelled).
 
 | Concern | File |
 |---|---|
-| Cloud endpoint (owner + public + consent-only gated) | `packages/server/src/connect/connection-token-route.ts` |
+| Cloud endpoint (lender + owner + consent-only gated) | `packages/server/src/connect/connection-token-route.ts` |
 | Local credential resolver (refresh + writeback) | `packages/server/src/connect/cloud-credential.ts` |
 | `managedBy` branch at execution | `packages/server/src/utils/execution-context.ts` |
 | `connect_managed` handler | `packages/server/src/tools/admin/manage_connections/handlers/connect-managed.ts` |

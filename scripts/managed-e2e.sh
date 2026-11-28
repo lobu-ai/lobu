@@ -5,8 +5,9 @@
 # Proves the WHOLE managed-connector runtime path across TWO real `lobu run`
 # instances on separate embedded-Postgres clusters + separate config dirs:
 #
-#   CLOUD (:8901, pg :59101): a PUBLIC org holding the OAuth grant. Seeded (via
-#     SQL into its embedded PG) with a public org, a member user, a connector
+#   CLOUD (:8901, pg :59101): a lender org (named in LOBU_MANAGED_AUTH_ORGS)
+#     holding the OAuth grant. Seeded (via SQL into its embedded PG) with the
+#     org, a user, a connector
 #     definition with an `oauth` method, a managed `oauth_app` profile, an
 #     `oauth_account` grant (an `account` row with a NON-expiring access token),
 #     a CONSENT-ONLY connection owned by the member, and a PAT carrying
@@ -168,6 +169,7 @@ echo "▶ booting CLOUD instance…"
 ( cd "$CLOUD_PROJ" \
     && LOBU_CONFIG_DIR="$CLOUD_CFG" LOBU_DATA_DIR="$CLOUD_DATA" DATABASE_URL="file://$CLOUD_DATA" \
        LOBU_PG_PORT="$CLOUD_PG_PORT" ENCRYPTION_KEY="$CLOUD_ENC_KEY" \
+       LOBU_MANAGED_AUTH_ORGS="$CLOUD_ORG_SLUG" \
        $LOBU run --port "$CLOUD_PORT" > "$CLOUD_LOG" 2>&1 ) &
 CLOUD_PID=$!
 for _ in $(seq 1 90); do
@@ -233,20 +235,22 @@ INSERT INTO "account" (id, "accountId", "providerId", "userId", "accessToken", "
     '$MANAGED_ACCESS_TOKEN', 'managed-refresh-token', '$NONEXPIRY', 'read', NOW(), NOW()
   ) ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO auth_profiles (organization_id, connector_key, slug, display_name, profile_kind, provider, account_id, status, created_at, updated_at)
+-- The grant profile is owned by the account's user (the runtime refuses a
+-- grant whose profile owner differs from the account or connection owner).
+INSERT INTO auth_profiles (organization_id, connector_key, slug, display_name, profile_kind, provider, account_id, created_by, status, created_at, updated_at)
   VALUES (
     '$CLOUD_ORG_ID', '$CONNECTOR_KEY', 'managed-account', 'Managed Demo Account', 'oauth_account', 'demo',
-    '$ACCOUNT_ID', 'active', NOW(), NOW()
+    '$ACCOUNT_ID', '$CLOUD_OWNER_ID', 'active', NOW(), NOW()
   );
 
 -- Consent-only connection OWNED by the member, wiring the grant + managed app.
-INSERT INTO connections (organization_id, connector_key, slug, display_name, status, account_id, auth_profile_id, app_auth_profile_id, created_by, config, created_at, updated_at)
+INSERT INTO connections (organization_id, connector_key, slug, display_name, status, account_id, auth_profile_id, app_auth_profile_id, created_by, config, visibility, created_at, updated_at)
   VALUES (
     '$CLOUD_ORG_ID', '$CONNECTOR_KEY', 'managed-consent', 'Managed Consent Connection', 'active',
     '$ACCOUNT_ID',
     (SELECT id FROM auth_profiles WHERE organization_id='$CLOUD_ORG_ID' AND slug='managed-account'),
     (SELECT id FROM auth_profiles WHERE organization_id='$CLOUD_ORG_ID' AND slug='managed-app'),
-    '$CLOUD_OWNER_ID', '{"consent_only":true}'::jsonb, NOW(), NOW()
+    '$CLOUD_OWNER_ID', '{"consent_only":true}'::jsonb, 'private', NOW(), NOW()
   );
 
 -- The instance's cloud PAT: the owner's own credential WITH connections:token.
@@ -263,7 +267,7 @@ echo "✓ CLOUD seeded (public org, consent-only grant, owner PAT w/ connections
 # endpoint). This is also the first proof of the endpoint working.
 PREFLIGHT="$RUN_DIR/preflight.json"
 curl -s -o "$PREFLIGHT" -w '%{http_code}' \
-  -X POST "http://127.0.0.1:$CLOUD_PORT/oauth/connection-token" \
+  -X POST "http://localhost:$CLOUD_PORT/oauth/connection-token" \
   -H "authorization: Bearer $PAT" -H 'content-type: application/json' \
   -d "{\"org\":\"$CLOUD_ORG_SLUG\",\"connector_key\":\"$CONNECTOR_KEY\"}" > "$RUN_DIR/preflight.code" 2>/dev/null || true
 PREFLIGHT_CODE="$(cat "$RUN_DIR/preflight.code" 2>/dev/null || echo)"
@@ -310,7 +314,7 @@ TS
   echo "MANAGED_E2E_DATA_URL=http://127.0.0.1:$MOCK_DATA_PORT/items"
   # The env fallback in resolveCloudCredential: point the managed resolver at
   # the CLOUD instance with the owner's connections:token-scoped PAT.
-  echo "LOBU_CLOUD_URL=http://127.0.0.1:$CLOUD_PORT"
+  echo "LOBU_CLOUD_URL=http://localhost:$CLOUD_PORT"
   echo "LOBU_CLOUD_PAT=$PAT"
 } >> "$LOCAL_PROJ/.env"
 
@@ -318,7 +322,7 @@ echo "▶ booting LOCAL instance…"
 ( cd "$LOCAL_PROJ" \
     && LOBU_CONFIG_DIR="$LOCAL_CFG" LOBU_DATA_DIR="$LOCAL_DATA" DATABASE_URL="file://$LOCAL_DATA" \
        LOBU_PG_PORT="$LOCAL_PG_PORT" ENCRYPTION_KEY="$LOCAL_ENC_KEY" \
-       LOBU_CLOUD_URL="http://127.0.0.1:$CLOUD_PORT" LOBU_CLOUD_PAT="$PAT" \
+       LOBU_CLOUD_URL="http://localhost:$CLOUD_PORT" LOBU_CLOUD_PAT="$PAT" \
        MANAGED_E2E_DATA_URL="http://127.0.0.1:$MOCK_DATA_PORT/items" \
        $LOBU run --port "$LOCAL_PORT" > "$LOCAL_LOG" 2>&1 ) &
 LOCAL_PID=$!
