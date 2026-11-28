@@ -26,6 +26,54 @@ upgrading. Find them with `list_feeds` (`status: "paused"`) and resume each one
 you want with `update_feed` (`status: "active"`). Re-entering credentials
 through a connect link needs at least one enabled feed on the connection.
 
+## [25.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.15.0...lobu-v25.0.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **policies:** custom guardrail checks (kind "judge" and "require-tool") are removed. The migration 20261125210000 aborts if any workspace_guardrails row still has a `kind` key, and it deletes nothing.
+
+### Features
+
+* **connectors:** store author profile photos on X and LinkedIn posts ([#5208](https://github.com/lobu-ai/lobu/issues/5208)) ([734a771](https://github.com/lobu-ai/lobu/commit/734a771c48fccb57b0e2c03afff16a0bcea24bbc))
+* **connectors:** store HN front-page and Reddit home-feed replies as child events ([#5210](https://github.com/lobu-ai/lobu/issues/5210)) ([ab57bf0](https://github.com/lobu-ai/lobu/commit/ab57bf046220c0ca043220a5fc663f7358dcd355))
+* **inference:** support Anthropic Messages in gateway completion ([#5199](https://github.com/lobu-ai/lobu/issues/5199)) ([bec0345](https://github.com/lobu-ai/lobu/commit/bec03454f70f59148b9f4b782a95bc138a97b981))
+* **operations:** carry a failed delegated run's error_code on the connector receipt ([#5227](https://github.com/lobu-ai/lobu/issues/5227)) ([e9058b4](https://github.com/lobu-ai/lobu/commit/e9058b429e752e45902ce86779a872bf12f7d094))
+* **policies:** classifier conditions on rules; delete the LLM judges ([#5207](https://github.com/lobu-ai/lobu/issues/5207)) ([319e531](https://github.com/lobu-ai/lobu/commit/319e5318d6b473a0c2fd9185224e9f21ed136723))
+* **policies:** conditional policy rules (field and scan conditions) ([#5204](https://github.com/lobu-ai/lobu/issues/5204)) ([920016d](https://github.com/lobu-ai/lobu/commit/920016d52555a4ad3089e3854cc9ea324ee77433))
+* **policies:** migrate agent guardrails to hook-scoped policies ([#5220](https://github.com/lobu-ai/lobu/issues/5220)) ([b2ff604](https://github.com/lobu-ai/lobu/commit/b2ff604c154035667938c7d4e357d50762e61ab4))
+* **policies:** open a linked rule for review ([#5235](https://github.com/lobu-ai/lobu/issues/5235)) ([47a2ff0](https://github.com/lobu-ai/lobu/commit/47a2ff0ce7b487a44dd7d009b4da9cef88c73d59))
+* **policies:** prepare hook-scoped guardrails for cutover ([#5219](https://github.com/lobu-ai/lobu/issues/5219)) ([77b4cc8](https://github.com/lobu-ai/lobu/commit/77b4cc8f6b84b87109536198115cbea79b056f17))
+* **providers:** list models live from each provider, filtered by models.dev ([#5193](https://github.com/lobu-ai/lobu/issues/5193)) ([d04b998](https://github.com/lobu-ai/lobu/commit/d04b998d2bb3f39e989c7257c880d027fbeda9f6))
+* **sql:** expose scoped schema discovery ([#5215](https://github.com/lobu-ai/lobu/issues/5215)) ([49d7b28](https://github.com/lobu-ai/lobu/commit/49d7b28423128d1e366fb09b3540b8357aa111d6))
+
+
+### Bug Fixes
+
+* **automations:** keep a script run's typed failure code on its run ([#5232](https://github.com/lobu-ai/lobu/issues/5232)) ([32889b2](https://github.com/lobu-ai/lobu/commit/32889b2484f729f50af032906f001fcf01ed8a22))
+* **ci:** exempt Owletto .github/ from ui-review hosted proof ([#5231](https://github.com/lobu-ai/lobu/issues/5231)) ([df6fb8c](https://github.com/lobu-ai/lobu/commit/df6fb8c05d876d5f263c2aa038f35c4fb1ac4c00))
+* **cli:** install runtime from the npm lock when Bun can't read the bun.lock ([#5202](https://github.com/lobu-ai/lobu/issues/5202)) ([c96e1d6](https://github.com/lobu-ai/lobu/commit/c96e1d699d68cb37b694121806f3b9a6adbb2c85))
+* **cli:** name the latest release's Node requirement in the daemon update notice ([#5203](https://github.com/lobu-ai/lobu/issues/5203)) ([f09fc85](https://github.com/lobu-ai/lobu/commit/f09fc85e54e9377d67123375a148c121d031560f))
+* **connect:** let a lender's grant owner fetch its token without membership ([#5239](https://github.com/lobu-ai/lobu/issues/5239)) ([67b489b](https://github.com/lobu-ai/lobu/commit/67b489bfe8552ab43f5f84364c2944565be10c17))
+* **connectors:** list every pending LinkedIn invitation from a background tab ([#5238](https://github.com/lobu-ai/lobu/issues/5238)) ([da39866](https://github.com/lobu-ai/lobu/commit/da398663923f46859f82040bbcf673b0af1e8368))
+* **connectors:** throw HttpStatusError from every connector HTTP call ([#5233](https://github.com/lobu-ai/lobu/issues/5233)) ([bf2a8b6](https://github.com/lobu-ai/lobu/commit/bf2a8b6beb1ac980faae90bc3770856c88b65a64))
+* **devices:** read a run that wins the timeout race the way the poll loop does ([#5229](https://github.com/lobu-ai/lobu/issues/5229)) ([1f04c89](https://github.com/lobu-ai/lobu/commit/1f04c8934c5ab3e08d5422ce71b36e4a686eb2ea))
+* **devices:** say when a paired device is offline instead of a missing manifest ([#5214](https://github.com/lobu-ai/lobu/issues/5214)) ([e900405](https://github.com/lobu-ai/lobu/commit/e900405a4c9d58f0be308fcea000323e7198c83f))
+* **gchat:** ground turns in the newest authorized thread messages ([#5192](https://github.com/lobu-ai/lobu/issues/5192)) ([0c5fe81](https://github.com/lobu-ai/lobu/commit/0c5fe8125c4bb5612c7a92ded3201959b5d8c7f3))
+* **helm:** honor zero-unavailable rollouts during migrations ([#5201](https://github.com/lobu-ai/lobu/issues/5201)) ([f150b81](https://github.com/lobu-ai/lobu/commit/f150b811273571255872a4b03338150a770824ce))
+* **linkedin:** store only the post and comment body as home-feed text ([#5209](https://github.com/lobu-ai/lobu/issues/5209)) ([ec00576](https://github.com/lobu-ai/lobu/commit/ec0057607510149652f0a84aa268fe4b1bd38b48))
+* **lobu-team:** classify ClickHouse ALIAS_REQUIRED as a caller error ([#5206](https://github.com/lobu-ai/lobu/issues/5206)) ([00a624a](https://github.com/lobu-ai/lobu/commit/00a624a9672052ccb663402d8383a25c4f068fa2))
+* **lobu-team:** classify ClickHouse statement rejections as validation ([#5205](https://github.com/lobu-ai/lobu/issues/5205)) ([d2a543c](https://github.com/lobu-ai/lobu/commit/d2a543cf269ae20d3415fc249b46c65522869a54))
+* **migrations:** run the write policy condition migration without quiescing ([#5211](https://github.com/lobu-ai/lobu/issues/5211)) ([9417945](https://github.com/lobu-ai/lobu/commit/94179458e68d4077afe7b5724f3372b040a5a212))
+* **notifications:** stop text resource ids from failing the inbox read ([#5213](https://github.com/lobu-ai/lobu/issues/5213)) ([d39caad](https://github.com/lobu-ai/lobu/commit/d39caadbb35ce3e7e95ca1eb085dc081d26c194d))
+* **operations:** attribute operation cards to the acting Automation ([#5226](https://github.com/lobu-ai/lobu/issues/5226)) ([dbd8fc8](https://github.com/lobu-ai/lobu/commit/dbd8fc8d2123a03bbad7aa45ebe58ec9ecbc51fc))
+* **operations:** classify operation failures by their typed cause ([#5217](https://github.com/lobu-ai/lobu/issues/5217)) ([2ffe66e](https://github.com/lobu-ai/lobu/commit/2ffe66e5525bc55ed4536a363ae5e41a67875c03))
+* **operations:** follow a read operation's redirect without credentials ([#5222](https://github.com/lobu-ai/lobu/issues/5222)) ([f8ef42d](https://github.com/lobu-ai/lobu/commit/f8ef42d2a905d2fc4d83b4ce3576786dcf6ef5dc))
+* **operations:** let a refused connector action and an MCP tool error name their cause ([#5223](https://github.com/lobu-ai/lobu/issues/5223)) ([6909ad6](https://github.com/lobu-ai/lobu/commit/6909ad6311c428d8c947200e65cf94ce762b85ed))
+* **policies:** address policy rows by a stored scope key ([#5228](https://github.com/lobu-ai/lobu/issues/5228)) ([4989684](https://github.com/lobu-ai/lobu/commit/49896846448b584e70b21718a7ecdb6c8b9c57fd))
+* **runs:** classify a run by the code its failed Chrome step reported ([#5224](https://github.com/lobu-ai/lobu/issues/5224)) ([b2fb6fe](https://github.com/lobu-ai/lobu/commit/b2fb6fe73e9958e8c05e885dfa86ecbb1cc223c9))
+* **runs:** classify agent run failures so every run surface shows catalog text ([#5218](https://github.com/lobu-ai/lobu/issues/5218)) ([861bcef](https://github.com/lobu-ai/lobu/commit/861bcef7b64e0aba7258fa64e6d60e8dee2792ce))
+
 ## [24.15.0](https://github.com/lobu-ai/lobu/compare/lobu-v24.14.0...lobu-v24.15.0) (2026-11-25)
 
 
